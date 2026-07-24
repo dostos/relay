@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="360" viewBox="0 0 960 360" role="img" aria-label="relay architecture">
+  <defs>
+    <style>
+      .box { fill:#0f172a; stroke:#334155; stroke-width:1.5; rx:12; }
+      .box-accent { fill:#042f2e; stroke:#14b8a6; stroke-width:1.75; rx:12; }
+      .title { fill:#f8fafc; font:600 15px ui-sans-serif,system-ui,sans-serif; }
+      .sub { fill:#94a3b8; font:400 12px ui-sans-serif,system-ui,sans-serif; }
+      .label { fill:#5eead4; font:600 11px ui-sans-serif,system-ui,sans-serif; letter-spacing:0.04em; }
+      .arrow { stroke:#64748b; stroke-width:1.75; fill:none; marker-end:url(#m); }
+    </style>
+    <marker id="m" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/>
+    </marker>
+  </defs>
+  <rect width="960" height="360" fill="#020617"/>
+
+  <text x="40" y="36" class="label">LOCAL</text>
+  <rect x="40" y="52" width="200" height="100" class="box"/>
+  <text x="56" y="84" class="title">cmux</text>
+  <text x="56" y="108" class="sub">workspaces · panes · tabs</text>
+  <text x="56" y="128" class="sub">Vault resume hooks</text>
+
+  <rect x="280" y="52" width="220" height="100" class="box-accent"/>
+  <text x="296" y="84" class="title">relay CLI</text>
+  <text x="296" y="108" class="sub">sessions · handoffs · agent</text>
+  <text x="296" y="128" class="sub">viz present · resume</text>
+
+  <text x="560" y="36" class="label">REMOTE</text>
+  <rect x="560" y="52" width="160" height="100" class="box"/>
+  <text x="576" y="84" class="title">tmux</text>
+  <text x="576" y="108" class="sub">durable panes</text>
+  <text x="576" y="128" class="sub">survive disconnect</text>
+
+  <rect x="760" y="52" width="160" height="100" class="box"/>
+  <text x="776" y="84" class="title">relayd</text>
+  <text x="776" y="108" class="sub">Unix socket only</text>
+  <text x="776" y="128" class="sub">idle / exit events</text>
+
+  <path class="arrow" d="M240,102 H275"/>
+  <path class="arrow" d="M500,102 H555"/>
+  <path class="arrow" d="M720,102 H755"/>
+
+  <rect x="280" y="200" width="400" height="110" class="box"/>
+  <text x="296" y="232" class="title">What you keep when cmux quits</text>
+  <text x="296" y="258" class="sub">Remote tmux + relayd keep running. On reopen, cmux Vault re-runs</text>
+  <text x="296" y="278" class="sub">relay resume --session &lt;name&gt;  panes come back attached, not blank.</text>
+  <text x="296" y="298" class="sub">Teal Æ RELAY markers show which tabs are relay-managed.</text>
+</svg>
