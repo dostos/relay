@@ -196,6 +196,11 @@ func (s *SessionService) Destroy(ctx context.Context, id string, keepRemote bool
 			return err
 		}
 		_ = s.Persist.Destroy(ctx, t, sess.Persist)
+		// Intentional teardown — cmux must not treat this as a reconnectable drop.
+		MarkResumeCleaned(sess.Persist.Name, "destroyed")
+	} else {
+		// Local unbound; remote kept → disconnected/resumable.
+		RememberResume(sess)
 	}
 	return s.Reg.DeleteSession(id)
 }

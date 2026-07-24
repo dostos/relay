@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -218,7 +219,8 @@ Visualization (optional cmux adapter):
 
 cmux session restore (survive cmux quit / Mac reboot):
   relay install-cmux-restore          Register vault agent (run by install.sh)
-  relay resume --session NAME [--cwd DIR]   Target of cmux resumeCommand
+  relay resume --session NAME [--cwd DIR]   Re-attach if disconnected (refuses cleaned)
+  relay resume list                         live | disconnected | cleaned
 
   relay doctor
 `)
@@ -1031,6 +1033,14 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 }
 
 func (a *App) cmdResume(ctx context.Context, args []string) int {
+	if len(args) > 0 && args[0] == "list" {
+		list, err := a.Sessions.ListResumeStatus()
+		if err != nil {
+			return a.fail(err)
+		}
+		a.JSON = true
+		return a.errOut(a.out(map[string]any{"ok": true, "sessions": list}))
+	}
 	var session, cwd string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -1044,16 +1054,23 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 			if i < len(args) {
 				cwd = args[i]
 			}
+		case "list":
+			return a.cmdResume(ctx, []string{"list"})
 		default:
 			return a.fail(rejectUnknownFlag(args[i]))
 		}
 	}
 	if session == "" {
-		return a.fail(fmt.Errorf("usage: relay resume --session NAME [--cwd DIR]"))
+		return a.fail(fmt.Errorf("usage: relay resume --session NAME [--cwd DIR]  |  relay resume list"))
 	}
 	if err := a.Sessions.Resume(ctx, session, cwd); err != nil {
-		fmt.Fprintf(os.Stderr, "relay resume: %v\n", err)
-		fmt.Fprintf(os.Stderr, "relay resume: falling back to interactive shell\n")
+		msg := core.FormatResumeError(err)
+		fmt.Fprintf(os.Stderr, "relay resume: %s\n", msg)
+		// Cleaned = intentional; do not open a fake shell (that hid the bug before).
+		if errors.Is(err, core.ErrResumeCleaned) {
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "relay resume: falling back to interactive shell (unknown/missing binding)\n")
 		shell := os.Getenv("SHELL")
 		if shell == "" {
 			shell = "/bin/bash"

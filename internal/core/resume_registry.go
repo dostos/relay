@@ -2,24 +2,38 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/dostos/relay/internal/ports"
 	"github.com/dostos/relay/internal/shellquote"
 )
 
-// ResumeEntry maps a tmux persist name → host for cmux Vault resume.
-// Survives session destroy so panes can re-attach after cmux restart.
+// ResumeState distinguishes intentional teardown from transport/cmux disconnect.
+type ResumeState string
+
+const (
+	// ResumeStateResumable: remote work may still be alive; cmux/SSH drop — OK to resume.
+	ResumeStateResumable ResumeState = "resumable"
+	// ResumeStateCleaned: intentional destroy/finalize — do NOT resume or recreate.
+	ResumeStateCleaned ResumeState = "cleaned"
+)
+
+// ErrResumeCleaned means the session was intentionally torn down.
+var ErrResumeCleaned = errors.New("session was cleaned (finalized/destroyed); not a disconnect")
+
+// ResumeEntry maps a tmux persist name → host + lifecycle for cmux Vault resume.
 type ResumeEntry struct {
-	HostID    string    `json:"host_id"`
-	SessionID string    `json:"session_id,omitempty"`
-	RemoteCWD string    `json:"remote_cwd,omitempty"`
-	RepoRef   string    `json:"repo_ref,omitempty"`
-	UpdatedAt time.Time `json:"updated_at"`
+	HostID    string      `json:"host_id"`
+	SessionID string      `json:"session_id,omitempty"`
+	RemoteCWD string      `json:"remote_cwd,omitempty"`
+	RepoRef   string      `json:"repo_ref,omitempty"`
+	State     ResumeState `json:"state"`
+	Reason    string      `json:"reason,omitempty"`
+	UpdatedAt time.Time   `json:"updated_at"`
 }
 
 type resumeRegistryFile struct {
@@ -49,11 +63,17 @@ func loadResumeRegistry() (*resumeRegistryFile, error) {
 	if f.Entries == nil {
 		f.Entries = map[string]ResumeEntry{}
 	}
+	// Migrate legacy entries (no state) → resumable.
+	for k, e := range f.Entries {
+		if e.State == "" {
+			e.State = ResumeStateResumable
+			f.Entries[k] = e
+		}
+	}
 	return &f, nil
 }
 
 func saveResumeRegistry(f *resumeRegistryFile) error {
-	// prune > 60 days
 	cutoff := time.Now().UTC().Add(-60 * 24 * time.Hour)
 	for k, e := range f.Entries {
 		if e.UpdatedAt.Before(cutoff) {
@@ -71,9 +91,33 @@ func saveResumeRegistry(f *resumeRegistryFile) error {
 	return os.Rename(tmp, ResumeRegistryPath())
 }
 
-// RememberResume writes/updates the durable resume binding for a session.
-// Best-effort: never fails the caller’s main path.
+// RememberResume marks a session resumable (create/present/disconnect path).
 func RememberResume(sess *Session) {
+	upsertResume(sess, ResumeStateResumable, "active_or_disconnect")
+}
+
+// MarkResumeCleaned records intentional teardown — resume must refuse.
+func MarkResumeCleaned(persistName, reason string) {
+	if err := shellquote.ValidateSessionName(persistName); err != nil {
+		return
+	}
+	f, err := loadResumeRegistry()
+	if err != nil {
+		return
+	}
+	e := f.Entries[persistName]
+	e.State = ResumeStateCleaned
+	if reason == "" {
+		reason = "destroyed"
+	}
+	e.Reason = reason
+	e.UpdatedAt = time.Now().UTC()
+	// keep host/cwd for diagnostics
+	f.Entries[persistName] = e
+	_ = saveResumeRegistry(f)
+}
+
+func upsertResume(sess *Session, state ResumeState, reason string) {
 	if sess == nil || sess.Persist.Name == "" || sess.HostID == "" {
 		return
 	}
@@ -89,13 +133,15 @@ func RememberResume(sess *Session) {
 		SessionID: sess.ID,
 		RemoteCWD: sess.RemoteCWD,
 		RepoRef:   sess.RepoRef,
+		State:     state,
+		Reason:    reason,
 		UpdatedAt: time.Now().UTC(),
 	}
 	_ = saveResumeRegistry(f)
 }
 
-// LookupResume finds host binding for a persist name (cwd disambiguates collisions).
-func LookupResume(persistName, cwd string) (*ResumeEntry, error) {
+// LookupResume finds a registry entry (any state).
+func LookupResume(persistName string) (*ResumeEntry, error) {
 	if err := shellquote.ValidateSessionName(persistName); err != nil {
 		return nil, err
 	}
@@ -107,28 +153,63 @@ func LookupResume(persistName, cwd string) (*ResumeEntry, error) {
 	if !ok {
 		return nil, fmt.Errorf("persist name %q not in resume registry", persistName)
 	}
-	if cwd != "" && e.RepoRef != "" {
-		cwdAbs, _ := filepath.Abs(cwd)
-		if !(strings.HasPrefix(cwdAbs, e.RepoRef) || strings.Contains(e.RepoRef, cwdAbs)) {
-			// still accept — registry is 1:1 by persist name; cwd is soft preference only
-		}
-	}
 	cp := e
 	return &cp, nil
 }
 
-// ResolveResumeTarget returns host + persist handle for attach, preferring live
-// session records then the durable resume registry.
-func (r *Registry) ResolveResumeTarget(persistName, cwd string) (hostID, remoteCWD string, h ports.PersistHandle, err error) {
-	if sess, err := r.FindByPersistName(persistName, cwd); err == nil {
-		return sess.HostID, sess.RemoteCWD, sess.Persist, nil
+// ResumePresence is the agent-facing classification.
+type ResumePresence string
+
+const (
+	// PresenceLive: local session record exists (likely still connected from this machine).
+	PresenceLive ResumePresence = "live"
+	// PresenceDisconnected: no live local record, but resumable — cmux/SSH drop; remote may be up.
+	PresenceDisconnected ResumePresence = "disconnected"
+	// PresenceCleaned: intentional teardown; do not resume.
+	PresenceCleaned ResumePresence = "cleaned"
+	// PresenceUnknown: never seen on this machine.
+	PresenceUnknown ResumePresence = "unknown"
+)
+
+// ClassifyResume returns live | disconnected | cleaned | unknown for a persist name.
+func (r *Registry) ClassifyResume(persistName string) (ResumePresence, *ResumeEntry, *Session) {
+	var live *Session
+	if s, err := r.FindByPersistName(persistName, ""); err == nil {
+		live = s
 	}
-	e, err := LookupResume(persistName, cwd)
-	if err != nil {
-		return "", "", ports.PersistHandle{}, fmt.Errorf(
-			"no resume binding for %q (not in live sessions or %s) — create/present a session on this machine first",
+	e, _ := LookupResume(persistName)
+	// Live local record wins (e.g. name reused after a prior clean).
+	if live != nil {
+		return PresenceLive, e, live
+	}
+	if e != nil && e.State == ResumeStateCleaned {
+		return PresenceCleaned, e, nil
+	}
+	if e != nil && e.State == ResumeStateResumable {
+		return PresenceDisconnected, e, nil
+	}
+	return PresenceUnknown, e, nil
+}
+
+// ResolveResumeTarget returns host + persist handle for attach.
+// Cleaned sessions error with ErrResumeCleaned (do not recreate remote).
+func (r *Registry) ResolveResumeTarget(persistName, cwd string) (hostID, remoteCWD string, h ports.PersistHandle, presence ResumePresence, err error) {
+	presence, e, live := r.ClassifyResume(persistName)
+	switch presence {
+	case PresenceCleaned:
+		reason := "cleaned"
+		if e != nil && e.Reason != "" {
+			reason = e.Reason
+		}
+		return "", "", ports.PersistHandle{}, presence, fmt.Errorf("%w (%s)", ErrResumeCleaned, reason)
+	case PresenceLive:
+		return live.HostID, live.RemoteCWD, live.Persist, presence, nil
+	case PresenceDisconnected:
+		return e.HostID, e.RemoteCWD, ports.PersistHandle{Kind: "tmux", Name: persistName}, presence, nil
+	default:
+		return "", "", ports.PersistHandle{}, presence, fmt.Errorf(
+			"unknown session %q — not live and not in resume registry (%s)",
 			persistName, ResumeRegistryPath(),
 		)
 	}
-	return e.HostID, e.RemoteCWD, ports.PersistHandle{Kind: "tmux", Name: persistName}, nil
 }

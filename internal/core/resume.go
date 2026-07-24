@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -30,13 +31,11 @@ func RelayBin() string {
 }
 
 // ResumeLaunchCmd is the restorable pane command for cmux Vault / viz save.
-// Argv always carries --session <persistName> so cmux can extract a session id.
 func ResumeLaunchCmd(persistName string) string {
 	return fmt.Sprintf("%s resume --session %s", RelayBin(), persistName)
 }
 
 // FindByPersistName returns the best matching local session for a tmux persist name.
-// When cwd is set, prefers a session whose RepoRef contains that cwd.
 func (r *Registry) FindByPersistName(persistName, cwd string) (*Session, error) {
 	if err := shellquote.ValidateSessionName(persistName); err != nil {
 		return nil, err
@@ -73,50 +72,107 @@ func (r *Registry) FindByPersistName(persistName, cwd string) (*Session, error) 
 	return &cp, nil
 }
 
-// Resume re-attaches to a still-alive remote tmux session (cmux Vault target).
-// Uses live session records first, then the durable resume registry (survives destroy).
+// Resume re-attaches after cmux/SSH disconnect. Refuses cleaned sessions.
 func (s *SessionService) Resume(ctx context.Context, persistName, cwd string) error {
 	if cwd != "" {
 		_ = os.Chdir(cwd)
 	}
-	hostID, remoteCWD, handle, err := s.Reg.ResolveResumeTarget(persistName, cwd)
+	hostID, remoteCWD, handle, presence, err := s.Reg.ResolveResumeTarget(persistName, cwd)
 	if err != nil {
+		return err
+	}
+	if presence == PresenceCleaned {
 		return err
 	}
 	t, err := s.NewTransport(hostID)
 	if err != nil {
 		return err
 	}
-	// Ensure registry stays warm for the next cmux restart.
-	RememberResume(&Session{
-		ID:        "",
-		HostID:    hostID,
-		RemoteCWD: remoteCWD,
-		Persist:   handle,
-		RepoRef:   cwd,
-		UpdatedAt: time.Now().UTC(),
-	})
-	// Rehydrate a live local session record if missing (so agent/list still work).
-	if _, err := s.Reg.FindByPersistName(persistName, cwd); err != nil {
+	// Rehydrate live local record when reconnecting a disconnect.
+	if presence == PresenceDisconnected {
 		now := time.Now().UTC()
-		_ = s.Reg.PutSession(&Session{
+		sess := &Session{
 			ID:        newID("sess"),
 			HostID:    hostID,
 			RemoteCWD: remoteCWD,
 			Persist:   handle,
-			RepoRef:   firstNonEmpty(cwd, ""),
+			RepoRef:   cwd,
 			Labels:    map[string]string{"role": "resumed"},
 			CreatedAt: now,
 			UpdatedAt: now,
-		})
+		}
+		_ = s.Reg.PutSession(sess)
+		RememberResume(sess)
 	}
 	cmd := s.Persist.AttachCommand(handle, remoteCWD)
 	return t.Interactive(ctx, cmd)
 }
 
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
+// ResumeInfo is one row for `relay resume list`.
+type ResumeInfo struct {
+	PersistName string         `json:"persist_name"`
+	Presence    ResumePresence `json:"presence"` // live|disconnected|cleaned|unknown
+	HostID      string         `json:"host_id,omitempty"`
+	SessionID   string         `json:"session_id,omitempty"`
+	RemoteCWD   string         `json:"remote_cwd,omitempty"`
+	Reason      string         `json:"reason,omitempty"`
+	UpdatedAt   time.Time      `json:"updated_at,omitempty"`
+}
+
+// ListResumeStatus merges live sessions + registry for operators/agents.
+func (s *SessionService) ListResumeStatus() ([]ResumeInfo, error) {
+	f, err := loadResumeRegistry()
+	if err != nil {
+		return nil, err
 	}
-	return b
+	live, err := s.Reg.ListSessions()
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var out []ResumeInfo
+	for _, sess := range live {
+		name := sess.Persist.Name
+		seen[name] = true
+		presence, e, _ := s.Reg.ClassifyResume(name)
+		info := ResumeInfo{
+			PersistName: name,
+			Presence:    presence,
+			HostID:      sess.HostID,
+			SessionID:   sess.ID,
+			RemoteCWD:   sess.RemoteCWD,
+		}
+		if e != nil {
+			info.Reason = e.Reason
+			info.UpdatedAt = e.UpdatedAt
+		}
+		out = append(out, info)
+	}
+	for name, e := range f.Entries {
+		if seen[name] {
+			continue
+		}
+		presence, _, _ := s.Reg.ClassifyResume(name)
+		out = append(out, ResumeInfo{
+			PersistName: name,
+			Presence:    presence,
+			HostID:      e.HostID,
+			SessionID:   e.SessionID,
+			RemoteCWD:   e.RemoteCWD,
+			Reason:      e.Reason,
+			UpdatedAt:   e.UpdatedAt,
+		})
+	}
+	return out, nil
+}
+
+// FormatResumeError makes cleaned vs unknown clear for CLI (no shell fallback on cleaned).
+func FormatResumeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, ErrResumeCleaned) {
+		return err.Error() + " — close the cmux pane; do not treat this as a disconnect"
+	}
+	return err.Error()
 }

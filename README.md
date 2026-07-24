@@ -79,6 +79,15 @@ relay resume --session NAME        # one pane (Vault resumeCommand target)
 
 Approve **relay** once under cmux Settings → Terminal → Resume Commands for hands-off auto-restore. Pane launch argv is always `relay resume --session <persistName>` (not raw `ssh`), so cmux can extract the session id.
 
+Resume presence (see `relay resume list`):
+
+| presence | meaning | resume? |
+|----------|---------|---------|
+| `live` | local session record exists | yes (already tracked) |
+| `disconnected` | cmux/SSH dropped; remote may still be up | yes |
+| `cleaned` | intentional destroy/finalize | **no** — close the pane |
+| `unknown` | never created on this machine | no |
+
 ## Adapters
 
 Core never imports SSH/tmux/cmux quirks into business logic. See `internal/ports` and:
