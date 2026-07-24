@@ -15,9 +15,18 @@ One CLI for humans and local agents (`--json`).
 
 ```bash
 cd ~/dev/relay
-./install.sh          # → ~/.local/bin/relay + skill symlinks
+./install.sh          # → ~/.local/bin/relay{,d} + skill symlinks
 relay doctor --json
 ```
+
+## Skills (in-repo)
+
+Agent skills are versioned here under [`skills/`](skills/):
+
+- `skills/relay-sessions`
+- `skills/relay-handoff`
+
+`./install.sh` symlinks them into `~/.claude/skills` (and `~/.codex/skills` when Codex is present). Do not copy skills out of this repo — edit here and re-run `./install.sh`.
 
 ## New machine
 
