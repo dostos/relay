@@ -45,7 +45,10 @@ type Persistence interface {
 
 // Layout describes how to present a session in a visual surface.
 type Layout struct {
-	Mode string // "pair" | "remote" | "none"
+	Mode      string // "pair" | "remote" | "none"
+	Workspace string // optional cmux workspace ref (e.g. workspace:2)
+	Pane      string // optional cmux pane ref — split relative to this pane
+	Tab       bool   // if true with Pane set, stack as a tab; default is side-by-side split
 }
 
 // Viz presents sessions to a human. cmux is the default; may be a no-op.
@@ -61,6 +64,9 @@ type Viz interface {
 	SaveRestorable(ctx context.Context) (saved int, err error)
 	// RestoreSaved re-attaches saved panes after cmux restart (manual path).
 	RestoreSaved(ctx context.Context) (restored int, err error)
+	// BrandLabels refreshes ◆ RELAY · <project> tab titles + workspace pills.
+	// labels maps session_id → project display name.
+	BrandLabels(ctx context.Context, labels map[string]string) error
 }
 
 // Coord is the remote event/coordination bus (default: always-on relayd over SSH).

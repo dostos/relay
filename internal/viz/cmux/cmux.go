@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -67,29 +68,28 @@ func (v *Viz) Present(ctx context.Context, sessionID, attachCmd string, layout p
 	if b, ok := v.bindings[sessionID]; ok && b.Surface != "" {
 		v.mu.Unlock()
 		_ = v.focusSurface(ctx, b)
+		_ = v.brandSurface(ctx, b.Surface, extractSessionFlag(attachCmd))
 		return b.Surface, nil
 	}
 	v.mu.Unlock()
 
 	before, _ := v.listSurfaces(ctx)
-	dir := "right"
-	if layout.Mode == "pair" {
-		dir = "right"
-	}
-	if _, err := v.run(ctx, "new-split", dir, "--focus", "true"); err != nil {
-		return "", err
-	}
-	after, err := v.listSurfaces(ctx)
+	surface, pane, err := v.openSurface(ctx, layout)
 	if err != nil {
 		return "", err
 	}
-	surface, pane := diffNew(before, after)
 	if surface == "" {
-		// Fallback: focused surface from identify
+		after, err := v.listSurfaces(ctx)
+		if err != nil {
+			return "", err
+		}
+		surface, pane = diffNew(before, after)
+	}
+	if surface == "" {
 		surface, pane, _ = v.focused(ctx)
 	}
 	if surface == "" {
-		return "", fmt.Errorf("could not determine new cmux surface after split")
+		return "", fmt.Errorf("could not determine new cmux surface after present")
 	}
 	if _, err := v.run(ctx, "send", "--surface", surface, "--", attachCmd+"\n"); err != nil {
 		return "", err
@@ -97,13 +97,15 @@ func (v *Viz) Present(ctx context.Context, sessionID, attachCmd string, layout p
 	// Best-effort: stamp cmux resume binding so restart can re-run the same command.
 	sessName := extractSessionFlag(attachCmd)
 	if sessName != "" {
+		title := brandTitle(sessName)
 		_, _ = v.run(ctx, "surface", "resume", "set",
 			"--surface", surface,
 			"--kind", "relay",
-			"--name", "relay: "+sessName,
+			"--name", title,
 			"--checkpoint", sessName,
 			"--", attachCmd,
 		)
+		_ = v.brandSurface(ctx, surface, sessName)
 	}
 	b := binding{Surface: surface, Pane: pane, Attach: attachCmd}
 	v.mu.Lock()
@@ -111,6 +113,230 @@ func (v *Viz) Present(ctx context.Context, sessionID, attachCmd string, layout p
 	v.mu.Unlock()
 	_ = v.persistBinding(sessionID, b)
 	return surface, nil
+}
+
+func (v *Viz) openSurface(ctx context.Context, layout ports.Layout) (surface, pane string, err error) {
+	// Stacked tabs only when explicitly requested (--tab). Default: side-by-side split.
+	if layout.Tab && layout.Pane != "" {
+		args := []string{"new-surface", "--type", "terminal", "--pane", layout.Pane, "--focus", "true"}
+		if layout.Workspace != "" {
+			args = append(args, "--workspace", layout.Workspace)
+		}
+		out, err := v.run(ctx, args...)
+		if err != nil {
+			return "", "", err
+		}
+		surface, pane = parseNewSurfaceRefs(out, layout.Pane)
+		return surface, pane, nil
+	}
+	dir := "right"
+	args := []string{"new-split", dir, "--focus", "true"}
+	if layout.Workspace != "" {
+		args = append(args, "--workspace", layout.Workspace)
+	}
+	if layout.Pane != "" {
+		if surf := v.selectedSurfaceInPane(ctx, layout.Workspace, layout.Pane); surf != "" {
+			args = append(args, "--surface", surf)
+		}
+	}
+	if _, err := v.run(ctx, args...); err != nil {
+		return "", "", err
+	}
+	return "", "", nil
+}
+
+func (v *Viz) selectedSurfaceInPane(ctx context.Context, workspace, pane string) string {
+	args := []string{"list-panes", "--json"}
+	if workspace != "" {
+		args = append(args, "--workspace", workspace)
+	}
+	out, err := v.run(ctx, args...)
+	if err != nil {
+		return ""
+	}
+	var pj panesJSON
+	if json.Unmarshal([]byte(out), &pj) != nil {
+		return ""
+	}
+	for _, p := range pj.Panes {
+		if p.Ref != pane {
+			continue
+		}
+		if p.SelectedSurfaceRef != "" {
+			return p.SelectedSurfaceRef
+		}
+		if len(p.SurfaceRefs) > 0 {
+			return p.SurfaceRefs[0]
+		}
+	}
+	return ""
+}
+
+func parseNewSurfaceRefs(out, fallbackPane string) (surface, pane string) {
+	pane = fallbackPane
+	for _, field := range strings.Fields(out) {
+		switch {
+		case strings.HasPrefix(field, "surface:"):
+			surface = field
+		case strings.HasPrefix(field, "pane:"):
+			pane = field
+		}
+	}
+	return surface, pane
+}
+
+func brandTitle(persistName string) string {
+	name := strings.TrimPrefix(strings.TrimSpace(persistName), "dostos-workspace-")
+	if name == "" {
+		name = persistName
+	}
+	return "◆ RELAY · " + name
+}
+
+func projectLabel(persistName string) string {
+	name := strings.TrimPrefix(strings.TrimSpace(persistName), "dostos-workspace-")
+	if name == "" {
+		return persistName
+	}
+	return name
+}
+
+func (v *Viz) brandSurface(ctx context.Context, surface, persistName string) error {
+	if surface == "" || persistName == "" {
+		return nil
+	}
+	title := brandTitle(persistName)
+	_, err := v.run(ctx, "rename-tab", "--surface", surface, "--title", title)
+	if err == nil {
+		_, _ = v.run(ctx, "tab-action", "--surface", surface, "--action", "pin")
+	}
+	return err
+}
+
+// BrandLabels renames bound tabs to ◆ RELAY · <project> and refreshes workspace
+// status pills / descriptions to ◆ RELAY · a, b (comma-separated projects).
+func (v *Viz) BrandLabels(ctx context.Context, labels map[string]string) error {
+	type hit struct {
+		project string
+	}
+	byWS := map[string][]hit{}
+	for sessionID, project := range labels {
+		b, err := v.lookup(sessionID)
+		if err != nil || b.Surface == "" {
+			continue
+		}
+		persist := extractSessionFlag(b.Attach)
+		if persist == "" {
+			persist = project
+		}
+		_ = v.brandSurface(ctx, b.Surface, persist)
+		ws := v.workspaceOfSurface(ctx, b.Surface)
+		if ws == "" {
+			continue
+		}
+		byWS[ws] = append(byWS[ws], hit{project: projectLabel(persist)})
+	}
+	for ws, hits := range byWS {
+		seen := map[string]bool{}
+		var projects []string
+		add := func(p string) {
+			if p == "" || seen[p] {
+				return
+			}
+			seen[p] = true
+			projects = append(projects, p)
+		}
+		for _, h := range hits {
+			add(h.project)
+		}
+		// Merge any other ◆ RELAY tabs already in this workspace (partial updates).
+		for _, p := range v.relayProjectsInWorkspace(ctx, ws) {
+			add(p)
+		}
+		if len(projects) == 0 {
+			continue
+		}
+		sort.Strings(projects)
+		status := "◆ RELAY · " + strings.Join(projects, ", ")
+		_, _ = v.run(ctx, "set-status", "relay", status, "--color", "#14b8a6", "--priority", "90", "--workspace", ws)
+		_, _ = v.run(ctx, "workspace-action", "--workspace", ws, "--action", "set-description", "--description", status)
+	}
+	return nil
+}
+
+func (v *Viz) relayProjectsInWorkspace(ctx context.Context, workspace string) []string {
+	out, err := v.run(ctx, "tree", "--json")
+	if err != nil {
+		return nil
+	}
+	var root struct {
+		Windows []struct {
+			Workspaces []struct {
+				Ref   string `json:"ref"`
+				Panes []struct {
+					Surfaces []struct {
+						Ref   string `json:"ref"`
+						Title string `json:"title"`
+					} `json:"surfaces"`
+				} `json:"panes"`
+			} `json:"workspaces"`
+		} `json:"windows"`
+	}
+	if json.Unmarshal([]byte(out), &root) != nil {
+		return nil
+	}
+	const prefix = "◆ RELAY · "
+	var projects []string
+	for _, w := range root.Windows {
+		for _, ws := range w.Workspaces {
+			if ws.Ref != workspace {
+				continue
+			}
+			for _, p := range ws.Panes {
+				for _, s := range p.Surfaces {
+					title := strings.TrimSpace(s.Title)
+					if strings.HasPrefix(title, prefix) {
+						projects = append(projects, strings.TrimSpace(strings.TrimPrefix(title, prefix)))
+					}
+				}
+			}
+		}
+	}
+	return projects
+}
+
+func (v *Viz) workspaceOfSurface(ctx context.Context, surface string) string {
+	out, err := v.run(ctx, "tree", "--json")
+	if err != nil {
+		return ""
+	}
+	var root struct {
+		Windows []struct {
+			Workspaces []struct {
+				Ref   string `json:"ref"`
+				Panes []struct {
+					Surfaces []struct {
+						Ref string `json:"ref"`
+					} `json:"surfaces"`
+				} `json:"panes"`
+			} `json:"workspaces"`
+		} `json:"windows"`
+	}
+	if json.Unmarshal([]byte(out), &root) != nil {
+		return ""
+	}
+	for _, w := range root.Windows {
+		for _, ws := range w.Workspaces {
+			for _, p := range ws.Panes {
+				for _, s := range p.Surfaces {
+					if s.Ref == surface {
+						return ws.Ref
+					}
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func extractSessionFlag(cmd string) string {
@@ -199,10 +425,11 @@ func (v *Viz) SaveRestorable(ctx context.Context) (int, error) {
 		if _, err := v.run(ctx, "surface", "resume", "set",
 			"--surface", r.ref,
 			"--kind", "relay",
-			"--name", "relay: "+name,
+			"--name", brandTitle(name),
 			"--checkpoint", name,
 			"--", r.cmd,
 		); err == nil {
+			_ = v.brandSurface(ctx, r.ref, name)
 			saved++
 		}
 	}

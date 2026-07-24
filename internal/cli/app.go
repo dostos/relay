@@ -212,7 +212,9 @@ Events (via always-on relayd on the host):
   relay events emit --handoff ID --kind KIND
 
 Visualization (optional cmux adapter):
-  relay viz present SESSION_ID
+  relay viz present SESSION_ID [--workspace WS] [--pane PANE] [--tab]
+                                      Default: side-by-side split. --tab stacks in PANE.
+  relay viz brand                     Refresh ◆ RELAY · <project> tabs + workspace pills
   relay viz focus SESSION_ID
   relay viz close SESSION_ID
   relay viz layout
@@ -1028,15 +1030,55 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 		if err != nil {
 			return a.fail(err)
 		}
+		layout := ports.Layout{Mode: "remote"}
+		for i := 2; i < len(args); i++ {
+			switch args[i] {
+			case "--workspace":
+				if i+1 >= len(args) {
+					return a.fail(fmt.Errorf("--workspace requires a value"))
+				}
+				layout.Workspace = args[i+1]
+				i++
+			case "--pane":
+				if i+1 >= len(args) {
+					return a.fail(fmt.Errorf("--pane requires a value"))
+				}
+				layout.Pane = args[i+1]
+				i++
+			case "--tab":
+				layout.Tab = true
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
+			}
+		}
+		if layout.Tab && layout.Pane == "" {
+			return a.fail(fmt.Errorf("--tab requires --pane"))
+		}
 		launch := core.ResumeLaunchCmd(sess.Persist.Name)
-		ref, err := a.Viz.Present(ctx, args[1], launch, ports.Layout{Mode: "remote"})
+		ref, err := a.Viz.Present(ctx, args[1], launch, layout)
 		if err != nil {
 			return a.fail(err)
 		}
 		sess.VizSurfaceRef = ref
 		_ = a.Reg.PutSession(sess)
 		core.RememberResume(sess)
-		return a.errOut(a.out(map[string]string{"session_id": args[1], "surface": ref, "launch": launch}))
+		_ = a.applySessionChrome(ctx, sess)
+		_ = a.brandAll(ctx)
+		return a.errOut(a.out(map[string]string{
+			"session_id": args[1],
+			"surface":    ref,
+			"launch":     launch,
+			"brand":      core.BrandTitle(sess.Persist.Name),
+		}))
+	case "brand":
+		if err := a.brandAll(ctx); err != nil {
+			return a.fail(err)
+		}
+		list, _ := a.Sessions.List()
+		for _, s := range list {
+			_ = a.applySessionChrome(ctx, s)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "sessions": len(list)}))
 	case "focus":
 		if len(args) < 2 {
 			return a.fail(fmt.Errorf("session id required"))
@@ -1178,4 +1220,30 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 	return a.errOut(a.out(map[string]any{"checks": checks, "adapters": map[string]string{
 		"transport": "ssh", "persistence": "tmux", "viz": "cmux", "coord": "relayd",
 	}}))
+}
+
+func (a *App) brandAll(ctx context.Context) error {
+	if a.Viz == nil {
+		return nil
+	}
+	list, err := a.Sessions.List()
+	if err != nil {
+		return err
+	}
+	labels := make(map[string]string, len(list))
+	for _, s := range list {
+		labels[s.ID] = core.ProjectLabel(s.Persist.Name)
+	}
+	return a.Viz.BrandLabels(ctx, labels)
+}
+
+func (a *App) applySessionChrome(ctx context.Context, sess *core.Session) error {
+	if sess == nil || a.tf == nil {
+		return nil
+	}
+	t, err := a.tf(sess.HostID)
+	if err != nil {
+		return err
+	}
+	return tmux.ApplyChrome(ctx, t, sess.Persist)
 }
