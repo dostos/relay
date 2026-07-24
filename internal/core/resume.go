@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/dostos/relay/internal/shellquote"
 )
@@ -51,7 +52,7 @@ func (r *Registry) FindByPersistName(persistName, cwd string) (*Session, error) 
 		}
 	}
 	if len(matches) == 0 {
-		return nil, fmt.Errorf("no local session with persist name %q — was it created on this machine?", persistName)
+		return nil, fmt.Errorf("no live session with persist name %q", persistName)
 	}
 	if cwd != "" {
 		cwdAbs, _ := filepath.Abs(cwd)
@@ -62,7 +63,6 @@ func (r *Registry) FindByPersistName(persistName, cwd string) (*Session, error) 
 			}
 		}
 	}
-	// most recently updated
 	best := matches[0]
 	for _, s := range matches[1:] {
 		if s.UpdatedAt.After(best.UpdatedAt) {
@@ -74,18 +74,49 @@ func (r *Registry) FindByPersistName(persistName, cwd string) (*Session, error) 
 }
 
 // Resume re-attaches to a still-alive remote tmux session (cmux Vault target).
+// Uses live session records first, then the durable resume registry (survives destroy).
 func (s *SessionService) Resume(ctx context.Context, persistName, cwd string) error {
 	if cwd != "" {
 		_ = os.Chdir(cwd)
 	}
-	sess, err := s.Reg.FindByPersistName(persistName, cwd)
+	hostID, remoteCWD, handle, err := s.Reg.ResolveResumeTarget(persistName, cwd)
 	if err != nil {
 		return err
 	}
-	t, err := s.transportFor(sess)
+	t, err := s.NewTransport(hostID)
 	if err != nil {
 		return err
 	}
-	cmd := s.Persist.AttachCommand(sess.Persist, sess.RemoteCWD)
+	// Ensure registry stays warm for the next cmux restart.
+	RememberResume(&Session{
+		ID:        "",
+		HostID:    hostID,
+		RemoteCWD: remoteCWD,
+		Persist:   handle,
+		RepoRef:   cwd,
+		UpdatedAt: time.Now().UTC(),
+	})
+	// Rehydrate a live local session record if missing (so agent/list still work).
+	if _, err := s.Reg.FindByPersistName(persistName, cwd); err != nil {
+		now := time.Now().UTC()
+		_ = s.Reg.PutSession(&Session{
+			ID:        newID("sess"),
+			HostID:    hostID,
+			RemoteCWD: remoteCWD,
+			Persist:   handle,
+			RepoRef:   firstNonEmpty(cwd, ""),
+			Labels:    map[string]string{"role": "resumed"},
+			CreatedAt: now,
+			UpdatedAt: now,
+		})
+	}
+	cmd := s.Persist.AttachCommand(handle, remoteCWD)
 	return t.Interactive(ctx, cmd)
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }

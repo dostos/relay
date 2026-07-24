@@ -155,6 +155,7 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 			pane = true
 			sess.VizSurfaceRef = ref
 			_ = h.Sessions.Reg.PutSession(sess)
+			RememberResume(sess)
 		}
 	}
 

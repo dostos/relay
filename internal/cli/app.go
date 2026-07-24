@@ -995,6 +995,7 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 		}
 		sess.VizSurfaceRef = ref
 		_ = a.Reg.PutSession(sess)
+		core.RememberResume(sess)
 		return a.errOut(a.out(map[string]string{"session_id": args[1], "surface": ref, "launch": launch}))
 	case "focus":
 		if len(args) < 2 {

@@ -97,6 +97,7 @@ func (s *SessionService) Create(ctx context.Context, opts CreateOpts) (*Session,
 	if err := s.Reg.PutSession(sess); err != nil {
 		return nil, err
 	}
+	RememberResume(sess)
 	return sess, nil
 }
 
