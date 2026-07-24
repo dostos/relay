@@ -1,11 +1,11 @@
 ---
 name: relay-sessions
-description: Use when working with relay remote sessions — host profiles, create/list sessions, exec/capture/send/resize without interactive attach (SSH+tmux defaults; cmux optional viz).
+description: Use when working with relay (or legacy sst) remote sessions — host profiles, create/list, exec/capture/send/resize without interactive attach. Replaces sst-sessions; SSH+tmux defaults, cmux optional viz.
 ---
 
 # relay Sessions
 
-Repo: `~/dev/relay`. Binary: `relay` (install via `~/dev/relay/install.sh`).
+**Replaces `sst` session/query/exec.** Repo: `~/dev/relay`. Binary: `relay` (`./install.sh`).
 
 Adapters (defaults, not required forever): **Transport=SSH**, **Persistence=tmux**, **Viz=cmux**.
 

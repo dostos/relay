@@ -1,11 +1,11 @@
 ---
 name: relay-handoff
-description: Use when handing a goal to a remote relay session (agent CLI or job), watching events with a seq cursor, coordinating inject/escalate, and finalizing — cmux viz optional.
+description: Use when handing a goal to a remote relay (or legacy sst) session — agent CLI or job, event tail with seq cursor, inject/escalate, finalize. Replaces sst-handoff; cmux viz optional.
 ---
 
 # relay Handoff
 
-Mechanism: `relay` CLI. Policy: this skill (when to inject / escalate).
+**Replaces `sst handoff`.** Mechanism: `relay` CLI. Policy: this skill (when to inject / escalate).
 
 Requires remote `~/.config/relay/host.yaml` with the agent listed, and always-on **relayd** on the host:
 

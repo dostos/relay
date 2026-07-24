@@ -3,6 +3,7 @@ package relayd
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -40,6 +41,34 @@ func TestStoreRejectsTraversal(t *testing.T) {
 	}
 	if _, err := s.Emit("../etc", "x", nil); err == nil {
 		t.Fatal("expected reject")
+	}
+}
+
+func TestStoreConcurrentSessionsIndependent(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for _, sess := range []string{"a", "b", "c"} {
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				if _, err := s.Emit(name, "tick", nil); err != nil {
+					t.Errorf("%s: %v", name, err)
+					return
+				}
+			}
+		}(sess)
+	}
+	wg.Wait()
+	for _, name := range []string{"a", "b", "c"} {
+		seq, err := s.LastSeq(name)
+		if err != nil || seq != 20 {
+			t.Fatalf("%s last=%d err=%v", name, seq, err)
+		}
 	}
 }
 

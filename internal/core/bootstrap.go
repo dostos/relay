@@ -144,11 +144,17 @@ fi
 "$RELAYD" ping
 `
 	stdout, stderr, err = t.Run(ctx, "", startScript)
-	out.Detail = strings.TrimSpace(stdout + "\n" + stderr)
+	unitLine := firstLinePrefix(stdout, "UNIT=")
 	if strings.Contains(stdout, "UNIT=systemd") {
 		out.Unit = "systemd-user"
 	} else {
 		out.Unit = "nohup"
+	}
+	// Keep Detail quiet on success — mid-restart "socket missing" noise is expected.
+	if unitLine != "" {
+		out.Detail = unitLine
+	} else {
+		out.Detail = strings.TrimSpace(stdout + "\n" + stderr)
 	}
 	// Brief settle after restart before the verify ping (socket recreate).
 	time.Sleep(400 * time.Millisecond)
@@ -157,13 +163,23 @@ fi
 	if err := ensurePing(ctx, t); err != nil {
 		out.PingOK = false
 		out.Started = false
-		out.Detail += "\n" + err.Error()
+		out.Detail = strings.TrimSpace(stdout + "\n" + stderr + "\n" + err.Error())
 		return out, err
 	}
 	out.PingOK = true
 	out.Started = true
 	out.Version = "0.1.0"
 	return out, nil
+}
+
+func firstLinePrefix(s, prefix string) string {
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, prefix) {
+			return line
+		}
+	}
+	return ""
 }
 
 func ensurePing(ctx context.Context, t ports.Transport) error {

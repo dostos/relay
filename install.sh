@@ -17,11 +17,12 @@ echo "installed $INSTALL_DIR/relay $INSTALL_DIR/relayd"
 "$INSTALL_DIR/relay" version
 "$INSTALL_DIR/relayd" version
 
-# Optional skill symlinks for Claude / Cursor
+# Skill symlinks for Claude / Cursor — relay primary, sst names → redirect shims
 SKILL_DST="${RELAY_SKILL_DIR:-$HOME/.claude/skills}"
-if [[ -d "$ROOT/skills/relay-sessions" ]]; then
-  mkdir -p "$SKILL_DST"
-  ln -sfn "$ROOT/skills/relay-sessions" "$SKILL_DST/relay-sessions"
-  ln -sfn "$ROOT/skills/relay-handoff" "$SKILL_DST/relay-handoff"
-  echo "skills → $SKILL_DST/relay-{sessions,handoff}"
-fi
+mkdir -p "$SKILL_DST"
+ln -sfn "$ROOT/skills/relay-sessions" "$SKILL_DST/relay-sessions"
+ln -sfn "$ROOT/skills/relay-handoff" "$SKILL_DST/relay-handoff"
+# Retire sst skill names in-place so old descriptions still resolve to the cutover note.
+ln -sfn "$ROOT/skills/compat/sst-sessions" "$SKILL_DST/sst-sessions"
+ln -sfn "$ROOT/skills/compat/sst-handoff" "$SKILL_DST/sst-handoff"
+echo "skills → $SKILL_DST/{relay,sst}-{sessions,handoff} (sst → relay redirect)"

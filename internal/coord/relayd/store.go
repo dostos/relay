@@ -13,13 +13,19 @@ import (
 	"github.com/dostos/relay/internal/shellquote"
 )
 
+// sessionBucket holds per-session seq + subscribers.
+type sessionBucket struct {
+	mu  sync.Mutex
+	seq int64
+	sub []chan coord.Event
+}
+
 // Store is an append-only per-session JSONL event log with monotonic seq.
-// A single mutex covers all sessions (fine for v0.1; see github.com/dostos/relay#36).
+// Sessions are isolated under per-session locks; the map lock is only for lookup.
 type Store struct {
 	dir string
 	mu  sync.Mutex
-	seq map[string]int64
-	sub map[string][]chan coord.Event // session -> subscribers
+	ss  map[string]*sessionBucket
 }
 
 func NewStore(dir string) (*Store, error) {
@@ -28,8 +34,7 @@ func NewStore(dir string) (*Store, error) {
 	}
 	return &Store{
 		dir: dir,
-		seq: map[string]int64{},
-		sub: map[string][]chan coord.Event{},
+		ss:  map[string]*sessionBucket{},
 	}, nil
 }
 
@@ -40,8 +45,19 @@ func (s *Store) path(session string) (string, error) {
 	return filepath.Join(s.dir, session+".jsonl"), nil
 }
 
-func (s *Store) loadSeqLocked(session string) error {
-	if _, ok := s.seq[session]; ok {
+func (s *Store) bucket(session string) *sessionBucket {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.ss[session]
+	if !ok {
+		b = &sessionBucket{seq: -1} // -1 = not loaded from disk yet
+		s.ss[session] = b
+	}
+	return b
+}
+
+func (s *Store) loadSeqLocked(b *sessionBucket, session string) error {
+	if b.seq >= 0 {
 		return nil
 	}
 	p, err := s.path(session)
@@ -51,7 +67,7 @@ func (s *Store) loadSeqLocked(session string) error {
 	f, err := os.Open(p)
 	if err != nil {
 		if os.IsNotExist(err) {
-			s.seq[session] = 0
+			b.seq = 0
 			return nil
 		}
 		return err
@@ -67,7 +83,7 @@ func (s *Store) loadSeqLocked(session string) error {
 			last = ev.Seq
 		}
 	}
-	s.seq[session] = last
+	b.seq = last
 	return sc.Err()
 }
 
@@ -77,12 +93,13 @@ func (s *Store) Emit(session, kind string, meta map[string]any) (coord.Event, er
 	if session == "" || kind == "" {
 		return coord.Event{}, fmt.Errorf("session and kind required")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.loadSeqLocked(session); err != nil {
+	b := s.bucket(session)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := s.loadSeqLocked(b, session); err != nil {
 		return coord.Event{}, err
 	}
-	next := s.seq[session] + 1
+	next := b.seq + 1
 	ev := coord.Event{
 		TS:   time.Now().UTC().Format(time.RFC3339),
 		Seq:  next,
@@ -90,7 +107,7 @@ func (s *Store) Emit(session, kind string, meta map[string]any) (coord.Event, er
 		Kind: kind,
 		Meta: meta,
 	}
-	b, err := json.Marshal(ev)
+	raw, err := json.Marshal(ev)
 	if err != nil {
 		return coord.Event{}, err
 	}
@@ -102,13 +119,13 @@ func (s *Store) Emit(session, kind string, meta map[string]any) (coord.Event, er
 	if err != nil {
 		return coord.Event{}, err
 	}
-	_, err = f.Write(append(b, '\n'))
+	_, err = f.Write(append(raw, '\n'))
 	_ = f.Close()
 	if err != nil {
 		return coord.Event{}, err
 	}
-	s.seq[session] = next
-	for _, ch := range s.sub[session] {
+	b.seq = next
+	for _, ch := range b.sub {
 		select {
 		case ch <- ev:
 		default:
@@ -118,12 +135,13 @@ func (s *Store) Emit(session, kind string, meta map[string]any) (coord.Event, er
 	return ev, nil
 }
 
-// ReplayAndSubscribe registers for live events THEN replays seq>from under one lock
-// window so emits cannot slip between replay and subscribe.
+// ReplayAndSubscribe registers for live events THEN replays seq>from under one
+// session lock so emits cannot slip between replay and subscribe.
 func (s *Store) ReplayAndSubscribe(session string, from int64) ([]coord.Event, chan coord.Event, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.loadSeqLocked(session); err != nil {
+	b := s.bucket(session)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := s.loadSeqLocked(b, session); err != nil {
 		return nil, nil, err
 	}
 	p, err := s.path(session)
@@ -154,17 +172,17 @@ func (s *Store) ReplayAndSubscribe(session string, from int64) ([]coord.Event, c
 		}
 	}
 	ch := make(chan coord.Event, 64)
-	s.sub[session] = append(s.sub[session], ch)
+	b.sub = append(b.sub, ch)
 	return out, ch, nil
 }
 
 func (s *Store) Unsubscribe(session string, ch chan coord.Event) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	list := s.sub[session]
-	for i, c := range list {
+	b := s.bucket(session)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for i, c := range b.sub {
 		if c == ch {
-			s.sub[session] = append(list[:i], list[i+1:]...)
+			b.sub = append(b.sub[:i], b.sub[i+1:]...)
 			break
 		}
 	}
@@ -172,10 +190,11 @@ func (s *Store) Unsubscribe(session string, ch chan coord.Event) {
 }
 
 func (s *Store) LastSeq(session string) (int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.loadSeqLocked(session); err != nil {
+	b := s.bucket(session)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err := s.loadSeqLocked(b, session); err != nil {
 		return 0, err
 	}
-	return s.seq[session], nil
+	return b.seq, nil
 }
