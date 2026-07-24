@@ -14,6 +14,9 @@ func TestSensorCommandValidates(t *testing.T) {
 	if !strings.Contains(cmd, "relayd emit") || !strings.Contains(cmd, "'sess1'") || !strings.Contains(cmd, "'exit'") {
 		t.Fatalf("unexpected cmd %q", cmd)
 	}
+	if !strings.Contains(cmd, ">/dev/null 2>&1") {
+		t.Fatalf("sensor emit must silence stdout/stderr, got %q", cmd)
+	}
 	if _, err := c.SensorCommand("../x", "exit"); err == nil {
 		t.Fatal("expected session reject")
 	}

@@ -310,6 +310,36 @@ func (h *HandoffService) TailEvents(ctx context.Context, handoffID string, fromS
 	}
 }
 
+// ReinstallSensors refreshes tmux idle/exit hooks for a session (quiet emit).
+func (h *HandoffService) ReinstallSensors(ctx context.Context, sessionID string, silence int) error {
+	if h.Coord == nil {
+		return fmt.Errorf("coord adapter not configured")
+	}
+	sess, err := h.Sessions.Get(sessionID)
+	if err != nil {
+		return err
+	}
+	if silence <= 0 {
+		if p, err := h.Profiles.Get(ctx, sess.HostID, true); err == nil && p.Defaults.SilenceSec > 0 {
+			silence = p.Defaults.SilenceSec
+		}
+	}
+	if silence <= 0 {
+		silence = 45
+	}
+	t, err := h.NewTransport(sess.HostID)
+	if err != nil {
+		return err
+	}
+	if err := h.Coord.Ensure(ctx, t); err != nil {
+		return err
+	}
+	emitFactory := func(kind string) (string, error) {
+		return h.Coord.SensorCommand(sess.Persist.Name, kind)
+	}
+	return h.Persist.InstallSensors(ctx, t, sess.Persist, silence, emitFactory)
+}
+
 // EmitEvent emits a coordination event for a handoff's persist session.
 func (h *HandoffService) EmitEvent(ctx context.Context, handoffID, kind string, meta map[string]any) (int64, error) {
 	ho, err := h.Reg.GetHandoff(handoffID)

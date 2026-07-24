@@ -178,6 +178,7 @@ Sessions (explicit id; no guesswork):
   relay session resize ID
   relay session attach ID             Interactive (humans only)
   relay session destroy ID [--keep-remote]
+  relay session sensors ID [--silence SEC]   Reinstall quiet idle/exit hooks
 
 Handoffs (goal-based / long-running):
   relay handoff -H HOST --agent NAME --goal TEXT [--repo DIR] [--no-pane]
@@ -484,6 +485,27 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 			return a.fail(err)
 		}
 		return 0
+	case "sensors":
+		if len(args) < 2 {
+			return a.fail(fmt.Errorf("session id required"))
+		}
+		id := args[1]
+		silence := 0
+		for i := 2; i < len(args); i++ {
+			switch args[i] {
+			case "--silence":
+				i++
+				if i < len(args) {
+					silence, _ = strconv.Atoi(args[i])
+				}
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
+			}
+		}
+		if err := a.Handoffs.ReinstallSensors(ctx, id, silence); err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "session_id": id, "sensors": "reinstalled"}))
 	default:
 		return a.fail(fmt.Errorf("unknown session subcommand %q", sub))
 	}
