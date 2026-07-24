@@ -101,6 +101,67 @@ func (s *SessionService) Create(ctx context.Context, opts CreateOpts) (*Session,
 	return sess, nil
 }
 
+// Adopt registers an already-running remote tmux session (e.g. migrating from sst).
+// Does not create a new tmux session; fails if the remote name is missing.
+func (s *SessionService) Adopt(ctx context.Context, opts CreateOpts) (*Session, error) {
+	if opts.HostID == "" {
+		return nil, fmt.Errorf("host_id required")
+	}
+	if opts.Name == "" {
+		return nil, fmt.Errorf("--name required (existing tmux session)")
+	}
+	safe, err := shellquote.SanitizeSessionName(opts.Name)
+	if err != nil {
+		return nil, err
+	}
+	profile, err := s.Profiles.Get(ctx, opts.HostID, false)
+	if err != nil {
+		return nil, err
+	}
+	cwd := opts.RemoteCWD
+	if cwd == "" && opts.RepoRef != "" {
+		cwd, err = profile.ResolveRemoteCWD(opts.RepoRef)
+		if err != nil {
+			return nil, err
+		}
+	}
+	t, err := s.NewTransport(opts.HostID)
+	if err != nil {
+		return nil, err
+	}
+	h := ports.PersistHandle{Kind: s.Persist.Kind(), Name: safe}
+	ok, err := s.Persist.Exists(ctx, t, h)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("tmux session %q not found on %s", safe, opts.HostID)
+	}
+	now := time.Now().UTC()
+	labels := opts.Labels
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	if _, has := labels["adopted"]; !has {
+		labels["adopted"] = "sst"
+	}
+	sess := &Session{
+		ID:        newID("sess"),
+		HostID:    opts.HostID,
+		RemoteCWD: cwd,
+		Persist:   h,
+		RepoRef:   opts.RepoRef,
+		Labels:    labels,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := s.Reg.PutSession(sess); err != nil {
+		return nil, err
+	}
+	RememberResume(sess)
+	return sess, nil
+}
+
 func (s *SessionService) transportFor(sess *Session) (ports.Transport, error) {
 	return s.NewTransport(sess.HostID)
 }

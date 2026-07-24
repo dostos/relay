@@ -178,6 +178,8 @@ Host profiles (authoritative on each remote ~/.config/relay/host.yaml):
 
 Sessions (explicit id; no guesswork):
   relay session create -H HOST [--repo DIR] [--cwd REMOTE] [--name NAME]
+  relay session adopt -H HOST --name TMUX [--cwd REMOTE] [--repo DIR]
+                                      Register existing tmux (sst migration)
   relay session list
   relay session get ID
   relay session capture ID [-n LINES]
@@ -408,6 +410,42 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 			opts.RepoRef = abs
 		}
 		s, err := a.Sessions.Create(ctx, opts)
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(s))
+	case "adopt":
+		host, rest := flagHost(args[1:])
+		opts := core.CreateOpts{HostID: host, Labels: map[string]string{"adopted": "sst"}}
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case "--repo":
+				i++
+				if i < len(rest) {
+					opts.RepoRef = rest[i]
+				}
+			case "--cwd", "-R":
+				i++
+				if i < len(rest) {
+					opts.RemoteCWD = rest[i]
+				}
+			case "--name", "-s":
+				i++
+				if i < len(rest) {
+					opts.Name = rest[i]
+				}
+			default:
+				return a.fail(rejectUnknownFlag(rest[i]))
+			}
+		}
+		if opts.Name == "" {
+			return a.fail(fmt.Errorf("usage: relay session adopt -H HOST --name TMUX [--cwd REMOTE] [--repo DIR]"))
+		}
+		if opts.RepoRef != "" && !filepath.IsAbs(opts.RepoRef) {
+			abs, _ := filepath.Abs(opts.RepoRef)
+			opts.RepoRef = abs
+		}
+		s, err := a.Sessions.Adopt(ctx, opts)
 		if err != nil {
 			return a.fail(err)
 		}
