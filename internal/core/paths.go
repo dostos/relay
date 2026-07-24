@@ -52,7 +52,7 @@ func sanitizeID(s string) string {
 
 // EnsureStateDirs creates local state directories.
 func EnsureStateDirs() error {
-	for _, d := range []string{StateRoot(), HandoffsDir(), ProfileCacheDir()} {
+	for _, d := range []string{StateRoot(), HandoffsDir(), ProfileCacheDir(), PanesDir()} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return err
 		}

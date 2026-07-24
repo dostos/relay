@@ -83,9 +83,15 @@ func (s *SessionService) Resume(ctx context.Context, persistName, cwd string) er
 // ResumeOpts controls attach reconnect behavior.
 type ResumeOpts struct {
 	NoReconnect bool // disable retry loop (also RELAY_AUTO_RECONNECT=0)
+	// Explicit is true when the caller passed --session (pins pane history).
+	Explicit bool
+	// Surface overrides auto-detect for pane history stamping.
+	Surface string
 }
 
 // ResumeOpts attaches with optional auto-reconnect (default on).
+// The resolved persistName/host are frozen for the reconnect loop so a
+// pane never swaps sessions mid-recovery.
 func (s *SessionService) ResumeOpts(ctx context.Context, persistName, cwd string, opts ResumeOpts) error {
 	if cwd != "" {
 		_ = os.Chdir(cwd)
@@ -97,7 +103,27 @@ func (s *SessionService) ResumeOpts(ctx context.Context, persistName, cwd string
 	if presence == PresenceCleaned {
 		return err
 	}
-	t, err := s.NewTransport(hostID)
+	// Freeze identity for reconnect (do not re-resolve from repo history).
+	connPersist := persistName
+	connHost := hostID
+	connRemote := remoteCWD
+	connHandle := handle
+
+	surface := strings.TrimSpace(opts.Surface)
+	if surface == "" {
+		surface, _ = CurrentSurface()
+	}
+	if surface != "" {
+		pin := opts.Explicit
+		if !pin {
+			// Bare resume from this pane still refreshes history so reconnect stays stable.
+			pin = true
+		}
+		localCWD, _ := os.Getwd()
+		RememberPanePersist(surface, connPersist, connHost, connRemote, firstNonEmpty(cwd, localCWD), pin)
+	}
+
+	t, err := s.NewTransport(connHost)
 	if err != nil {
 		return err
 	}
@@ -106,9 +132,9 @@ func (s *SessionService) ResumeOpts(ctx context.Context, persistName, cwd string
 		now := time.Now().UTC()
 		sess := &Session{
 			ID:        newID("sess"),
-			HostID:    hostID,
-			RemoteCWD: remoteCWD,
-			Persist:   handle,
+			HostID:    connHost,
+			RemoteCWD: connRemote,
+			Persist:   connHandle,
 			RepoRef:   cwd,
 			Labels:    map[string]string{"role": "resumed"},
 			CreatedAt: now,
@@ -117,7 +143,7 @@ func (s *SessionService) ResumeOpts(ctx context.Context, persistName, cwd string
 		_ = s.Reg.PutSession(sess)
 		RememberResume(sess)
 	}
-	cmd := s.Persist.AttachCommand(handle, remoteCWD)
+	cmd := s.Persist.AttachCommand(connHandle, connRemote)
 	reconnect := autoReconnectEnabled(opts.NoReconnect)
 	delay := reconnectDelay()
 	if reconnect {
@@ -134,13 +160,14 @@ func (s *SessionService) ResumeOpts(ctx context.Context, persistName, cwd string
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		fmt.Fprintf(os.Stderr, "relay resume: disconnected from %s (exit %d); reconnecting in %s (attempt %d, Ctrl+C to stop)\n",
-			hostID, code, delay, attempt)
+		fmt.Fprintf(os.Stderr, "relay resume: disconnected from %s/%s (exit %d); reconnecting in %s (attempt %d, Ctrl+C to stop)\n",
+			connHost, connPersist, code, delay, attempt)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(delay):
 		}
+		// Reconnect uses frozen connPersist/connHost — never re-resolve.
 	}
 }
 

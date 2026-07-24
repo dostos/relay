@@ -238,8 +238,9 @@ Visualization (optional cmux adapter):
 
 cmux session restore (survive cmux quit / Mac reboot):
   relay install-cmux-restore          Register vault agent (run by install.sh)
-  relay resume --session NAME [--cwd DIR] [--no-reconnect]
-                                      Re-attach; waits/retries on SSH drop (like sst)
+  relay resume [--session NAME] [--cwd DIR] [--no-reconnect]
+                                      Bare form uses this cmux pane's history.
+                                      Re-attach; waits/retries on SSH drop (session frozen).
   relay resume list                         live | disconnected | cleaned
 
   relay doctor
@@ -1160,6 +1161,7 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 		sess.VizSurfaceRef = ref
 		_ = a.Reg.PutSession(sess)
 		core.RememberResume(sess)
+		core.RememberPane(ref, sess, true)
 		_ = a.applySessionChrome(ctx, sess)
 		_ = a.brandAll(ctx)
 		return a.errOut(a.out(map[string]string{
@@ -1227,6 +1229,7 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 			i++
 			if i < len(args) {
 				session = args[i]
+				opts.Explicit = true
 			}
 		case "--cwd":
 			i++
@@ -1242,7 +1245,16 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 		}
 	}
 	if session == "" {
-		return a.fail(fmt.Errorf("usage: relay resume --session NAME [--cwd DIR] [--no-reconnect]  |  relay resume list"))
+		name, paneCWD, surface, err := core.ResolveResumeFromPane()
+		if err != nil {
+			return a.fail(fmt.Errorf("%w\nusage: relay resume [--session NAME] [--cwd DIR] [--no-reconnect]  |  relay resume list", err))
+		}
+		session = name
+		opts.Surface = surface
+		if cwd == "" {
+			cwd = paneCWD
+		}
+		fmt.Fprintf(os.Stderr, "relay resume: using pane history %s → %s\n", surface, session)
 	}
 	if err := a.Sessions.ResumeOpts(ctx, session, cwd, opts); err != nil {
 		msg := core.FormatResumeError(err)

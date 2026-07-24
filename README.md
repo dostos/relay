@@ -92,11 +92,12 @@ relay viz present sess-…          # opens a cmux split; ◆ RELAY tab title
 
 # after cmux restart (or laptop sleep / wifi drop)
 relay resume list                 # live | disconnected | cleaned
-relay resume --session NAME       # waits + retries on SSH drop (sst-style)
+relay resume                      # bare: this cmux pane's history
+relay resume --session NAME       # pin + waits/retries on SSH drop
 relay viz restore                 # optional manual path
 ```
 
-`relay resume` keeps the pane alive across sleep and “Shared connection … closed”: it reconnects after a short delay (default 3s). Disable with `--no-reconnect` or `RELAY_AUTO_RECONNECT=0`.
+`relay resume` keeps the pane alive across sleep and “Shared connection … closed”: it reconnects after a short delay (default 3s), frozen to that pane’s session. Bare `relay resume` (no `--session`) reads `~/.local/state/relay/panes/<surface>.json` (or the cmux surface resume binding). Disable reconnect with `--no-reconnect` or `RELAY_AUTO_RECONNECT=0`.
 
 
 | Resume presence | Meaning | Resume? |

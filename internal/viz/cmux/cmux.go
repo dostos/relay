@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/dostos/relay/internal/core"
 	"github.com/dostos/relay/internal/ports"
 )
 
@@ -68,7 +69,12 @@ func (v *Viz) Present(ctx context.Context, sessionID, attachCmd string, layout p
 	if b, ok := v.bindings[sessionID]; ok && b.Surface != "" {
 		v.mu.Unlock()
 		_ = v.focusSurface(ctx, b)
-		_ = v.brandSurface(ctx, b.Surface, extractSessionFlag(attachCmd))
+		sessName := extractSessionFlag(attachCmd)
+		_ = v.brandSurface(ctx, b.Surface, sessName)
+		if sessName != "" {
+			cwd, _ := os.Getwd()
+			core.RememberPanePersist(b.Surface, sessName, "", "", cwd, true)
+		}
 		return b.Surface, nil
 	}
 	v.mu.Unlock()
@@ -104,6 +110,8 @@ func (v *Viz) Present(ctx context.Context, sessionID, attachCmd string, layout p
 			"--", attachCmd,
 		)
 		_ = v.brandSurface(ctx, surface, sessName)
+		cwd, _ := os.Getwd()
+		core.RememberPanePersist(surface, sessName, "", "", cwd, true)
 	}
 	b := binding{Surface: surface, Pane: pane, Attach: attachCmd}
 	v.mu.Lock()
@@ -392,49 +400,89 @@ func (v *Viz) Layout(ctx context.Context) (string, error) {
 	return out, nil
 }
 
-// SaveRestorable stamps resume bindings on every live relay pane (manual snapshot).
+// SaveRestorable stamps resume bindings + pane history on every live relay pane.
+// cmux top often shows only the binary name ("relay"), so we recover the session
+// from `surface resume get` (checkpoint / command) rather than argv in the TSV.
 func (v *Viz) SaveRestorable(ctx context.Context) (int, error) {
 	tsv, err := v.run(ctx, "top", "--all", "--processes", "--format", "tsv")
 	if err != nil {
 		return 0, err
 	}
-	type row struct{ ref, cmd string }
-	var rows []row
-	var curRef, curCmd string
-	for _, line := range strings.Split(tsv, "\n") {
-		f := strings.Split(line, "\t")
-		if len(f) < 7 {
-			continue
-		}
-		typ, key, cmd := f[3], f[4], f[6]
-		if typ == "surface" {
-			if curRef != "" && strings.Contains(curCmd, "relay") && strings.Contains(curCmd, "--session") {
-				rows = append(rows, row{curRef, curCmd})
-			}
-			curRef, curCmd = key, cmd
-		}
-	}
-	if curRef != "" && strings.Contains(curCmd, "relay") && strings.Contains(curCmd, "--session") {
-		rows = append(rows, row{curRef, curCmd})
+	live := liveRelaySurfaces(tsv)
+	// Also include surfaces that already have a kind=relay resume binding.
+	for ref := range v.relayBoundSurfaces(ctx) {
+		live[ref] = true
 	}
 	saved := 0
-	for _, r := range rows {
-		name := extractSessionFlag(r.cmd)
+	for ref := range live {
+		name, cmd, cwd := v.relayCheckpoint(ctx, ref)
 		if name == "" {
 			continue
 		}
+		if cmd == "" {
+			cmd = core.ResumeLaunchCmd(name)
+		}
 		if _, err := v.run(ctx, "surface", "resume", "set",
-			"--surface", r.ref,
+			"--surface", ref,
 			"--kind", "relay",
 			"--name", brandTitle(name),
 			"--checkpoint", name,
-			"--", r.cmd,
+			"--", cmd,
 		); err == nil {
-			_ = v.brandSurface(ctx, r.ref, name)
+			_ = v.brandSurface(ctx, ref, name)
+			if cwd == "" {
+				cwd, _ = os.Getwd()
+			}
+			core.RememberPanePersist(ref, name, "", "", cwd, true)
 			saved++
 		}
 	}
 	return saved, nil
+}
+
+func (v *Viz) relayBoundSurfaces(ctx context.Context) map[string]bool {
+	out := map[string]bool{}
+	surfs, err := v.listSurfaces(ctx)
+	if err != nil {
+		return out
+	}
+	for ref := range surfs {
+		name, _, _ := v.relayCheckpoint(ctx, ref)
+		if name != "" {
+			out[ref] = true
+		}
+	}
+	return out
+}
+
+func (v *Viz) relayCheckpoint(ctx context.Context, surface string) (persistName, command, cwd string) {
+	raw, err := v.run(ctx, "surface", "resume", "get", "--surface", surface, "--json")
+	if err != nil {
+		return "", "", ""
+	}
+	var wrap struct {
+		ResumeBinding struct {
+			Kind         string `json:"kind"`
+			CheckpointID string `json:"checkpoint_id"`
+			Command      string `json:"command"`
+			CWD          string `json:"cwd"`
+		} `json:"resume_binding"`
+	}
+	if json.Unmarshal([]byte(raw), &wrap) != nil {
+		return "", "", ""
+	}
+	rb := wrap.ResumeBinding
+	if rb.Kind != "" && rb.Kind != "relay" {
+		return "", "", ""
+	}
+	name := strings.TrimSpace(rb.CheckpointID)
+	if name == "" {
+		name = extractSessionFlag(rb.Command)
+	}
+	if name == "" {
+		return "", "", ""
+	}
+	return name, rb.Command, rb.CWD
 }
 
 // RestoreSaved re-sends resume commands into idle surfaces that have relay bindings.

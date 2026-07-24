@@ -29,6 +29,7 @@ relay session exec sess-… -- "…"
 relay viz present|close sess-…
 ```
 
-After cmux quit/reopen: panes re-attach via Vault (`relay install-cmux-restore`) or manually `relay viz save` then `relay viz restore`. Manual one-shot: `relay resume --session <persistName>`.
+After cmux quit/reopen: panes re-attach via Vault (`relay install-cmux-restore`) or manually `relay viz save` then `relay viz restore`.
+In a relay pane, bare `relay resume` uses that surface’s pane history (`~/.local/state/relay/panes/`); pass `--session <persistName>` to pin a different session.
 
 **Never** `session attach` from an agent. Host profile: `~/.config/relay/host.yaml` on the remote.

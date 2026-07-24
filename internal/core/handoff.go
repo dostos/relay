@@ -156,6 +156,7 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 			sess.VizSurfaceRef = ref
 			_ = h.Sessions.Reg.PutSession(sess)
 			RememberResume(sess)
+			RememberPane(ref, sess, true)
 			labels := map[string]string{sess.ID: ProjectLabel(sess.Persist.Name)}
 			if all, err := h.Sessions.List(); err == nil {
 				for _, s := range all {
