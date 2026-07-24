@@ -73,7 +73,20 @@ func (r *Registry) FindByPersistName(persistName, cwd string) (*Session, error) 
 }
 
 // Resume re-attaches after cmux/SSH disconnect. Refuses cleaned sessions.
+// Like sst: on transport drop (laptop sleep, wifi, Shared connection closed)
+// it waits and retries until a clean attach exit or Ctrl+C — it does not fall
+// through to a local shell while a binding exists.
 func (s *SessionService) Resume(ctx context.Context, persistName, cwd string) error {
+	return s.ResumeOpts(ctx, persistName, cwd, ResumeOpts{})
+}
+
+// ResumeOpts controls attach reconnect behavior.
+type ResumeOpts struct {
+	NoReconnect bool // disable retry loop (also RELAY_AUTO_RECONNECT=0)
+}
+
+// ResumeOpts attaches with optional auto-reconnect (default on).
+func (s *SessionService) ResumeOpts(ctx context.Context, persistName, cwd string, opts ResumeOpts) error {
 	if cwd != "" {
 		_ = os.Chdir(cwd)
 	}
@@ -105,7 +118,82 @@ func (s *SessionService) Resume(ctx context.Context, persistName, cwd string) er
 		RememberResume(sess)
 	}
 	cmd := s.Persist.AttachCommand(handle, remoteCWD)
-	return t.Interactive(ctx, cmd)
+	reconnect := autoReconnectEnabled(opts.NoReconnect)
+	delay := reconnectDelay()
+	if reconnect {
+		fmt.Fprintf(os.Stderr, "relay resume: auto-reconnect on (delay %s; RELAY_AUTO_RECONNECT=0 or --no-reconnect to disable)\n", delay)
+	}
+	attempt := 0
+	for {
+		attempt++
+		err := t.Interactive(ctx, cmd)
+		code := exitCode(err)
+		if err == nil || !shouldRetryAttach(code) || !reconnect {
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		fmt.Fprintf(os.Stderr, "relay resume: disconnected from %s (exit %d); reconnecting in %s (attempt %d, Ctrl+C to stop)\n",
+			hostID, code, delay, attempt)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+}
+
+func autoReconnectEnabled(noReconnect bool) bool {
+	if noReconnect {
+		return false
+	}
+	v := strings.TrimSpace(os.Getenv("RELAY_AUTO_RECONNECT"))
+	if v == "0" || strings.EqualFold(v, "false") || strings.EqualFold(v, "off") {
+		return false
+	}
+	return true
+}
+
+func reconnectDelay() time.Duration {
+	v := strings.TrimSpace(os.Getenv("RELAY_RECONNECT_DELAY"))
+	if v == "" {
+		return 3 * time.Second
+	}
+	if sec, err := time.ParseDuration(v); err == nil {
+		return sec
+	}
+	// plain seconds
+	if n, err := time.ParseDuration(v + "s"); err == nil {
+		return n
+	}
+	return 3 * time.Second
+}
+
+// shouldRetryAttach mirrors sst: retry after unexpected drop; not after clean exit or Ctrl+C.
+func shouldRetryAttach(code int) bool {
+	switch code {
+	case 0, 130: // success / SIGINT
+		return false
+	default:
+		return true
+	}
+}
+
+func exitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	// context cancel / other — treat as non-retry terminal
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return 130
+	}
+	// unknown error (e.g. ssh binary missing): retry once-ish via non-zero
+	return 1
 }
 
 // ResumeInfo is one row for `relay resume list`.

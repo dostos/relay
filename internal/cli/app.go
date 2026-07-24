@@ -238,7 +238,8 @@ Visualization (optional cmux adapter):
 
 cmux session restore (survive cmux quit / Mac reboot):
   relay install-cmux-restore          Register vault agent (run by install.sh)
-  relay resume --session NAME [--cwd DIR]   Re-attach if disconnected (refuses cleaned)
+  relay resume --session NAME [--cwd DIR] [--no-reconnect]
+                                      Re-attach; waits/retries on SSH drop (like sst)
   relay resume list                         live | disconnected | cleaned
 
   relay doctor
@@ -1219,6 +1220,7 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 		return a.errOut(a.out(map[string]any{"ok": true, "sessions": list}))
 	}
 	var session, cwd string
+	opts := core.ResumeOpts{}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--session", "-s":
@@ -1231,6 +1233,8 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 			if i < len(args) {
 				cwd = args[i]
 			}
+		case "--no-reconnect":
+			opts.NoReconnect = true
 		case "list":
 			return a.cmdResume(ctx, []string{"list"})
 		default:
@@ -1238,26 +1242,39 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 		}
 	}
 	if session == "" {
-		return a.fail(fmt.Errorf("usage: relay resume --session NAME [--cwd DIR]  |  relay resume list"))
+		return a.fail(fmt.Errorf("usage: relay resume --session NAME [--cwd DIR] [--no-reconnect]  |  relay resume list"))
 	}
-	if err := a.Sessions.Resume(ctx, session, cwd); err != nil {
+	if err := a.Sessions.ResumeOpts(ctx, session, cwd, opts); err != nil {
 		msg := core.FormatResumeError(err)
 		fmt.Fprintf(os.Stderr, "relay resume: %s\n", msg)
-		// Cleaned = intentional; do not open a fake shell (that hid the bug before).
+		// Cleaned = intentional; never open a fake shell.
 		if errors.Is(err, core.ErrResumeCleaned) {
 			return 1
 		}
-		fmt.Fprintf(os.Stderr, "relay resume: falling back to interactive shell (unknown/missing binding)\n")
-		shell := os.Getenv("SHELL")
-		if shell == "" {
-			shell = "/bin/bash"
+		// Unknown/missing binding only — not SSH drops (those retry inside Resume).
+		if isUnknownResumeBinding(err) {
+			fmt.Fprintf(os.Stderr, "relay resume: no binding for %q — open a local shell\n", session)
+			shell := os.Getenv("SHELL")
+			if shell == "" {
+				shell = "/bin/bash"
+			}
+			cmd := exec.Command(shell, "-l")
+			cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+			_ = cmd.Run()
 		}
-		cmd := exec.Command(shell, "-l")
-		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-		_ = cmd.Run()
 		return 1
 	}
 	return 0
+}
+
+func isUnknownResumeBinding(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "not in resume registry") ||
+		strings.Contains(msg, "not live and not in resume") ||
+		strings.Contains(msg, "unknown session")
 }
 
 func (a *App) cmdInstallCmuxRestore() int {

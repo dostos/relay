@@ -90,10 +90,14 @@ relay agent start -H HOST --agent claude --goal "…"
 relay session adopt -H HOST --name my-tmux
 relay viz present sess-…          # opens a cmux split; ◆ RELAY tab title
 
-# after cmux restart
+# after cmux restart (or laptop sleep / wifi drop)
 relay resume list                 # live | disconnected | cleaned
+relay resume --session NAME       # waits + retries on SSH drop (sst-style)
 relay viz restore                 # optional manual path
 ```
+
+`relay resume` keeps the pane alive across sleep and “Shared connection … closed”: it reconnects after a short delay (default 3s). Disable with `--no-reconnect` or `RELAY_AUTO_RECONNECT=0`.
+
 
 | Resume presence | Meaning | Resume? |
 |-----------------|---------|---------|

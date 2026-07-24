@@ -38,3 +38,26 @@ func TestResumeLaunchCmdCarriesSessionFlag(t *testing.T) {
 		t.Fatalf("cmd=%q", cmd)
 	}
 }
+
+func TestShouldRetryAttach(t *testing.T) {
+	if shouldRetryAttach(0) || shouldRetryAttach(130) {
+		t.Fatal("clean exit / Ctrl+C must not retry")
+	}
+	if !shouldRetryAttach(255) || !shouldRetryAttach(1) {
+		t.Fatal("SSH drop codes must retry")
+	}
+}
+
+func TestAutoReconnectEnv(t *testing.T) {
+	t.Setenv("RELAY_AUTO_RECONNECT", "")
+	if !autoReconnectEnabled(false) {
+		t.Fatal("default on")
+	}
+	if autoReconnectEnabled(true) {
+		t.Fatal("--no-reconnect")
+	}
+	t.Setenv("RELAY_AUTO_RECONNECT", "0")
+	if autoReconnectEnabled(false) {
+		t.Fatal("env off")
+	}
+}
