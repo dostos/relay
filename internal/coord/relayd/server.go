@@ -7,20 +7,17 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strings"
-	"sync"
 	"time"
 
 	"github.com/dostos/relay/internal/coord"
 )
 
-// Server is the always-on Unix-socket relayd (NO TCP).
+// Server is the always-on Unix-socket relayd (NO TCP — net.Listen("unix", …) only).
 type Server struct {
 	SockPath string
 	Store    *Store
 	started  time.Time
 	ln       net.Listener
-	mu       sync.Mutex
 }
 
 // DefaultPaths returns socket and events dir under $HOME.
@@ -34,14 +31,10 @@ func DefaultPaths() (sock, events string, err error) {
 	return sock, events, nil
 }
 
-// Serve listens on a Unix socket only. Rejects any non-unix address.
+// Serve listens on a Unix socket only.
 func (s *Server) Serve() error {
 	if s.SockPath == "" {
 		return fmt.Errorf("socket path required")
-	}
-	// Hard fail-closed: never bind TCP.
-	if strings.Contains(s.SockPath, ":") && !strings.HasPrefix(s.SockPath, "/") && !strings.HasPrefix(s.SockPath, ".") {
-		return fmt.Errorf("refusing non-unix listen addr %q (IT safety: unix socket only)", s.SockPath)
 	}
 	if err := os.MkdirAll(filepath.Dir(s.SockPath), 0o700); err != nil {
 		return err
@@ -105,7 +98,7 @@ func (s *Server) handle(c net.Conn) {
 		}
 		writeJSON(c, coord.Response{OK: true, Seq: ev.Seq})
 	case "subscribe":
-		_ = c.SetDeadline(time.Time{}) // long-lived
+		_ = c.SetDeadline(time.Time{})
 		s.subscribe(c, req.Session, req.From, req.Follow)
 	default:
 		writeJSON(c, coord.Response{OK: false, Error: "unknown op"})
@@ -113,10 +106,16 @@ func (s *Server) handle(c net.Conn) {
 }
 
 func (s *Server) subscribe(c net.Conn, session string, from int64, follow bool) {
-	events, err := s.Store.Replay(session, from)
+	events, live, err := s.Store.ReplayAndSubscribe(session, from)
 	if err != nil {
 		writeJSON(c, coord.Response{OK: false, Error: err.Error()})
 		return
+	}
+	if follow {
+		defer s.Store.Unsubscribe(session, live)
+	} else {
+		s.Store.Unsubscribe(session, live)
+		live = nil
 	}
 	enc := json.NewEncoder(c)
 	for _, ev := range events {
@@ -124,11 +123,9 @@ func (s *Server) subscribe(c net.Conn, session string, from int64, follow bool) 
 			return
 		}
 	}
-	if !follow {
+	if !follow || live == nil {
 		return
 	}
-	live := s.Store.SubscribeLive(session)
-	defer s.Store.Unsubscribe(session, live)
 	tick := time.NewTicker(coord.HeartbeatInterval)
 	defer tick.Stop()
 	for {

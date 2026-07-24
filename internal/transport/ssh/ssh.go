@@ -8,7 +8,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+
+	"github.com/dostos/relay/internal/shellquote"
 )
 
 // Transport is an SSH-backed remote transport.
@@ -22,20 +25,35 @@ func New(host string) *Transport {
 
 func (t *Transport) ID() string { return t.Host }
 
-func (t *Transport) sshBase(ctx context.Context, args ...string) *exec.Cmd {
+func controlPath() string {
+	home, _ := os.UserHomeDir()
+	dir := filepath.Join(home, ".ssh", "relay-cm")
+	_ = os.MkdirAll(dir, 0o700)
+	// %C is a hash of %l%h%p%r — short and safe for path length limits.
+	return filepath.Join(dir, "%C")
+}
+
+func (t *Transport) sshBase(ctx context.Context, extra ...string) *exec.Cmd {
 	base := []string{
 		"-o", "BatchMode=yes",
 		"-o", "ConnectTimeout=15",
+		"-o", "ControlMaster=auto",
+		"-o", "ControlPath=" + controlPath(),
+		"-o", "ControlPersist=60",
 		t.Host,
 	}
-	base = append(base, args...)
+	base = append(base, extra...)
 	return exec.CommandContext(ctx, "ssh", base...)
 }
 
 func (t *Transport) Run(ctx context.Context, cwd, command string) (string, string, error) {
 	remote := command
 	if cwd != "" {
-		remote = fmt.Sprintf("cd %s && %s", remotePathExpr(cwd), command)
+		expr, err := shellquote.PathExpr(cwd)
+		if err != nil {
+			return "", "", err
+		}
+		remote = fmt.Sprintf("cd %s && %s", expr, command)
 	}
 	cmd := t.sshBase(ctx, remote)
 	var stdout, stderr bytes.Buffer
@@ -48,13 +66,19 @@ func (t *Transport) Run(ctx context.Context, cwd, command string) (string, strin
 func (t *Transport) RunStream(ctx context.Context, cwd, command string, w io.Writer) error {
 	remote := command
 	if cwd != "" {
-		remote = fmt.Sprintf("cd %s && %s", remotePathExpr(cwd), command)
+		expr, err := shellquote.PathExpr(cwd)
+		if err != nil {
+			return err
+		}
+		remote = fmt.Sprintf("cd %s && %s", expr, command)
 	}
-	// Keepalive on ONE long-lived stream (subscribe) — not new connections.
 	args := []string{
 		"-o", "BatchMode=yes",
 		"-o", "ServerAliveInterval=30",
 		"-o", "ServerAliveCountMax=4",
+		"-o", "ControlMaster=auto",
+		"-o", "ControlPath=" + controlPath(),
+		"-o", "ControlPersist=60",
 		t.Host,
 		remote,
 	}
@@ -65,7 +89,11 @@ func (t *Transport) RunStream(ctx context.Context, cwd, command string, w io.Wri
 }
 
 func (t *Transport) ReadFile(ctx context.Context, path string) ([]byte, error) {
-	stdout, stderr, err := t.Run(ctx, "", fmt.Sprintf("cat %s", remotePathExpr(path)))
+	expr, err := shellquote.PathExpr(path)
+	if err != nil {
+		return nil, err
+	}
+	stdout, stderr, err := t.Run(ctx, "", fmt.Sprintf("cat %s", expr))
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w (%s)", path, err, strings.TrimSpace(stderr))
 	}
@@ -76,7 +104,10 @@ func (t *Transport) WriteFile(ctx context.Context, path string, data []byte, mod
 	if mode == "" {
 		mode = "644"
 	}
-	expr := remotePathExpr(path)
+	expr, err := shellquote.PathExpr(path)
+	if err != nil {
+		return err
+	}
 	script := fmt.Sprintf(
 		`mkdir -p "$(dirname %s)" && cat > %s && chmod %s %s`,
 		expr, expr, mode, expr,
@@ -92,7 +123,12 @@ func (t *Transport) WriteFile(ctx context.Context, path string, data []byte, mod
 }
 
 func (t *Transport) Interactive(ctx context.Context, command string) error {
-	args := []string{"-t", t.Host, command}
+	args := []string{
+		"-o", "ControlMaster=auto",
+		"-o", "ControlPath=" + controlPath(),
+		"-o", "ControlPersist=60",
+		"-t", t.Host, command,
+	}
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -100,19 +136,6 @@ func (t *Transport) Interactive(ctx context.Context, command string) error {
 	return cmd.Run()
 }
 
-// remotePathExpr returns a shell expression for a remote path.
-// ~/… becomes "$HOME/…" so expansion works; absolute paths are single-quoted.
-func remotePathExpr(p string) string {
-	if p == "~" {
-		return `"$HOME"`
-	}
-	if strings.HasPrefix(p, "~/") {
-		rest := strings.ReplaceAll(p[2:], `"`, `\"`)
-		return `"$HOME/` + rest + `"`
-	}
-	return shellQuote(p)
-}
-
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+func (t *Transport) InteractiveCommand(remoteCmd string) string {
+	return fmt.Sprintf("ssh -t %s -- %s", t.Host, remoteCmd)
 }

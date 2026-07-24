@@ -18,12 +18,25 @@ func TestStoreEmitReplay(t *testing.T) {
 	if err != nil || ev2.Seq != 2 {
 		t.Fatalf("ev2 %+v err %v", ev2, err)
 	}
-	all, err := s.Replay("sess1", 0)
+	all, ch, err := s.ReplayAndSubscribe("sess1", 0)
 	if err != nil || len(all) != 2 {
 		t.Fatalf("replay %v %v", all, err)
 	}
-	after, err := s.Replay("sess1", 1)
+	s.Unsubscribe("sess1", ch)
+	after, ch2, err := s.ReplayAndSubscribe("sess1", 1)
 	if err != nil || len(after) != 1 || after[0].Kind != "exit" {
 		t.Fatalf("after %+v", after)
+	}
+	s.Unsubscribe("sess1", ch2)
+}
+
+func TestStoreRejectsTraversal(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Emit("../etc", "x", nil); err == nil {
+		t.Fatal("expected reject")
 	}
 }

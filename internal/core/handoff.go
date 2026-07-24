@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -95,7 +96,10 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 	if err := h.Coord.Ensure(ctx, t); err != nil {
 		return nil, nil, err
 	}
-	if err := h.Persist.InstallEvents(ctx, t, sess.Persist, silence); err != nil {
+	emitFactory := func(kind string) string {
+		return h.Coord.SensorCommand(sess.Persist.Name, kind)
+	}
+	if err := h.Persist.InstallSensors(ctx, t, sess.Persist, silence, emitFactory); err != nil {
 		return nil, nil, fmt.Errorf("install sensors: %w", err)
 	}
 
@@ -145,8 +149,7 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 	pane := false
 	if !opts.NoPane && h.Viz != nil && h.Viz.Available(ctx) {
 		attach := h.Persist.AttachCommand(sess.Persist, sess.RemoteCWD)
-		// Wrap with transport interactive entry: ssh host -t attachcmd
-		full := fmt.Sprintf("ssh -t %s -- %s", opts.HostID, attach)
+		full := t.InteractiveCommand(attach)
 		ref, err := h.Viz.Present(ctx, sess.ID, full, ports.Layout{Mode: "remote"})
 		if err == nil {
 			pane = true
@@ -173,12 +176,15 @@ func waitReady(ctx context.Context, p ports.Persistence, t ports.Transport, h po
 	deadline := time.Now().Add(timeout)
 	var last string
 	stable := 0
-	for time.Now().Before(deadline) {
+	attempts := 0
+	const maxAttempts = 8 // ~2.5s * 8 with ControlMaster — no SSH storm
+	for time.Now().Before(deadline) && attempts < maxAttempts {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
+		attempts++
 		text, err := p.Capture(ctx, t, h, 30)
 		if err == nil {
 			if text == last && text != "" {
@@ -191,7 +197,7 @@ func waitReady(ctx context.Context, p ports.Persistence, t ports.Transport, h po
 				last = text
 			}
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(2500 * time.Millisecond)
 	}
 	return nil
 }
@@ -252,6 +258,7 @@ func (h *HandoffService) TailEvents(ctx context.Context, handoffID string, fromS
 			}
 			cursor = ev.Seq
 			ho.LastSeq = ev.Seq
+			// Do not mark terminal StatusDone here — that breaks reconcile/finalize.
 			switch ev.Kind {
 			case "needs_input":
 				ho.Status = StatusNeedsInput
@@ -259,10 +266,12 @@ func (h *HandoffService) TailEvents(ctx context.Context, handoffID string, fromS
 				if ho.Kind == KindAgent {
 					ho.Status = StatusNeedsInput
 				}
-			case "exit":
-				ho.Status = StatusDone
 			case "started":
 				ho.Status = StatusRunning
+			case "exit":
+				if ho.Status != StatusDone && ho.Status != StatusFailed && ho.Status != StatusAbandoned {
+					ho.Status = StatusRunning // still needs finalize for outcome/teardown
+				}
 			}
 			_ = h.Reg.PutHandoff(ho)
 		}
@@ -291,8 +300,8 @@ func (h *HandoffService) TailEvents(ctx context.Context, handoffID string, fromS
 		if delay > 60*time.Second {
 			delay = 60 * time.Second
 		}
-		// jitter ~0-500ms
 		delay += time.Duration(time.Now().UnixNano()%500) * time.Millisecond
+		fmt.Fprintf(os.Stderr, "relay: reconnecting subscribe on %s (%d/6) in %s…\n", ho.HostID, attempts, delay.Round(time.Millisecond))
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -399,7 +408,8 @@ func (h *HandoffService) Reconcile(ctx context.Context) (int, error) {
 	}
 	n := 0
 	for _, ho := range list {
-		if ho.Status == StatusDone || ho.Status == StatusFailed || ho.Status == StatusAbandoned {
+		// Key off Outcome — Status alone may be set by the event tail.
+		if ho.Outcome != "" {
 			continue
 		}
 		sess, err := h.Sessions.Get(ho.SessionID)

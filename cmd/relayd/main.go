@@ -145,32 +145,13 @@ func cmdEmit(args []string) int {
 	}
 	resp, err := relayd.EmitLocal(sockPath(), session, kind, meta)
 	if err != nil {
-		// File fallback so tmux sensors can still record if daemon briefly down.
-		if session != "" && kind != "" {
-			if seq, ferr := fileFallbackEmit(session, kind, meta); ferr == nil {
-				fmt.Printf("{\"ok\":true,\"seq\":%d,\"fallback\":true}\n", seq)
-				return 0
-			}
-		}
+		// No file fallback — daemon is the sole writer (avoids seq races).
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 	enc := json.NewEncoder(os.Stdout)
 	_ = enc.Encode(resp)
 	return 0
-}
-
-func fileFallbackEmit(session, kind string, meta map[string]any) (int64, error) {
-	_, events, err := relayd.DefaultPaths()
-	if err != nil {
-		return 0, err
-	}
-	store, err := relayd.NewStore(events)
-	if err != nil {
-		return 0, err
-	}
-	ev, err := store.Emit(session, kind, meta)
-	return ev.Seq, err
 }
 
 func cmdSubscribe(args []string) int {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dostos/relay/internal/ports"
+	"github.com/dostos/relay/internal/shellquote"
 )
 
 // TransportFactory creates a Transport for a host id.
@@ -65,6 +66,11 @@ func (s *SessionService) Create(ctx context.Context, opts CreateOpts) (*Session,
 		}
 		name = base + "-" + newID("s")[2:8]
 	}
+	safe, err := shellquote.SanitizeSessionName(name)
+	if err != nil {
+		return nil, err
+	}
+	name = safe
 	t, err := s.NewTransport(opts.HostID)
 	if err != nil {
 		return nil, err

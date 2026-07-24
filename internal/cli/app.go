@@ -133,7 +133,7 @@ func (a *App) Run(args []string) int {
 	case "viz", "pane":
 		return a.cmdViz(ctx, filtered[1:])
 	case "doctor":
-		return a.cmdDoctor(ctx)
+		return a.cmdDoctor(ctx, filtered[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "relay: unknown command %q\n", filtered[0])
 		return a.cmdHelp()
@@ -216,7 +216,7 @@ func (a *App) cmdHost(ctx context.Context, args []string) int {
 		}
 		fmt.Print(core.ExampleHostProfileYAML(host))
 		return 0
-	case "show", "fetch":
+	case "show", "fetch": // fetch is alias of show (remote-authoritative pull)
 		if host == "" {
 			return a.fail(fmt.Errorf("-H HOST required"))
 		}
@@ -666,7 +666,11 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 		if err != nil {
 			return a.fail(err)
 		}
-		full := fmt.Sprintf("ssh -t %s -- %s", sess.HostID, cmd)
+		t, err := a.tf(sess.HostID)
+		if err != nil {
+			return a.fail(err)
+		}
+		full := t.InteractiveCommand(cmd)
 		ref, err := a.Viz.Present(ctx, args[1], full, ports.Layout{Mode: "remote"})
 		if err != nil {
 			return a.fail(err)
@@ -695,12 +699,13 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 	}
 }
 
-func (a *App) cmdDoctor(ctx context.Context) int {
+func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 	type check struct {
 		Name   string `json:"name"`
 		OK     bool   `json:"ok"`
 		Detail string `json:"detail,omitempty"`
 	}
+	host, _ := flagHost(args)
 	var checks []check
 	if _, err := exec.LookPath("ssh"); err != nil {
 		checks = append(checks, check{"ssh", false, err.Error()})
@@ -719,7 +724,18 @@ func (a *App) cmdDoctor(ctx context.Context) int {
 	}
 	checks = append(checks, check{"cmux_viz", cmuxOK, detail})
 	checks = append(checks, check{"state_dir", true, core.StateRoot()})
-	checks = append(checks, check{"coord", true, "relayd (unix socket on remote; no TCP)"})
+	if host == "" {
+		checks = append(checks, check{"coord", false, "pass -H HOST to probe remote relayd"})
+	} else if a.Coord != nil {
+		t, err := a.tf(host)
+		if err != nil {
+			checks = append(checks, check{"coord", false, err.Error()})
+		} else if err := a.Coord.Ensure(ctx, t); err != nil {
+			checks = append(checks, check{"coord", false, err.Error()})
+		} else {
+			checks = append(checks, check{"coord", true, "relayd ok on " + host})
+		}
+	}
 	_ = core.EnsureStateDirs()
 	return a.errOut(a.out(map[string]any{"checks": checks, "adapters": map[string]string{
 		"transport": "ssh", "persistence": "tmux", "viz": "cmux", "coord": "relayd",

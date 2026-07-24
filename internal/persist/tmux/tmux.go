@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/dostos/relay/internal/ports"
+	"github.com/dostos/relay/internal/shellquote"
 )
 
 const kind = "tmux"
@@ -20,13 +21,16 @@ func New() *Persist { return &Persist{} }
 func (p *Persist) Kind() string { return kind }
 
 func (p *Persist) Create(ctx context.Context, t ports.Transport, name, cwd, command string) (ports.PersistHandle, error) {
+	if err := shellquote.ValidateSessionName(name); err != nil {
+		return ports.PersistHandle{}, err
+	}
 	h := ports.PersistHandle{Kind: kind, Name: name}
 	exists, err := p.Exists(ctx, t, h)
 	if err != nil {
 		return h, err
 	}
 	if exists {
-		return h, nil
+		return h, fmt.Errorf("tmux session %q already exists (pick another --name)", name)
 	}
 	inner := command
 	if inner == "" {
@@ -34,15 +38,18 @@ func (p *Persist) Create(ctx context.Context, t ports.Transport, name, cwd, comm
 	}
 	startDir := `"$HOME"`
 	if cwd != "" {
-		startDir = remotePathExpr(cwd)
+		expr, err := shellquote.PathExpr(cwd)
+		if err != nil {
+			return h, err
+		}
+		startDir = expr
 	}
-	// Create detached session; working directory best-effort via -c.
 	remote := fmt.Sprintf(
-		`mkdir -p %s 2>/dev/null || true; tmux has-session -t %s 2>/dev/null || tmux new-session -d -s %s -c %s -- bash -lc %s`,
+		`mkdir -p %s 2>/dev/null || true; tmux new-session -d -s %s -c %s -- bash -lc %s`,
 		startDir,
-		shellQuote(name), shellQuote(name),
+		shellquote.Quote(name),
 		startDir,
-		shellQuote(inner),
+		shellquote.Quote(inner),
 	)
 	_, stderr, err := t.Run(ctx, "", remote)
 	if err != nil {
@@ -52,7 +59,7 @@ func (p *Persist) Create(ctx context.Context, t ports.Transport, name, cwd, comm
 }
 
 func (p *Persist) Exists(ctx context.Context, t ports.Transport, h ports.PersistHandle) (bool, error) {
-	_, _, err := t.Run(ctx, "", fmt.Sprintf("tmux has-session -t %s", shellQuote(h.Name)))
+	_, _, err := t.Run(ctx, "", fmt.Sprintf("tmux has-session -t %s", shellquote.Quote(h.Name)))
 	if err != nil {
 		return false, nil
 	}
@@ -60,7 +67,7 @@ func (p *Persist) Exists(ctx context.Context, t ports.Transport, h ports.Persist
 }
 
 func (p *Persist) Destroy(ctx context.Context, t ports.Transport, h ports.PersistHandle) error {
-	_, _, err := t.Run(ctx, "", fmt.Sprintf("tmux kill-session -t %s 2>/dev/null || true", shellQuote(h.Name)))
+	_, _, err := t.Run(ctx, "", fmt.Sprintf("tmux kill-session -t %s 2>/dev/null || true", shellquote.Quote(h.Name)))
 	return err
 }
 
@@ -68,7 +75,7 @@ func (p *Persist) Capture(ctx context.Context, t ports.Transport, h ports.Persis
 	if lines <= 0 {
 		lines = 50
 	}
-	cmd := fmt.Sprintf("tmux capture-pane -t %s -p -S -%d", shellQuote(h.Name), lines)
+	cmd := fmt.Sprintf("tmux capture-pane -t %s -p -S -%d", shellquote.Quote(h.Name), lines)
 	stdout, stderr, err := t.Run(ctx, "", cmd)
 	if err != nil {
 		return "", fmt.Errorf("capture: %w (%s)", err, strings.TrimSpace(stderr))
@@ -77,10 +84,9 @@ func (p *Persist) Capture(ctx context.Context, t ports.Transport, h ports.Persis
 }
 
 func (p *Persist) Send(ctx context.Context, t ports.Transport, h ports.PersistHandle, text string, enter bool) error {
-	// Use tmux send-keys -l for literal text.
-	cmd := fmt.Sprintf("tmux send-keys -t %s -l -- %s", shellQuote(h.Name), shellQuote(text))
+	cmd := fmt.Sprintf("tmux send-keys -t %s -l -- %s", shellquote.Quote(h.Name), shellquote.Quote(text))
 	if enter {
-		cmd += fmt.Sprintf("; sleep 0.15; tmux send-keys -t %s Enter", shellQuote(h.Name))
+		cmd += fmt.Sprintf("; sleep 0.15; tmux send-keys -t %s Enter", shellquote.Quote(h.Name))
 	}
 	_, stderr, err := t.Run(ctx, "", cmd)
 	if err != nil {
@@ -90,21 +96,21 @@ func (p *Persist) Send(ctx context.Context, t ports.Transport, h ports.PersistHa
 }
 
 func (p *Persist) Resize(ctx context.Context, t ports.Transport, h ports.PersistHandle) error {
-	// Resync pty winsize to tmux pane size (fixes garbled TUI).
+	q := shellquote.Quote(h.Name)
 	script := fmt.Sprintf(`
 pane=$(tmux display-message -p -t %s '#{pane_tty}')
 w=$(tmux display-message -p -t %s '#{pane_width}')
 h=$(tmux display-message -p -t %s '#{pane_height}')
 stty -F "$pane" cols "$w" rows "$h" 2>/dev/null || stty <"$pane" cols "$w" rows "$h" 2>/dev/null || true
 tmux send-keys -t %s C-l
-`, shellQuote(h.Name), shellQuote(h.Name), shellQuote(h.Name), shellQuote(h.Name))
+`, q, q, q, q)
 	_, _, err := t.Run(ctx, "", script)
 	return err
 }
 
 func (p *Persist) AttachCommand(h ports.PersistHandle, cwd string) string {
 	_ = cwd
-	return fmt.Sprintf("tmux new-session -A -s %s", shellQuote(h.Name))
+	return fmt.Sprintf("tmux new-session -A -s %s", shellquote.Quote(h.Name))
 }
 
 func (p *Persist) DeadStatus(ctx context.Context, t ports.Transport, h ports.PersistHandle) (bool, int, error) {
@@ -117,7 +123,7 @@ func (p *Persist) DeadStatus(ctx context.Context, t ports.Transport, h ports.Per
 	}
 	stdout, _, err := t.Run(ctx, "", fmt.Sprintf(
 		`tmux list-panes -t %s -F '#{pane_dead} #{pane_dead_status}' | head -n1`,
-		shellQuote(h.Name),
+		shellquote.Quote(h.Name),
 	))
 	if err != nil {
 		return false, 0, err
@@ -134,45 +140,35 @@ func (p *Persist) DeadStatus(ctx context.Context, t ports.Transport, h ports.Per
 	return dead, code, nil
 }
 
-func (p *Persist) EventsPath(h ports.PersistHandle) string {
-	return "~/.local/state/relay/events/" + h.Name + ".jsonl"
-}
-
-// InstallEvents wires thin tmux sensors that call host-local `relayd emit` (Unix IPC only).
-// relayd must already be running (relay host bootstrap). No outbound network from hooks.
-func (p *Persist) InstallEvents(ctx context.Context, t ports.Transport, h ports.PersistHandle, silenceSec int) error {
+// InstallSensors wires idle/exit detection. emitCmd is supplied by Coord (no hard-coded relayd).
+func (p *Persist) InstallSensors(ctx context.Context, t ports.Transport, h ports.PersistHandle, silenceSec int, emitCmd func(kind string) string) error {
 	if silenceSec <= 0 {
 		silenceSec = 45
 	}
+	if err := shellquote.ValidateSessionName(h.Name); err != nil {
+		return err
+	}
+	if emitCmd == nil {
+		return fmt.Errorf("emitCmd required")
+	}
+	// emitCmd returns a remote shell command; session name is allowlisted so $SESS
+	// expansion at install time is safe. Never interpolate unvalidated names.
+	exitCmd := emitCmd("exit")
+	idleCmd := emitCmd("idle")
 	hooks := fmt.Sprintf(`
-RELAYD="$HOME/.local/bin/relayd"
-test -x "$RELAYD" || { echo "relayd missing — run: relay host bootstrap" >&2; exit 1; }
 SESS=%s
-# silence-action any is required for sole-window idle detection
 tmux set-option -t "$SESS" monitor-silence %d
 tmux set-option -t "$SESS" silence-action any
-tmux set-hook -t "$SESS" pane-died "run-shell -b '$RELAYD emit -s %s --kind exit'"
-tmux set-hook -t "$SESS" alert-silence "run-shell -b '$RELAYD emit -s %s --kind idle'"
+tmux set-hook -t "$SESS" pane-died "run-shell -b %s"
+tmux set-hook -t "$SESS" alert-silence "run-shell -b %s"
 tmux set-option -t "$SESS" remain-on-exit on
-`, shellQuote(h.Name), silenceSec, h.Name, h.Name)
+`, shellquote.Quote(h.Name), silenceSec,
+		shellquote.Quote(exitCmd),
+		shellquote.Quote(idleCmd),
+	)
 	_, stderr, err := t.Run(ctx, "", hooks)
 	if err != nil {
 		return fmt.Errorf("install sensors: %w (%s)", err, strings.TrimSpace(stderr))
 	}
 	return nil
-}
-
-func remotePathExpr(p string) string {
-	if p == "~" {
-		return `"$HOME"`
-	}
-	if strings.HasPrefix(p, "~/") {
-		rest := strings.ReplaceAll(p[2:], `"`, `\"`)
-		return `"$HOME/` + rest + `"`
-	}
-	return shellQuote(p)
-}
-
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

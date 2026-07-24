@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -170,8 +171,11 @@ func ensurePing(ctx context.Context, t ports.Transport) error {
 	if err != nil {
 		return fmt.Errorf("ping failed: %w (%s)", err, strings.TrimSpace(stderr))
 	}
-	if !strings.Contains(stdout, "ok") && !strings.Contains(stdout, `"ok":true`) {
-		return fmt.Errorf("unexpected ping output: %s", strings.TrimSpace(stdout))
+	var resp struct {
+		OK bool `json:"ok"`
+	}
+	if json.Unmarshal([]byte(strings.TrimSpace(stdout)), &resp) != nil || !resp.OK {
+		return fmt.Errorf("unexpected ping output: %s", strings.TrimSpace(stdout+stderr))
 	}
 	return nil
 }

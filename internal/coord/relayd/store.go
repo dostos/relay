@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dostos/relay/internal/coord"
+	"github.com/dostos/relay/internal/shellquote"
 )
 
 // Store is an append-only per-session JSONL event log with monotonic seq.
@@ -31,15 +32,22 @@ func NewStore(dir string) (*Store, error) {
 	}, nil
 }
 
-func (s *Store) path(session string) string {
-	return filepath.Join(s.dir, session+".jsonl")
+func (s *Store) path(session string) (string, error) {
+	if err := shellquote.ValidateSessionName(session); err != nil {
+		return "", err
+	}
+	return filepath.Join(s.dir, session+".jsonl"), nil
 }
 
 func (s *Store) loadSeqLocked(session string) error {
 	if _, ok := s.seq[session]; ok {
 		return nil
 	}
-	f, err := os.Open(s.path(session))
+	p, err := s.path(session)
+	if err != nil {
+		return err
+	}
+	f, err := os.Open(p)
 	if err != nil {
 		if os.IsNotExist(err) {
 			s.seq[session] = 0
@@ -84,7 +92,11 @@ func (s *Store) Emit(session, kind string, meta map[string]any) (coord.Event, er
 	if err != nil {
 		return coord.Event{}, err
 	}
-	f, err := os.OpenFile(s.path(session), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	p, err := s.path(session)
+	if err != nil {
+		return coord.Event{}, err
+	}
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return coord.Event{}, err
 	}
@@ -97,50 +109,50 @@ func (s *Store) Emit(session, kind string, meta map[string]any) (coord.Event, er
 		select {
 		case ch <- ev:
 		default:
-			// drop if subscriber is slow — they can resume from seq
+			// slow subscriber — client resumes from seq on reconnect
 		}
 	}
 	return ev, nil
 }
 
-// Replay returns events with seq > from.
-func (s *Store) Replay(session string, from int64) ([]coord.Event, error) {
+// ReplayAndSubscribe registers for live events THEN replays seq>from under one lock
+// window so emits cannot slip between replay and subscribe.
+func (s *Store) ReplayAndSubscribe(session string, from int64) ([]coord.Event, chan coord.Event, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.loadSeqLocked(session); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	f, err := os.Open(s.path(session))
+	p, err := s.path(session)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
+		return nil, nil, err
 	}
-	defer f.Close()
 	var out []coord.Event
-	sc := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	sc.Buffer(buf, 1024*1024)
-	for sc.Scan() {
-		var ev coord.Event
-		if json.Unmarshal(sc.Bytes(), &ev) != nil {
-			continue
+	f, err := os.Open(p)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, nil, err
+	}
+	if f != nil {
+		sc := bufio.NewScanner(f)
+		buf := make([]byte, 0, 64*1024)
+		sc.Buffer(buf, 1024*1024)
+		for sc.Scan() {
+			var ev coord.Event
+			if json.Unmarshal(sc.Bytes(), &ev) != nil {
+				continue
+			}
+			if ev.Seq > from {
+				out = append(out, ev)
+			}
 		}
-		if ev.Seq > from {
-			out = append(out, ev)
+		_ = f.Close()
+		if err := sc.Err(); err != nil {
+			return nil, nil, err
 		}
 	}
-	return out, sc.Err()
-}
-
-// SubscribeLive registers for new events; caller must Unsubscribe.
-func (s *Store) SubscribeLive(session string) chan coord.Event {
 	ch := make(chan coord.Event, 64)
-	s.mu.Lock()
 	s.sub[session] = append(s.sub[session], ch)
-	s.mu.Unlock()
-	return ch
+	return out, ch, nil
 }
 
 func (s *Store) Unsubscribe(session string, ch chan coord.Event) {

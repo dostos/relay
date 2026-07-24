@@ -64,8 +64,3 @@ func EnsureStateDirs() error {
 func RemoteHostProfilePath() string {
 	return "~/" + RemoteConfigRel
 }
-
-// RemoteEventsDir is the remote directory for event logs.
-func RemoteEventsDir() string {
-	return "~/" + RemoteStateRel + "/events"
-}
