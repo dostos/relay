@@ -9,7 +9,7 @@ import (
 )
 
 // ApplyChrome stamps a distinctive teal status bar so relay-managed tmux
-// sessions are visually different from plain/sst attaches.
+// sessions are visually distinct from unmanaged attaches.
 func ApplyChrome(ctx context.Context, t ports.Transport, h ports.PersistHandle) error {
 	if err := shellquote.ValidateSessionName(h.Name); err != nil {
 		return err

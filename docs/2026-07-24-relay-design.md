@@ -1,12 +1,11 @@
-# relay — greenfield session + handoff control plane
+# relay — session + handoff control plane
 
 Date: 2026-07-24  
-Status: Implemented (v0.1.0)  
-Supersedes: sst session/handoff/pane orchestration for new work
+Status: Implemented (v0.1.0)
 
 ## Problem
 
-`sst` conflated SSH transport, tmux persistence, cmux visualization, agent launch, and event-driven handoff into one bash CLI. Failures were cross-layer; recovery lived in skills.
+SSH transport, tmux persistence, cmux visualization, agent launch, and event-driven handoff need a single control plane with clear ports — not a conflated bash CLI where failures cross layers and recovery lives in skills.
 
 ## Decisions
 
@@ -65,18 +64,3 @@ SSH config remains connection source of truth. Discover never writes; init dry-r
 `pending → running → needs_input ↔ running → done|failed|abandoned`
 
 Events: `started`, `idle`, `needs_input`, `note`, `inject`, `exit` with monotonic `seq`. Resume with `--from SEQ`.
-
-## sst migration
-
-| sst | relay |
-|-----|-------|
-| `sst query --json --live` | `relay session list --json` + host probe |
-| `sst exec/capture/send` | `relay session exec/capture/send` |
-| `sst pane pair/remote` | `relay viz present` |
-| `sst handoff` | `relay handoff` |
-| `sst events tail -f` | `relay events tail -f --handoff` |
-| `sst handoff finalize` | `relay handoff finalize` |
-| convention `~/dev→gh` | host `path_map` |
-| skill auth ladder | `relay host probe` + profile agents |
-
-Deprecate sst skills once hosts are profiled and daily flows use relay.

@@ -3,7 +3,7 @@ package core
 import "strings"
 
 // ProjectLabel returns the short project name shown in ◆ RELAY · <project>.
-// Strips the common dostos-workspace- prefix used by sst-era session names.
+// Strips the common dostos-workspace- prefix used by older session names.
 func ProjectLabel(persistName string) string {
 	name := strings.TrimSpace(persistName)
 	name = strings.TrimPrefix(name, "dostos-workspace-")

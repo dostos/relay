@@ -101,7 +101,7 @@ func (s *SessionService) Create(ctx context.Context, opts CreateOpts) (*Session,
 	return sess, nil
 }
 
-// Adopt registers an already-running remote tmux session (e.g. migrating from sst).
+// Adopt registers an already-running remote tmux session.
 // Does not create a new tmux session; fails if the remote name is missing.
 func (s *SessionService) Adopt(ctx context.Context, opts CreateOpts) (*Session, error) {
 	if opts.HostID == "" {
@@ -143,7 +143,7 @@ func (s *SessionService) Adopt(ctx context.Context, opts CreateOpts) (*Session, 
 		labels = map[string]string{}
 	}
 	if _, has := labels["adopted"]; !has {
-		labels["adopted"] = "sst"
+		labels["adopted"] = "existing"
 	}
 	sess := &Session{
 		ID:        newID("sess"),

@@ -194,7 +194,7 @@ Host profiles (authoritative on each remote ~/.config/relay/host.yaml):
 Sessions (explicit id; no guesswork):
   relay session create -H HOST [--repo DIR] [--cwd REMOTE] [--name NAME]
   relay session adopt -H HOST --name TMUX [--cwd REMOTE] [--repo DIR]
-                                      Register existing tmux (sst migration)
+                                      Register an already-running remote tmux
   relay session list
   relay session get ID
   relay session capture ID [-n LINES]
@@ -515,7 +515,7 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 		return a.errOut(a.out(s))
 	case "adopt":
 		host, rest := flagHost(args[1:])
-		opts := core.CreateOpts{HostID: host, Labels: map[string]string{"adopted": "sst"}}
+		opts := core.CreateOpts{HostID: host, Labels: map[string]string{"adopted": "existing"}}
 		for i := 0; i < len(rest); i++ {
 			switch rest[i] {
 			case "--repo":

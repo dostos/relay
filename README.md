@@ -1,6 +1,6 @@
 # relay
 
-Greenfield **session + handoff control plane**. Replaces the conflated `sst` workflow with a clean core and pluggable adapters:
+**Session + handoff control plane** with pluggable adapters:
 
 | Port | Default | Role |
 |------|---------|------|
@@ -19,15 +19,20 @@ cd ~/dev/relay
 relay doctor --json
 ```
 
+## New machine
+
+```bash
+relay targets --json
+relay host discover -H HOST --json
+relay host init -H HOST --apply       # bootstrap relayd + write host.yaml
+```
+
 ## Host profiles + relayd (authoritative on each remote)
 
 Each target keeps `~/.config/relay/host.yaml` — agents available there, project path maps, defaults. Local only caches.
 
-Also install always-on **relayd** (Unix socket at `~/.local/state/relay/relayd.sock` — **no TCP listen**; campus-IPS safe):
-
 ```bash
 relay host example -H c1          # starter YAML
-# copy to remote: ~/.config/relay/host.yaml
 relay host bootstrap -H c1        # one quiet SSH upload + user systemd/nohup
 relay host fetch -H c1
 relay host probe -H c1            # PATH + light auth checks + relayd ping
@@ -95,10 +100,6 @@ Core never imports SSH/tmux/cmux quirks into business logic. See `internal/ports
 - `internal/transport/ssh`
 - `internal/persist/tmux`
 - `internal/viz/cmux`
-
-## Deprecating sst
-
-`relay` is the replacement for `sst` session/handoff/pane flows. `./install.sh` installs `relay-*` skills and redirects legacy `sst-*` names to cutover shims. See `docs/2026-07-24-relay-design.md`.
 
 ## Develop
 

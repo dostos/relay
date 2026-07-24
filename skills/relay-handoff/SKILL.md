@@ -1,6 +1,6 @@
 ---
 name: relay-handoff
-description: Use when handing a goal to a remote relay (or legacy sst) session. Prefer relay agent JSON verbs; no event poll loops. Replaces sst-handoff.
+description: Use when handing a goal to a remote relay session. Prefer relay agent JSON verbs; no event poll loops.
 ---
 
 # relay agent (follow `next`)
