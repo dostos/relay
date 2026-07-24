@@ -96,7 +96,7 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 	if err := h.Coord.Ensure(ctx, t); err != nil {
 		return nil, nil, err
 	}
-	emitFactory := func(kind string) string {
+	emitFactory := func(kind string) (string, error) {
 		return h.Coord.SensorCommand(sess.Persist.Name, kind)
 	}
 	if err := h.Persist.InstallSensors(ctx, t, sess.Persist, silence, emitFactory); err != nil {

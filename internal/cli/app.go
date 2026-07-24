@@ -88,8 +88,19 @@ func (a *App) out(v any) error {
 }
 
 func (a *App) fail(err error) int {
+	if a.JSON {
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": false, "error": err.Error()})
+		return 1
+	}
 	fmt.Fprintf(os.Stderr, "relay: %v\n", err)
 	return 1
+}
+
+func rejectUnknownFlag(arg string) error {
+	if strings.HasPrefix(arg, "-") {
+		return fmt.Errorf("unknown flag %q", arg)
+	}
+	return fmt.Errorf("unexpected argument %q", arg)
 }
 
 // Run dispatches argv (without program name).
@@ -97,7 +108,7 @@ func (a *App) Run(args []string) int {
 	if len(args) == 0 {
 		return a.cmdHelp()
 	}
-	// global flags
+	// global flags (only --json is global; other dashed tokens belong to subcommands)
 	filtered := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -109,6 +120,9 @@ func (a *App) Run(args []string) int {
 			}
 			filtered = append(filtered, args[i])
 		default:
+			if len(filtered) == 0 && strings.HasPrefix(args[i], "-") {
+				return a.fail(fmt.Errorf("unknown flag %q", args[i]))
+			}
 			filtered = append(filtered, args[i])
 		}
 	}
@@ -217,6 +231,9 @@ func (a *App) cmdHost(ctx context.Context, args []string) int {
 		fmt.Print(core.ExampleHostProfileYAML(host))
 		return 0
 	case "show", "fetch": // fetch is alias of show (remote-authoritative pull)
+		if err := requireNoExtra(rest); err != nil {
+			return a.fail(err)
+		}
 		if host == "" {
 			return a.fail(fmt.Errorf("-H HOST required"))
 		}
@@ -226,6 +243,9 @@ func (a *App) cmdHost(ctx context.Context, args []string) int {
 		}
 		return a.errOut(a.out(p))
 	case "cache":
+		if err := requireNoExtra(rest); err != nil {
+			return a.fail(err)
+		}
 		if host == "" {
 			return a.fail(fmt.Errorf("-H HOST required"))
 		}
@@ -235,6 +255,9 @@ func (a *App) cmdHost(ctx context.Context, args []string) int {
 		}
 		return a.errOut(a.out(c))
 	case "probe":
+		if err := requireNoExtra(rest); err != nil {
+			return a.fail(err)
+		}
 		if host == "" {
 			return a.fail(fmt.Errorf("-H HOST required"))
 		}
@@ -254,6 +277,9 @@ func (a *App) cmdHost(ctx context.Context, args []string) int {
 		}
 		return a.errOut(a.out(p))
 	case "bootstrap":
+		if err := requireNoExtra(rest); err != nil {
+			return a.fail(err)
+		}
 		if host == "" {
 			return a.fail(fmt.Errorf("-H HOST required"))
 		}
@@ -269,6 +295,13 @@ func (a *App) cmdHost(ctx context.Context, args []string) int {
 		_ = rest
 		return a.fail(fmt.Errorf("unknown host subcommand %q", sub))
 	}
+}
+
+func requireNoExtra(rest []string) error {
+	if len(rest) == 0 {
+		return nil
+	}
+	return rejectUnknownFlag(rest[0])
 }
 
 func (a *App) errOut(err error) int {
@@ -335,6 +368,8 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 				if i < len(rest) {
 					opts.Name = rest[i]
 				}
+			default:
+				return a.fail(rejectUnknownFlag(rest[i]))
 			}
 		}
 		if opts.RepoRef == "" && opts.RemoteCWD == "" {
@@ -359,9 +394,15 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 		id := args[1]
 		n := 50
 		for i := 2; i < len(args); i++ {
-			if (args[i] == "-n" || args[i] == "--lines") && i+1 < len(args) {
+			switch args[i] {
+			case "-n", "--lines":
+				if i+1 >= len(args) {
+					return a.fail(fmt.Errorf("%s requires a value", args[i]))
+				}
 				n, _ = strconv.Atoi(args[i+1])
 				i++
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
 			}
 		}
 		text, err := a.Sessions.Capture(ctx, id, n)
@@ -432,8 +473,11 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 		}
 		keep := false
 		for _, x := range args[2:] {
-			if x == "--keep-remote" {
+			switch x {
+			case "--keep-remote":
 				keep = true
+			default:
+				return a.fail(rejectUnknownFlag(x))
 			}
 		}
 		if err := a.Sessions.Destroy(ctx, args[1], keep); err != nil {
@@ -500,6 +544,8 @@ func (a *App) cmdHandoff(ctx context.Context, args []string) int {
 				}
 			case "--keep-session":
 				keep = true
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
 			}
 		}
 		h, err := a.Handoffs.Finalize(ctx, id, outcome, keep)
@@ -557,6 +603,8 @@ func (a *App) cmdHandoff(ctx context.Context, args []string) int {
 			if i < len(rest) {
 				opts.Silence, _ = strconv.Atoi(rest[i])
 			}
+		default:
+			return a.fail(rejectUnknownFlag(rest[i]))
 		}
 	}
 	if opts.RepoRef == "" && opts.RemoteCWD == "" {
@@ -594,6 +642,8 @@ func (a *App) cmdEvents(ctx context.Context, args []string) int {
 				if i < len(args) {
 					kind = args[i]
 				}
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
 			}
 		}
 		if handoffID == "" || kind == "" {
@@ -622,6 +672,8 @@ func (a *App) cmdEvents(ctx context.Context, args []string) int {
 				if i < len(args) {
 					from, _ = strconv.ParseInt(args[i], 10, 64)
 				}
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
 			}
 		}
 		if handoffID == "" {
@@ -705,7 +757,10 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 		OK     bool   `json:"ok"`
 		Detail string `json:"detail,omitempty"`
 	}
-	host, _ := flagHost(args)
+	host, rest := flagHost(args)
+	if err := requireNoExtra(rest); err != nil {
+		return a.fail(err)
+	}
 	var checks []check
 	if _, err := exec.LookPath("ssh"); err != nil {
 		checks = append(checks, check{"ssh", false, err.Error()})

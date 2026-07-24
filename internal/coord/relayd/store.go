@@ -14,6 +14,7 @@ import (
 )
 
 // Store is an append-only per-session JSONL event log with monotonic seq.
+// A single mutex covers all sessions (fine for v0.1; see github.com/dostos/relay#36).
 type Store struct {
 	dir string
 	mu  sync.Mutex
@@ -71,6 +72,7 @@ func (s *Store) loadSeqLocked(session string) error {
 }
 
 // Emit appends an event and notifies subscribers.
+// Seq advances only after a successful disk write so failures do not gap the stream.
 func (s *Store) Emit(session, kind string, meta map[string]any) (coord.Event, error) {
 	if session == "" || kind == "" {
 		return coord.Event{}, fmt.Errorf("session and kind required")
@@ -80,10 +82,10 @@ func (s *Store) Emit(session, kind string, meta map[string]any) (coord.Event, er
 	if err := s.loadSeqLocked(session); err != nil {
 		return coord.Event{}, err
 	}
-	s.seq[session]++
+	next := s.seq[session] + 1
 	ev := coord.Event{
 		TS:   time.Now().UTC().Format(time.RFC3339),
-		Seq:  s.seq[session],
+		Seq:  next,
 		Sess: session,
 		Kind: kind,
 		Meta: meta,
@@ -105,6 +107,7 @@ func (s *Store) Emit(session, kind string, meta map[string]any) (coord.Event, er
 	if err != nil {
 		return coord.Event{}, err
 	}
+	s.seq[session] = next
 	for _, ch := range s.sub[session] {
 		select {
 		case ch <- ev:

@@ -69,7 +69,14 @@ func (c *Coord) Subscribe(ctx context.Context, t ports.Transport, session string
 	return t.RunStream(ctx, "", cmd, w)
 }
 
-// SensorCommand returns a remote emit command. session must already be validated.
-func (c *Coord) SensorCommand(session, kind string) string {
-	return fmt.Sprintf("$HOME/.local/bin/relayd emit -s %s --kind %s", session, kind)
+// SensorCommand returns a remote emit command after validating session and kind.
+func (c *Coord) SensorCommand(session, kind string) (string, error) {
+	if err := shellquote.ValidateSessionName(session); err != nil {
+		return "", err
+	}
+	if err := shellquote.ValidateEventKind(kind); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("$HOME/.local/bin/relayd emit -s %s --kind %s",
+		shellquote.Quote(session), shellquote.Quote(kind)), nil
 }

@@ -8,6 +8,7 @@ import (
 )
 
 var sessionNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+var eventKindRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // Quote returns a single-quoted shell string safe against injection.
 func Quote(s string) string {
@@ -43,6 +44,17 @@ func ValidateSessionName(name string) error {
 	}
 	if strings.Contains(name, "..") {
 		return fmt.Errorf("invalid session name %q", name)
+	}
+	return nil
+}
+
+// ValidateEventKind rejects event kinds unsafe for shell interpolation.
+func ValidateEventKind(kind string) error {
+	if !eventKindRE.MatchString(kind) {
+		return fmt.Errorf("invalid event kind %q (use [A-Za-z0-9._-]{1,64}, start alnum)", kind)
+	}
+	if strings.Contains(kind, "..") {
+		return fmt.Errorf("invalid event kind %q", kind)
 	}
 	return nil
 }

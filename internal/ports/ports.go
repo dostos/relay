@@ -40,7 +40,7 @@ type Persistence interface {
 	// InstallSensors wires idle/exit detection. emitCmd(kind) returns a remote
 	// shell command supplied by Coord (e.g. relayd emit) — Persistence must not
 	// hard-code a Coord implementation.
-	InstallSensors(ctx context.Context, t Transport, h PersistHandle, silenceSec int, emitCmd func(kind string) string) error
+	InstallSensors(ctx context.Context, t Transport, h PersistHandle, silenceSec int, emitCmd func(kind string) (string, error)) error
 }
 
 // Layout describes how to present a session in a visual surface.
@@ -66,6 +66,6 @@ type Coord interface {
 	Subscribe(ctx context.Context, t Transport, session string, fromSeq int64, follow bool, w io.Writer) error
 	EventsPath(persistName string) string
 	// SensorCommand returns a remote shell command that emits kind for session
-	// (used by Persistence sensors). Must be safe given a validated session name.
-	SensorCommand(session, kind string) string
+	// (used by Persistence sensors). Validates session and kind defensively.
+	SensorCommand(session, kind string) (string, error)
 }

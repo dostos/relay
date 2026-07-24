@@ -25,25 +25,45 @@ func New(host string) *Transport {
 
 func (t *Transport) ID() string { return t.Host }
 
-func controlPath() string {
-	home, _ := os.UserHomeDir()
+func controlPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("ssh control path: %w", err)
+	}
 	dir := filepath.Join(home, ".ssh", "relay-cm")
-	_ = os.MkdirAll(dir, 0o700)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("ssh control path: %w", err)
+	}
 	// %C is a hash of %l%h%p%r — short and safe for path length limits.
-	return filepath.Join(dir, "%C")
+	return filepath.Join(dir, "%C"), nil
 }
 
-func (t *Transport) sshBase(ctx context.Context, extra ...string) *exec.Cmd {
+// controlOpts returns shared ControlMaster settings (single source for all SSH launches).
+func controlOpts() ([]string, error) {
+	cp, err := controlPath()
+	if err != nil {
+		return nil, err
+	}
+	return []string{
+		"-o", "ControlMaster=auto",
+		"-o", "ControlPath=" + cp,
+		"-o", "ControlPersist=60",
+	}, nil
+}
+
+func (t *Transport) sshBase(ctx context.Context, extra ...string) (*exec.Cmd, error) {
+	ctrl, err := controlOpts()
+	if err != nil {
+		return nil, err
+	}
 	base := []string{
 		"-o", "BatchMode=yes",
 		"-o", "ConnectTimeout=15",
-		"-o", "ControlMaster=auto",
-		"-o", "ControlPath=" + controlPath(),
-		"-o", "ControlPersist=60",
-		t.Host,
 	}
+	base = append(base, ctrl...)
+	base = append(base, t.Host)
 	base = append(base, extra...)
-	return exec.CommandContext(ctx, "ssh", base...)
+	return exec.CommandContext(ctx, "ssh", base...), nil
 }
 
 func (t *Transport) Run(ctx context.Context, cwd, command string) (string, string, error) {
@@ -55,11 +75,14 @@ func (t *Transport) Run(ctx context.Context, cwd, command string) (string, strin
 		}
 		remote = fmt.Sprintf("cd %s && %s", expr, command)
 	}
-	cmd := t.sshBase(ctx, remote)
+	cmd, err := t.sshBase(ctx, remote)
+	if err != nil {
+		return "", "", err
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err := cmd.Run()
+	err = cmd.Run()
 	return stdout.String(), stderr.String(), err
 }
 
@@ -72,16 +95,17 @@ func (t *Transport) RunStream(ctx context.Context, cwd, command string, w io.Wri
 		}
 		remote = fmt.Sprintf("cd %s && %s", expr, command)
 	}
+	ctrl, err := controlOpts()
+	if err != nil {
+		return err
+	}
 	args := []string{
 		"-o", "BatchMode=yes",
 		"-o", "ServerAliveInterval=30",
 		"-o", "ServerAliveCountMax=4",
-		"-o", "ControlMaster=auto",
-		"-o", "ControlPath=" + controlPath(),
-		"-o", "ControlPersist=60",
-		t.Host,
-		remote,
 	}
+	args = append(args, ctrl...)
+	args = append(args, t.Host, remote)
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 	cmd.Stdout = w
 	cmd.Stderr = w
@@ -112,7 +136,10 @@ func (t *Transport) WriteFile(ctx context.Context, path string, data []byte, mod
 		`mkdir -p "$(dirname %s)" && cat > %s && chmod %s %s`,
 		expr, expr, mode, expr,
 	)
-	cmd := t.sshBase(ctx, script)
+	cmd, err := t.sshBase(ctx, script)
+	if err != nil {
+		return err
+	}
 	cmd.Stdin = bytes.NewReader(data)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -123,12 +150,12 @@ func (t *Transport) WriteFile(ctx context.Context, path string, data []byte, mod
 }
 
 func (t *Transport) Interactive(ctx context.Context, command string) error {
-	args := []string{
-		"-o", "ControlMaster=auto",
-		"-o", "ControlPath=" + controlPath(),
-		"-o", "ControlPersist=60",
-		"-t", t.Host, command,
+	ctrl, err := controlOpts()
+	if err != nil {
+		return err
 	}
+	args := append([]string{}, ctrl...)
+	args = append(args, "-t", t.Host, command)
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout

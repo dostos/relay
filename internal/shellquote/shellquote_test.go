@@ -17,6 +17,21 @@ func TestValidateSessionName(t *testing.T) {
 	}
 }
 
+func TestValidateEventKind(t *testing.T) {
+	ok := []string{"exit", "idle", "started", "a1._-"}
+	for _, s := range ok {
+		if err := ValidateEventKind(s); err != nil {
+			t.Fatalf("%q: %v", s, err)
+		}
+	}
+	bad := []string{"", "x;rm", "$(hi)", "-bad", "a b"}
+	for _, s := range bad {
+		if err := ValidateEventKind(s); err == nil {
+			t.Fatalf("expected reject %q", s)
+		}
+	}
+}
+
 func TestPathExprTildeSafe(t *testing.T) {
 	got, err := PathExpr(`~/$(rm -rf ~)`)
 	if err != nil {

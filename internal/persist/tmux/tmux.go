@@ -141,7 +141,7 @@ func (p *Persist) DeadStatus(ctx context.Context, t ports.Transport, h ports.Per
 }
 
 // InstallSensors wires idle/exit detection. emitCmd is supplied by Coord (no hard-coded relayd).
-func (p *Persist) InstallSensors(ctx context.Context, t ports.Transport, h ports.PersistHandle, silenceSec int, emitCmd func(kind string) string) error {
+func (p *Persist) InstallSensors(ctx context.Context, t ports.Transport, h ports.PersistHandle, silenceSec int, emitCmd func(kind string) (string, error)) error {
 	if silenceSec <= 0 {
 		silenceSec = 45
 	}
@@ -151,10 +151,15 @@ func (p *Persist) InstallSensors(ctx context.Context, t ports.Transport, h ports
 	if emitCmd == nil {
 		return fmt.Errorf("emitCmd required")
 	}
-	// emitCmd returns a remote shell command; session name is allowlisted so $SESS
-	// expansion at install time is safe. Never interpolate unvalidated names.
-	exitCmd := emitCmd("exit")
-	idleCmd := emitCmd("idle")
+	// emitCmd returns a remote shell command; session/kind are validated+quoted by Coord.
+	exitCmd, err := emitCmd("exit")
+	if err != nil {
+		return err
+	}
+	idleCmd, err := emitCmd("idle")
+	if err != nil {
+		return err
+	}
 	hooks := fmt.Sprintf(`
 SESS=%s
 tmux set-option -t "$SESS" monitor-silence %d

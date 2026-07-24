@@ -1,6 +1,8 @@
 package relayd
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -38,5 +40,32 @@ func TestStoreRejectsTraversal(t *testing.T) {
 	}
 	if _, err := s.Emit("../etc", "x", nil); err == nil {
 		t.Fatal("expected reject")
+	}
+}
+
+func TestStoreEmitNoSeqGapOnWriteFail(t *testing.T) {
+	dir := t.TempDir()
+	s, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev1, err := s.Emit("sess1", "started", nil)
+	if err != nil || ev1.Seq != 1 {
+		t.Fatalf("ev1 %+v err %v", ev1, err)
+	}
+	p := filepath.Join(dir, "sess1.jsonl")
+	if err := os.Chmod(p, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(p, 0o600) })
+	if _, err := s.Emit("sess1", "exit", nil); err == nil {
+		t.Fatal("expected write failure")
+	}
+	if err := os.Chmod(p, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ev2, err := s.Emit("sess1", "exit", nil)
+	if err != nil || ev2.Seq != 2 {
+		t.Fatalf("want seq 2 after recovered write, got %+v err %v", ev2, err)
 	}
 }
