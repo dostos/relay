@@ -70,7 +70,9 @@ func SanitizeSessionName(name string) (string, error) {
 	if out == "" {
 		return "", fmt.Errorf("cannot sanitize session name %q", name)
 	}
-	if out[0] >= '0' && out[0] <= '9' || out[0] == '.' || out[0] == '_' || out[0] == '-' {
+	// Regex already allows leading alnum (including digits). Only force a prefix
+	// when the first rune is still a separator after trim.
+	if out[0] == '.' || out[0] == '_' || out[0] == '-' {
 		out = "s" + out
 	}
 	if err := ValidateSessionName(out); err != nil {
