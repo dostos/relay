@@ -1,0 +1,17 @@
+[Unit]
+Description=relayd event coordinator (Unix socket only)
+After=default.target
+# Crash-loop guard — do not spam restarts (campus IPS / noisiness)
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/relayd serve
+Restart=on-failure
+RestartSec=5
+# No network binding; unix socket under XDG state
+Environment=RELAYD_SOCK=%h/.local/state/relay/relayd.sock
+
+[Install]
+WantedBy=default.target

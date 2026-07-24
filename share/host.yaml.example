@@ -1,0 +1,26 @@
+# Copy to each remote as ~/.config/relay/host.yaml
+# This file is authoritative on the host; local relay only caches it.
+version: 1
+host_id: REPLACE_WITH_SSH_ALIAS
+
+agents:
+  - name: claude
+    command: claude
+  - name: cursor-agent
+    command: cursor-agent
+  - name: codex
+    command: codex
+  - name: ccs:personal
+    command: ccs personal
+
+path_map:
+  - match: relay
+    remote_cwd: ~/gh/relay
+  - match: opaquebench
+    remote_cwd: ~/gh/opaquebench
+  - match: dostos-workspace
+    remote_cwd: ~/gh/dostos-workspace
+
+defaults:
+  preferred_agent: claude
+  silence_sec: 45
