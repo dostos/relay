@@ -11,10 +11,10 @@ description: DEPRECATED — sst handoff is replaced by relay. Use when an agent 
 |-----------|-------------|
 | `sst handoff -H HOST --agent … --goal …` | `relay handoff -H HOST --agent … --goal …` |
 | `sst handoff -H HOST --cmd …` | `relay handoff -H HOST --cmd …` |
-| `sst events …` / JSONL `tail -F` | `relay events tail -f --handoff ho-… --from N` |
-| finalize / ledger | `relay handoff finalize ho-…` |
+| `sst events …` / JSONL `tail -F` | `relay agent wait --handoff ho-…` (blocking; no loops) |
+| finalize / ledger | `relay agent done --handoff ho-…` |
 
-Load skill **`relay-handoff`** and follow it. Requires `relay host bootstrap -H HOST` once (always-on `relayd`, Unix socket only).
+Load skill **`relay-handoff`**. Follow JSON `next`/`argv`. Requires `relay host bootstrap -H HOST` once.
 
 ```bash
 cd ~/dev/relay && ./install.sh

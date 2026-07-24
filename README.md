@@ -48,16 +48,20 @@ relay session resize sess-…       # pty resync (tmux adapter)
 relay session attach sess-…       # humans only; agents use capture/send
 ```
 
-## Handoffs (goal-based / long-running)
+## Agent surface (token-efficient; no poll loops)
+
+Orchestrators should use `relay agent` and follow JSON `next` / `argv` — never `events tail -f` in a loop.
 
 ```bash
-relay handoff -H c1 --agent claude --goal "port the scheduler; keep tests green"
-# prints JSON binding {handoff_id, session_id, watch, …}
-
-relay events tail -f --handoff ho-… --from 0
-relay handoff finalize ho-… --outcome done
-relay viz close sess-…            # optional; finalize does not require viz
+relay agent start -H c1 --agent claude --goal "port the scheduler; keep tests green"
+# → {"next":"wait","argv":["relay","agent","wait",…]}
+relay agent wait --handoff ho-… [--from N] [--timeout 120]   # blocks once
+relay agent send --handoff ho-… -- "…"                       # agent only; refused on jobs
+relay agent done --handoff ho-… --outcome done
+relay agent status --handoff ho-…                            # resume after compaction
 ```
+
+Lower-level `relay handoff` / `relay events` remain for humans/debug.
 
 State machine: `pending → running → needs_input ↔ running → done|failed|abandoned`.
 
@@ -71,7 +75,7 @@ Core never imports SSH/tmux/cmux quirks into business logic. See `internal/ports
 
 ## Deprecating sst
 
-`relay` is the replacement for `sst` session/handoff/pane flows. Keep `sst` installed until your hosts have `host.yaml` and daily flows are migrated; then remove skill symlinks for `sst-sessions` / `sst-handoff` and use `relay-*` skills instead. See `docs/2026-07-24-relay-design.md`.
+`relay` is the replacement for `sst` session/handoff/pane flows. `./install.sh` installs `relay-*` skills and redirects legacy `sst-*` names to cutover shims. See `docs/2026-07-24-relay-design.md`.
 
 ## Develop
 

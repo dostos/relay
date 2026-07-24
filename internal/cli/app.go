@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dostos/relay/internal/coord/sshcoord"
 	"github.com/dostos/relay/internal/core"
@@ -142,6 +143,8 @@ func (a *App) Run(args []string) int {
 		return a.cmdSession(ctx, filtered[1:])
 	case "handoff":
 		return a.cmdHandoff(ctx, filtered[1:])
+	case "agent":
+		return a.cmdAgent(ctx, filtered[1:])
 	case "events":
 		return a.cmdEvents(ctx, filtered[1:])
 	case "viz", "pane":
@@ -187,6 +190,15 @@ Handoffs (goal-based / long-running):
   relay handoff get ID
   relay handoff finalize ID [--outcome done|failed|abandoned] [--keep-session]
   relay handoff reconcile
+
+Agent surface (token-efficient; always JSON; NO poll loops):
+  relay agent start -H HOST --agent NAME --goal TEXT | --cmd CMD [--no-pane]
+  relay agent wait --handoff ID [--from SEQ] [--timeout SEC]   # blocks once
+  relay agent send --handoff ID -- TEXT
+  relay agent capture --handoff ID [-n LINES]
+  relay agent done --handoff ID [--outcome done|failed|abandoned] [--keep-session]
+  relay agent status --handoff ID
+  # Follow response.next / response.argv. Never events tail -f in a loop.
 
 Events (via always-on relayd on the host):
   relay events tail [-f] --handoff ID [--from SEQ]
@@ -710,6 +722,236 @@ func (a *App) cmdEvents(ctx context.Context, args []string) int {
 		return 0
 	default:
 		return a.fail(fmt.Errorf("usage: relay events tail|emit …"))
+	}
+}
+
+func (a *App) cmdAgent(ctx context.Context, args []string) int {
+	// Agent surface is always JSON (token-efficient machine contract).
+	a.JSON = true
+	if len(args) == 0 {
+		return a.fail(fmt.Errorf("usage: relay agent start|wait|send|capture|done|status …"))
+	}
+	switch args[0] {
+	case "start":
+		host, rest := flagHost(args[1:])
+		opts := core.HandoffOpts{HostID: host}
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case "--agent":
+				i++
+				if i < len(rest) {
+					opts.Agent = rest[i]
+				}
+			case "--goal":
+				i++
+				if i < len(rest) {
+					opts.Goal = rest[i]
+				}
+			case "--cmd", "--command":
+				i++
+				if i < len(rest) {
+					opts.Command = rest[i]
+				}
+			case "--repo":
+				i++
+				if i < len(rest) {
+					opts.RepoRef = rest[i]
+				}
+			case "--cwd", "-R":
+				i++
+				if i < len(rest) {
+					opts.RemoteCWD = rest[i]
+				}
+			case "--name", "-s":
+				i++
+				if i < len(rest) {
+					opts.Name = rest[i]
+				}
+			case "--no-pane":
+				opts.NoPane = true
+			case "--silence":
+				i++
+				if i < len(rest) {
+					opts.Silence, _ = strconv.Atoi(rest[i])
+				}
+			default:
+				return a.fail(rejectUnknownFlag(rest[i]))
+			}
+		}
+		if opts.RepoRef == "" && opts.RemoteCWD == "" {
+			if root, err := findGitRoot(""); err == nil {
+				opts.RepoRef = root
+			}
+		}
+		resp, err := a.Handoffs.AgentStart(ctx, opts)
+		if resp != nil {
+			_ = a.out(resp)
+		}
+		if err != nil {
+			return 1
+		}
+		return 0
+	case "wait":
+		var handoffID string
+		var from int64
+		timeoutSec := 120
+		for i := 1; i < len(args); i++ {
+			switch args[i] {
+			case "--handoff":
+				i++
+				if i < len(args) {
+					handoffID = args[i]
+				}
+			case "--from":
+				i++
+				if i < len(args) {
+					from, _ = strconv.ParseInt(args[i], 10, 64)
+				}
+			case "--timeout":
+				i++
+				if i < len(args) {
+					timeoutSec, _ = strconv.Atoi(args[i])
+				}
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
+			}
+		}
+		if handoffID == "" {
+			return a.fail(fmt.Errorf("--handoff ID required"))
+		}
+		resp, err := a.Handoffs.AgentWait(ctx, handoffID, from, time.Duration(timeoutSec)*time.Second)
+		if resp != nil {
+			_ = a.out(resp)
+		}
+		if err != nil && (resp == nil || !resp.OK) {
+			return 1
+		}
+		return 0
+	case "send":
+		var handoffID string
+		var rest []string
+		for i := 1; i < len(args); i++ {
+			switch args[i] {
+			case "--handoff":
+				i++
+				if i < len(args) {
+					handoffID = args[i]
+				}
+			case "--":
+				rest = args[i+1:]
+				i = len(args)
+			default:
+				if strings.HasPrefix(args[i], "-") {
+					return a.fail(rejectUnknownFlag(args[i]))
+				}
+				rest = args[i:]
+				i = len(args)
+			}
+		}
+		text := strings.Join(rest, " ")
+		if handoffID == "" || text == "" {
+			return a.fail(fmt.Errorf("usage: relay agent send --handoff ID -- TEXT"))
+		}
+		resp, err := a.Handoffs.AgentSend(ctx, handoffID, text)
+		if resp != nil {
+			_ = a.out(resp)
+		}
+		if err != nil {
+			return 1
+		}
+		return 0
+	case "capture":
+		var handoffID string
+		n := 80
+		for i := 1; i < len(args); i++ {
+			switch args[i] {
+			case "--handoff":
+				i++
+				if i < len(args) {
+					handoffID = args[i]
+				}
+			case "-n", "--lines":
+				i++
+				if i < len(args) {
+					n, _ = strconv.Atoi(args[i])
+				}
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
+			}
+		}
+		if handoffID == "" {
+			return a.fail(fmt.Errorf("--handoff ID required"))
+		}
+		resp, err := a.Handoffs.AgentCapture(ctx, handoffID, n)
+		if resp != nil {
+			_ = a.out(resp)
+		}
+		if err != nil {
+			return 1
+		}
+		return 0
+	case "done":
+		var handoffID string
+		outcome := core.OutcomeDone
+		keep := false
+		closeViz := true
+		for i := 1; i < len(args); i++ {
+			switch args[i] {
+			case "--handoff":
+				i++
+				if i < len(args) {
+					handoffID = args[i]
+				}
+			case "--outcome":
+				i++
+				if i < len(args) {
+					outcome = core.FinalizeOutcome(args[i])
+				}
+			case "--keep-session":
+				keep = true
+			case "--keep-viz":
+				closeViz = false
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
+			}
+		}
+		if handoffID == "" {
+			return a.fail(fmt.Errorf("--handoff ID required"))
+		}
+		resp, err := a.Handoffs.AgentDone(ctx, handoffID, outcome, keep, closeViz)
+		if resp != nil {
+			_ = a.out(resp)
+		}
+		if err != nil {
+			return 1
+		}
+		return 0
+	case "status":
+		var handoffID string
+		for i := 1; i < len(args); i++ {
+			switch args[i] {
+			case "--handoff":
+				i++
+				if i < len(args) {
+					handoffID = args[i]
+				}
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
+			}
+		}
+		if handoffID == "" {
+			return a.fail(fmt.Errorf("--handoff ID required"))
+		}
+		resp, err := a.Handoffs.AgentStatus(ctx, handoffID)
+		if resp != nil {
+			_ = a.out(resp)
+		}
+		if err != nil {
+			return 1
+		}
+		return 0
+	default:
+		return a.fail(fmt.Errorf("unknown agent subcommand %q", args[0]))
 	}
 }
 

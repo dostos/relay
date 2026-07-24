@@ -166,7 +166,7 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 		Kind:      string(kind),
 		Goal:      opts.Goal,
 		Events:    eventsPath,
-		Watch:     fmt.Sprintf("relay events tail -f --handoff %s", hid),
+		Watch:     fmt.Sprintf("relay agent wait --handoff %s", hid),
 		Pane:      pane,
 	}
 	return b, ho, nil
