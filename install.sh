@@ -17,15 +17,14 @@ echo "installed $INSTALL_DIR/relay $INSTALL_DIR/relayd"
 "$INSTALL_DIR/relay" version
 "$INSTALL_DIR/relayd" version
 
-# Skill symlinks for Claude / Cursor — relay primary, sst names → redirect shims
+# Skill symlinks for Claude / Cursor (relay only — sst skills removed)
 SKILL_DST="${RELAY_SKILL_DIR:-$HOME/.claude/skills}"
 mkdir -p "$SKILL_DST"
 ln -sfn "$ROOT/skills/relay-sessions" "$SKILL_DST/relay-sessions"
 ln -sfn "$ROOT/skills/relay-handoff" "$SKILL_DST/relay-handoff"
-# Retire sst skill names in-place so old descriptions still resolve to the cutover note.
-ln -sfn "$ROOT/skills/compat/sst-sessions" "$SKILL_DST/sst-sessions"
-ln -sfn "$ROOT/skills/compat/sst-handoff" "$SKILL_DST/sst-handoff"
-echo "skills → $SKILL_DST/{relay,sst}-{sessions,handoff} (sst → relay redirect)"
+# Drop legacy sst skill names if present.
+rm -f "$SKILL_DST/sst-sessions" "$SKILL_DST/sst-handoff"
+echo "skills → $SKILL_DST/relay-{sessions,handoff}"
 
 # Register with cmux Vault so panes re-launch after cmux quit / Mac reboot.
 if command -v cmux >/dev/null 2>&1 || [[ -x /Applications/cmux.app/Contents/Resources/bin/cmux ]]; then

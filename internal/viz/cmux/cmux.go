@@ -85,11 +85,9 @@ func (v *Viz) Present(ctx context.Context, sessionID, attachCmd string, layout p
 		}
 		surface, pane = diffNew(before, after)
 	}
+	// Never fall back to the focused surface — that can inject into an agent tab.
 	if surface == "" {
-		surface, pane, _ = v.focused(ctx)
-	}
-	if surface == "" {
-		return "", fmt.Errorf("could not determine new cmux surface after present")
+		return "", fmt.Errorf("could not determine new cmux surface after present (split/tab created no detectable surface)")
 	}
 	if _, err := v.run(ctx, "send", "--surface", surface, "--", attachCmd+"\n"); err != nil {
 		return "", err
@@ -139,10 +137,13 @@ func (v *Viz) openSurface(ctx context.Context, layout ports.Layout) (surface, pa
 			args = append(args, "--surface", surf)
 		}
 	}
-	if _, err := v.run(ctx, args...); err != nil {
+	out, err := v.run(ctx, args...)
+	if err != nil {
 		return "", "", err
 	}
-	return "", "", nil
+	// cmux prints: OK surface:N workspace:M
+	surface, _ = parseNewSurfaceRefs(out, "")
+	return surface, "", nil
 }
 
 func (v *Viz) selectedSurfaceInPane(ctx context.Context, workspace, pane string) string {
@@ -552,6 +553,46 @@ type panesJSON struct {
 }
 
 func (v *Viz) listSurfaces(ctx context.Context) (map[string]string, error) {
+	// Prefer tree: list-panes often returns only the focused workspace's
+	// selected pane, so before/after diffs miss newly split surfaces.
+	out, err := v.run(ctx, "tree", "--json")
+	if err != nil {
+		return v.listSurfacesFromPanes(ctx)
+	}
+	var root struct {
+		Windows []struct {
+			Workspaces []struct {
+				Panes []struct {
+					Ref      string `json:"ref"`
+					Surfaces []struct {
+						Ref string `json:"ref"`
+					} `json:"surfaces"`
+				} `json:"panes"`
+			} `json:"workspaces"`
+		} `json:"windows"`
+	}
+	if err := json.Unmarshal([]byte(out), &root); err != nil {
+		return v.listSurfacesFromPanes(ctx)
+	}
+	m := map[string]string{}
+	for _, w := range root.Windows {
+		for _, ws := range w.Workspaces {
+			for _, p := range ws.Panes {
+				for _, s := range p.Surfaces {
+					if s.Ref != "" {
+						m[s.Ref] = p.Ref
+					}
+				}
+			}
+		}
+	}
+	if len(m) == 0 {
+		return v.listSurfacesFromPanes(ctx)
+	}
+	return m, nil
+}
+
+func (v *Viz) listSurfacesFromPanes(ctx context.Context) (map[string]string, error) {
 	out, err := v.run(ctx, "list-panes", "--json")
 	if err != nil {
 		return nil, err
@@ -560,7 +601,7 @@ func (v *Viz) listSurfaces(ctx context.Context) (map[string]string, error) {
 	if err := json.Unmarshal([]byte(out), &pj); err != nil {
 		return nil, err
 	}
-	m := map[string]string{} // surface -> pane
+	m := map[string]string{}
 	for _, p := range pj.Panes {
 		for _, s := range p.SurfaceRefs {
 			m[s] = p.Ref
