@@ -94,12 +94,33 @@ func (v *Viz) Present(ctx context.Context, sessionID, attachCmd string, layout p
 	if _, err := v.run(ctx, "send", "--surface", surface, "--", attachCmd+"\n"); err != nil {
 		return "", err
 	}
+	// Best-effort: stamp cmux resume binding so restart can re-run the same command.
+	sessName := extractSessionFlag(attachCmd)
+	if sessName != "" {
+		_, _ = v.run(ctx, "surface", "resume", "set",
+			"--surface", surface,
+			"--kind", "relay",
+			"--name", "relay: "+sessName,
+			"--checkpoint", sessName,
+			"--", attachCmd,
+		)
+	}
 	b := binding{Surface: surface, Pane: pane, Attach: attachCmd}
 	v.mu.Lock()
 	v.bindings[sessionID] = b
 	v.mu.Unlock()
 	_ = v.persistBinding(sessionID, b)
 	return surface, nil
+}
+
+func extractSessionFlag(cmd string) string {
+	fields := strings.Fields(cmd)
+	for i := 0; i < len(fields)-1; i++ {
+		if fields[i] == "--session" || fields[i] == "-s" {
+			return fields[i+1]
+		}
+	}
+	return ""
 }
 
 func (v *Viz) Focus(ctx context.Context, sessionID string) error {
@@ -142,6 +163,140 @@ func (v *Viz) Layout(ctx context.Context) (string, error) {
 		return v.run(ctx, "tree", "--json")
 	}
 	return out, nil
+}
+
+// SaveRestorable stamps resume bindings on every live relay pane (manual snapshot).
+func (v *Viz) SaveRestorable(ctx context.Context) (int, error) {
+	tsv, err := v.run(ctx, "top", "--all", "--processes", "--format", "tsv")
+	if err != nil {
+		return 0, err
+	}
+	type row struct{ ref, cmd string }
+	var rows []row
+	var curRef, curCmd string
+	for _, line := range strings.Split(tsv, "\n") {
+		f := strings.Split(line, "\t")
+		if len(f) < 7 {
+			continue
+		}
+		typ, key, cmd := f[3], f[4], f[6]
+		if typ == "surface" {
+			if curRef != "" && strings.Contains(curCmd, "relay") && strings.Contains(curCmd, "--session") {
+				rows = append(rows, row{curRef, curCmd})
+			}
+			curRef, curCmd = key, cmd
+		}
+	}
+	if curRef != "" && strings.Contains(curCmd, "relay") && strings.Contains(curCmd, "--session") {
+		rows = append(rows, row{curRef, curCmd})
+	}
+	saved := 0
+	for _, r := range rows {
+		name := extractSessionFlag(r.cmd)
+		if name == "" {
+			continue
+		}
+		if _, err := v.run(ctx, "surface", "resume", "set",
+			"--surface", r.ref,
+			"--kind", "relay",
+			"--name", "relay: "+name,
+			"--checkpoint", name,
+			"--", r.cmd,
+		); err == nil {
+			saved++
+		}
+	}
+	return saved, nil
+}
+
+// RestoreSaved re-sends resume commands into idle surfaces that have relay bindings.
+func (v *Viz) RestoreSaved(ctx context.Context) (int, error) {
+	tsv, err := v.run(ctx, "top", "--all", "--processes", "--format", "tsv")
+	if err != nil {
+		return 0, err
+	}
+	live := liveRelaySurfaces(tsv)
+	out, err := v.run(ctx, "list-panes", "--json")
+	if err != nil {
+		return 0, err
+	}
+	var pj panesJSON
+	_ = json.Unmarshal([]byte(out), &pj)
+	restored := 0
+	seen := map[string]bool{}
+	for _, p := range pj.Panes {
+		for _, ref := range p.SurfaceRefs {
+			if seen[ref] || live[ref] {
+				continue
+			}
+			seen[ref] = true
+			raw, err := v.run(ctx, "surface", "resume", "get", "--surface", ref, "--json")
+			if err != nil {
+				continue
+			}
+			var wrap struct {
+				ResumeBinding struct {
+					Kind    string `json:"kind"`
+					Command string `json:"command"`
+				} `json:"resume_binding"`
+			}
+			if json.Unmarshal([]byte(raw), &wrap) != nil {
+				continue
+			}
+			if wrap.ResumeBinding.Kind != "relay" || wrap.ResumeBinding.Command == "" {
+				continue
+			}
+			if _, err := v.run(ctx, "send", "--surface", ref, "--", wrap.ResumeBinding.Command+"\n"); err == nil {
+				restored++
+			}
+		}
+	}
+	return restored, nil
+}
+
+func liveRelaySurfaces(tsv string) map[string]bool {
+	children := map[string][]struct{ key, cmd string }{}
+	var surfaces []string
+	for _, line := range strings.Split(tsv, "\n") {
+		f := strings.Split(line, "\t")
+		if len(f) < 7 {
+			continue
+		}
+		typ, key, parent, cmd := f[3], f[4], f[5], f[6]
+		if typ == "surface" {
+			surfaces = append(surfaces, key)
+			continue
+		}
+		if typ == "process" {
+			children[parent] = append(children[parent], struct{ key, cmd string }{key, cmd})
+		}
+	}
+	live := map[string]bool{}
+	var hasRelayOrSSH func(string) bool
+	hasRelayOrSSH = func(parent string) bool {
+		for _, c := range children[parent] {
+			cmd := c.cmd
+			base := cmd
+			if i := strings.IndexByte(cmd, ' '); i >= 0 {
+				base = filepath.Base(cmd[:i])
+			} else {
+				base = filepath.Base(cmd)
+			}
+			if base == "relay" || base == "ssh" || strings.Contains(cmd, "relay resume") {
+				return true
+			}
+			if hasRelayOrSSH(c.key) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, ref := range surfaces {
+		if hasRelayOrSSH(ref) {
+			live[ref] = true
+		}
+	}
+	return live
 }
 
 func (v *Viz) lookup(sessionID string) (binding, error) {

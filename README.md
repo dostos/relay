@@ -65,6 +65,20 @@ Lower-level `relay handoff` / `relay events` remain for humans/debug.
 
 State machine: `pending → running → needs_input ↔ running → done|failed|abandoned`.
 
+## cmux restart restore
+
+Remote tmux survives cmux quit; local panes do not. Relay registers as a cmux Vault agent so panes re-run `relay resume --session …`:
+
+```bash
+./install.sh                       # calls install-cmux-restore when cmux is present
+relay install-cmux-restore         # idempotent re-register
+relay viz save                     # snapshot already-open panes (pre-registration)
+relay viz restore                  # manual re-attach after restart (no approval needed)
+relay resume --session NAME        # one pane (Vault resumeCommand target)
+```
+
+Approve **relay** once under cmux Settings → Terminal → Resume Commands for hands-off auto-restore. Pane launch argv is always `relay resume --session <persistName>` (not raw `ssh`), so cmux can extract the session id.
+
 ## Adapters
 
 Core never imports SSH/tmux/cmux quirks into business logic. See `internal/ports` and:

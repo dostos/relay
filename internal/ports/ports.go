@@ -56,6 +56,11 @@ type Viz interface {
 	Focus(ctx context.Context, sessionID string) error
 	Close(ctx context.Context, sessionID string) error
 	Layout(ctx context.Context) (string, error)
+	// SaveRestorable snapshots live panes for restart restore (cmux Vault / manual).
+	// No-op adapters return (0, nil).
+	SaveRestorable(ctx context.Context) (saved int, err error)
+	// RestoreSaved re-attaches saved panes after cmux restart (manual path).
+	RestoreSaved(ctx context.Context) (restored int, err error)
 }
 
 // Coord is the remote event/coordination bus (default: always-on relayd over SSH).

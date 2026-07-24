@@ -148,9 +148,9 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 
 	pane := false
 	if !opts.NoPane && h.Viz != nil && h.Viz.Available(ctx) {
-		attach := h.Persist.AttachCommand(sess.Persist, sess.RemoteCWD)
-		full := t.InteractiveCommand(attach)
-		ref, err := h.Viz.Present(ctx, sess.ID, full, ports.Layout{Mode: "remote"})
+		// Restorable argv: `relay resume --session <persist>` (cmux Vault extracts --session).
+		launch := ResumeLaunchCmd(sess.Persist.Name)
+		ref, err := h.Viz.Present(ctx, sess.ID, launch, ports.Layout{Mode: "remote"})
 		if err == nil {
 			pane = true
 			sess.VizSurfaceRef = ref

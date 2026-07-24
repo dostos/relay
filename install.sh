@@ -26,3 +26,12 @@ ln -sfn "$ROOT/skills/relay-handoff" "$SKILL_DST/relay-handoff"
 ln -sfn "$ROOT/skills/compat/sst-sessions" "$SKILL_DST/sst-sessions"
 ln -sfn "$ROOT/skills/compat/sst-handoff" "$SKILL_DST/sst-handoff"
 echo "skills → $SKILL_DST/{relay,sst}-{sessions,handoff} (sst → relay redirect)"
+
+# Register with cmux Vault so panes re-launch after cmux quit / Mac reboot.
+if command -v cmux >/dev/null 2>&1 || [[ -x /Applications/cmux.app/Contents/Resources/bin/cmux ]]; then
+  if "$INSTALL_DIR/relay" install-cmux-restore >/dev/null 2>&1; then
+    echo "cmux session restore: registered (relay install-cmux-restore)"
+  else
+    echo "relay: cmux restore registration skipped (non-fatal)" >&2
+  fi
+fi

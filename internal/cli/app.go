@@ -149,6 +149,10 @@ func (a *App) Run(args []string) int {
 		return a.cmdEvents(ctx, filtered[1:])
 	case "viz", "pane":
 		return a.cmdViz(ctx, filtered[1:])
+	case "resume":
+		return a.cmdResume(ctx, filtered[1:])
+	case "install-cmux-restore":
+		return a.cmdInstallCmuxRestore()
 	case "doctor":
 		return a.cmdDoctor(ctx, filtered[1:])
 	default:
@@ -209,6 +213,12 @@ Visualization (optional cmux adapter):
   relay viz focus SESSION_ID
   relay viz close SESSION_ID
   relay viz layout
+  relay viz save                      Snapshot live relay panes for cmux restart
+  relay viz restore                   Re-attach saved panes after cmux restart
+
+cmux session restore (survive cmux quit / Mac reboot):
+  relay install-cmux-restore          Register vault agent (run by install.sh)
+  relay resume --session NAME [--cwd DIR]   Target of cmux resumeCommand
 
   relay doctor
 `)
@@ -974,26 +984,18 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 		if len(args) < 2 {
 			return a.fail(fmt.Errorf("session id required"))
 		}
-		cmd, err := a.Sessions.AttachCommand(args[1])
-		if err != nil {
-			return a.fail(err)
-		}
 		sess, err := a.Sessions.Get(args[1])
 		if err != nil {
 			return a.fail(err)
 		}
-		t, err := a.tf(sess.HostID)
-		if err != nil {
-			return a.fail(err)
-		}
-		full := t.InteractiveCommand(cmd)
-		ref, err := a.Viz.Present(ctx, args[1], full, ports.Layout{Mode: "remote"})
+		launch := core.ResumeLaunchCmd(sess.Persist.Name)
+		ref, err := a.Viz.Present(ctx, args[1], launch, ports.Layout{Mode: "remote"})
 		if err != nil {
 			return a.fail(err)
 		}
 		sess.VizSurfaceRef = ref
 		_ = a.Reg.PutSession(sess)
-		return a.errOut(a.out(map[string]string{"session_id": args[1], "surface": ref}))
+		return a.errOut(a.out(map[string]string{"session_id": args[1], "surface": ref, "launch": launch}))
 	case "focus":
 		if len(args) < 2 {
 			return a.fail(fmt.Errorf("session id required"))
@@ -1010,9 +1012,70 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 			return a.fail(err)
 		}
 		return 0
+	case "save":
+		n, err := a.Viz.SaveRestorable(ctx)
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "saved": n}))
+	case "restore":
+		n, err := a.Viz.RestoreSaved(ctx)
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "restored": n}))
 	default:
 		return a.fail(fmt.Errorf("unknown viz subcommand %q", args[0]))
 	}
+}
+
+func (a *App) cmdResume(ctx context.Context, args []string) int {
+	var session, cwd string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--session", "-s":
+			i++
+			if i < len(args) {
+				session = args[i]
+			}
+		case "--cwd":
+			i++
+			if i < len(args) {
+				cwd = args[i]
+			}
+		default:
+			return a.fail(rejectUnknownFlag(args[i]))
+		}
+	}
+	if session == "" {
+		return a.fail(fmt.Errorf("usage: relay resume --session NAME [--cwd DIR]"))
+	}
+	if err := a.Sessions.Resume(ctx, session, cwd); err != nil {
+		fmt.Fprintf(os.Stderr, "relay resume: %v\n", err)
+		fmt.Fprintf(os.Stderr, "relay resume: falling back to interactive shell\n")
+		shell := os.Getenv("SHELL")
+		if shell == "" {
+			shell = "/bin/bash"
+		}
+		cmd := exec.Command(shell, "-l")
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		_ = cmd.Run()
+		return 1
+	}
+	return 0
+}
+
+func (a *App) cmdInstallCmuxRestore() int {
+	path := cmux.DefaultCmuxJSONPath()
+	if err := cmux.InstallVaultAgent(path); err != nil {
+		return a.fail(err)
+	}
+	return a.errOut(a.out(map[string]any{
+		"ok":     true,
+		"config": path,
+		"agent":  "relay",
+		"hint":   "approve 'relay' under cmux Settings → Terminal → Resume Commands for auto-restore; or use relay viz save/restore",
+	}))
 }
 
 func (a *App) cmdDoctor(ctx context.Context, args []string) int {
