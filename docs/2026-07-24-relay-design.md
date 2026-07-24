@@ -49,6 +49,17 @@ Local cache: `~/.local/state/relay/hosts/<host>.json` (read-through; remote wins
 
 Bootstrap: `relay host bootstrap -H HOST` installs `~/.local/bin/relayd` + user systemd unit (or nohup).
 
+## New-machine onboarding
+
+```text
+relay targets [--json]                 # parse ~/.ssh/config (+ Include) → Host aliases
+relay host discover -H HOST [--json]   # reachability, tmux, relayd, agent catalog, path_map proposal
+relay host init -H HOST [--apply] [--force]
+                                       # bootstrap relayd; write proposed host.yaml (--force to overwrite)
+```
+
+SSH config remains connection source of truth. Discover never writes; init dry-runs without `--apply`.
+
 ## Handoff SM
 
 `pending → running → needs_input ↔ running → done|failed|abandoned`

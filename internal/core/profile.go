@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -225,45 +226,8 @@ func (s *ProfileService) Probe(ctx context.Context, hostID string) (*HostProfile
 		p.Probe = map[string]ProbeResult{}
 	}
 	for _, a := range p.Agents {
-		cmdName := a.Command
-		if cmdName == "" {
-			cmdName = a.Name
-			if strings.HasPrefix(a.Name, "ccs:") {
-				cmdName = "ccs"
-			}
-		}
-		// Interactive bash so nvm/PATH load.
-		check := fmt.Sprintf(`bash -ic 'command -v %s >/dev/null 2>&1 && echo PRESENT || echo MISSING'`, shellQuote(path.Base(strings.Fields(cmdName)[0])))
-		stdout, _, _ := t.Run(ctx, "", check)
-		present := strings.Contains(stdout, "PRESENT")
-		authed := false
-		detail := strings.TrimSpace(stdout)
-		if present {
-			// Light auth probes — best-effort, never fail the whole probe.
-			switch {
-			case a.Name == "claude" || strings.HasSuffix(cmdName, "claude"):
-				o, _, _ := t.Run(ctx, "", `bash -ic 'claude -p PONG --model haiku 2>&1 | head -c 200'`)
-				detail = strings.TrimSpace(o)
-				low := strings.ToLower(detail)
-				authed = detail != "" &&
-					!strings.Contains(low, "not logged in") &&
-					!strings.Contains(low, "unauthorized") &&
-					!strings.Contains(low, "oauth session expired") &&
-					!strings.Contains(low, "failed to authenticate")
-			case a.Name == "cursor-agent" || strings.Contains(cmdName, "cursor"):
-				o, _, _ := t.Run(ctx, "", `bash -ic 'cursor-agent status 2>&1 | head -c 200'`)
-				detail = strings.TrimSpace(o)
-				authed = !strings.Contains(strings.ToLower(detail), "not logged") && detail != ""
-			case strings.HasPrefix(a.Name, "ccs:"):
-				prof := strings.TrimPrefix(a.Name, "ccs:")
-				o, _, _ := t.Run(ctx, "", fmt.Sprintf(`bash -ic 'ccs %s -p PONG 2>&1 | head -c 200'`, shellQuote(prof)))
-				detail = strings.TrimSpace(o)
-				authed = !strings.Contains(strings.ToLower(detail), "oauth") && !strings.Contains(strings.ToLower(detail), "not logged")
-			default:
-				authed = present
-			}
-		}
-		p.Probe[a.Name] = ProbeResult{Present: present, Authed: authed, Detail: detail}
+		pr := probeOneAgent(ctx, t, a)
+		p.Probe[a.Name] = pr
 	}
 	now := time.Now().UTC()
 	p.ProbedAt = &now
@@ -271,6 +235,133 @@ func (s *ProfileService) Probe(ctx context.Context, hostID string) (*HostProfile
 		return nil, err
 	}
 	return p, nil
+}
+
+// agentCatalog is the fixed list of CLIs discover scans for (not PATH-wide).
+var agentCatalog = []AgentSpec{
+	{Name: "claude", Command: "claude", Notes: "interactive Claude Code CLI"},
+	{Name: "cursor-agent", Command: "cursor-agent"},
+	{Name: "codex", Command: "codex"},
+	{Name: "ccs", Command: "ccs", Notes: "ccs multi-profile launcher"},
+}
+
+func probeAgentCatalog(ctx context.Context, t ports.Transport) []AgentDetect {
+	var out []AgentDetect
+	for _, spec := range agentCatalog {
+		pr := probeOneAgent(ctx, t, spec)
+		d := AgentDetect{
+			Name:    spec.Name,
+			Present: pr.Present,
+			Authed:  pr.Authed,
+			Detail:  pr.Detail,
+		}
+		if pr.Present {
+			s := spec
+			if s.Name == "ccs" {
+				// Expand to ccs:<profile> entries when profiles are detectable.
+				profiles := listCCSProfiles(ctx, t)
+				if len(profiles) == 0 {
+					profiles = []string{"personal"}
+				}
+				for _, prof := range profiles {
+					as := AgentSpec{Name: "ccs:" + prof, Command: "ccs " + prof}
+					out = append(out, AgentDetect{
+						Name:          as.Name,
+						Present:       true,
+						Authed:        probeOneAgent(ctx, t, as).Authed,
+						SuggestedSpec: &as,
+					})
+				}
+				continue
+			}
+			d.SuggestedSpec = &s
+		}
+		out = append(out, d)
+	}
+	return out
+}
+
+func listCCSProfiles(ctx context.Context, t ports.Transport) []string {
+	// Best-effort: ccs may print profile names; also scan ~/.config/ccs.
+	stdout, _, _ := t.Run(ctx, "", `bash -ic '
+if command -v ccs >/dev/null 2>&1; then
+  ccs --list 2>/dev/null || ccs list 2>/dev/null || true
+fi
+ls "$HOME"/.config/ccs 2>/dev/null | sed -n "s/\\.yaml$//p; s/\\.yml$//p"
+'`)
+	seen := map[string]bool{}
+	var out []string
+	for _, line := range strings.Fields(stdout) {
+		line = strings.Trim(line, ",:[]\"'")
+		if line == "" || line == "ccs" || strings.HasPrefix(line, "-") {
+			continue
+		}
+		// ignore path-like tokens
+		if strings.Contains(line, "/") {
+			continue
+		}
+		if seen[line] {
+			continue
+		}
+		seen[line] = true
+		out = append(out, line)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func probeOneAgent(ctx context.Context, t ports.Transport, a AgentSpec) ProbeResult {
+	cmdName := a.Command
+	if cmdName == "" {
+		cmdName = a.Name
+		if strings.HasPrefix(a.Name, "ccs:") {
+			cmdName = "ccs"
+		}
+	}
+	bin := path.Base(strings.Fields(cmdName)[0])
+	check := fmt.Sprintf(`bash -ic 'command -v %s >/dev/null 2>&1 && echo PRESENT || echo MISSING'`, shellQuote(bin))
+	stdout, _, _ := t.Run(ctx, "", check)
+	present := strings.Contains(stdout, "PRESENT")
+	authed := false
+	detail := strings.TrimSpace(stdout)
+	if !present {
+		return ProbeResult{Present: false, Authed: false, Detail: detail}
+	}
+	switch {
+	case a.Name == "claude" || strings.HasSuffix(cmdName, "claude"):
+		o, _, _ := t.Run(ctx, "", `bash -ic 'claude -p PONG --model haiku 2>&1 | head -c 200'`)
+		detail = strings.TrimSpace(o)
+		low := strings.ToLower(detail)
+		authed = detail != "" &&
+			!strings.Contains(low, "not logged in") &&
+			!strings.Contains(low, "unauthorized") &&
+			!strings.Contains(low, "oauth session expired") &&
+			!strings.Contains(low, "failed to authenticate")
+	case a.Name == "cursor-agent" || strings.Contains(cmdName, "cursor"):
+		o, _, _ := t.Run(ctx, "", `bash -ic 'cursor-agent status 2>&1 | head -c 200'`)
+		detail = strings.TrimSpace(o)
+		authed = !strings.Contains(strings.ToLower(detail), "not logged") && detail != ""
+	case a.Name == "ccs" || strings.HasPrefix(a.Name, "ccs:"):
+		prof := strings.TrimPrefix(a.Name, "ccs:")
+		if prof == "" || prof == a.Name {
+			prof = "personal"
+		}
+		o, _, _ := t.Run(ctx, "", fmt.Sprintf(`bash -ic 'ccs %s -p PONG 2>&1 | head -c 200'`, shellQuote(prof)))
+		detail = strings.TrimSpace(o)
+		authed = !strings.Contains(strings.ToLower(detail), "oauth") && !strings.Contains(strings.ToLower(detail), "not logged")
+	case a.Name == "codex" || strings.Contains(cmdName, "codex"):
+		o, _, _ := t.Run(ctx, "", `bash -ic 'codex login status 2>&1 | head -c 200'`)
+		detail = strings.TrimSpace(o)
+		low := strings.ToLower(detail)
+		authed = detail != "" && !strings.Contains(low, "not logged") && !strings.Contains(low, "unauthenticated")
+		if detail == "" {
+			authed = present
+			detail = "PRESENT"
+		}
+	default:
+		authed = present
+	}
+	return ProbeResult{Present: present, Authed: authed, Detail: detail}
 }
 
 func shellQuote(s string) string {

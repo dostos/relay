@@ -1,9 +1,22 @@
 ---
 name: relay-sessions
-description: Use for relay (or legacy sst) remote sessions. Prefer relay agent for handoffs; use session verbs only for ad-hoc exec/capture. Replaces sst-sessions.
+description: Use for relay remote sessions. Prefer relay agent for handoffs; use session verbs only for ad-hoc exec/capture. New machines: targets → discover → init.
 ---
 
 # relay sessions
+
+## New machine
+
+```bash
+relay targets --json                          # ssh Host aliases (local, no SSH)
+relay host discover -H HOST --json            # inventory + proposed host.yaml
+relay host init -H HOST --apply               # bootstrap relayd + write proposal
+# existing host.yaml: add --force to overwrite
+```
+
+Follow `next` / `argv` on the discover/init cards. Do not hand-edit connection coords — ssh config is source of truth.
+
+## Ad-hoc sessions
 
 Handoffs → skill **relay-handoff** (`relay agent …`). Ad-hoc only:
 

@@ -26,6 +26,7 @@ type App struct {
 	Handoffs  *core.HandoffService
 	Profiles  *core.ProfileService
 	Bootstrap *core.BootstrapService
+	Discover  *core.DiscoverService
 	Reg       *core.Registry
 	Coord     ports.Coord
 	Viz       ports.Viz
@@ -61,15 +62,21 @@ func New() *App {
 		Viz:          viz,
 		NewTransport: tf,
 	}
+	boot := &core.BootstrapService{NewTransport: tf}
 	return &App{
 		Sessions:  sessions,
 		Handoffs:  handoffs,
 		Profiles:  profiles,
-		Bootstrap: &core.BootstrapService{NewTransport: tf},
-		Reg:       reg,
-		Coord:     coord,
-		Viz:       viz,
-		tf:        tf,
+		Bootstrap: boot,
+		Discover: &core.DiscoverService{
+			NewTransport: tf,
+			Coord:        coord,
+			Profiles:     profiles,
+		},
+		Reg:   reg,
+		Coord: coord,
+		Viz:   viz,
+		tf:    tf,
 	}
 }
 
@@ -140,6 +147,8 @@ func (a *App) Run(args []string) int {
 		return 0
 	case "host":
 		return a.cmdHost(ctx, filtered[1:])
+	case "targets":
+		return a.cmdTargets(ctx, filtered[1:])
 	case "session", "sess":
 		return a.cmdSession(ctx, filtered[1:])
 	case "handoff":
@@ -167,6 +176,12 @@ func (a *App) cmdHelp() int {
 
 Usage:
   relay [--json] <command> ...
+
+New machine (ssh config → discover → init):
+  relay targets                       List Host aliases from ~/.ssh/config (+ Include)
+  relay host discover -H HOST         Inventory + proposed host.yaml (no writes)
+  relay host init -H HOST [--apply] [--force]
+                                      Bootstrap relayd; write proposal with --apply
 
 Host profiles (authoritative on each remote ~/.config/relay/host.yaml):
   relay host show -H HOST
@@ -246,6 +261,22 @@ func flagHost(args []string) (host string, rest []string) {
 	return host, rest
 }
 
+func (a *App) cmdTargets(ctx context.Context, args []string) int {
+	_ = ctx
+	if err := requireNoExtra(args); err != nil {
+		return a.fail(err)
+	}
+	list, err := core.ListTargets()
+	if err != nil {
+		return a.fail(err)
+	}
+	if a.JSON {
+		return a.errOut(a.out(map[string]any{"ok": true, "targets": list}))
+	}
+	fmt.Print(core.FormatTargetsText(list))
+	return 0
+}
+
 func (a *App) cmdHost(ctx context.Context, args []string) int {
 	if len(args) == 0 {
 		return a.fail(fmt.Errorf("host subcommand required"))
@@ -318,6 +349,72 @@ func (a *App) cmdHost(ctx context.Context, args []string) int {
 		}
 		if err != nil {
 			return a.fail(err)
+		}
+		return 0
+	case "discover":
+		if err := requireNoExtra(rest); err != nil {
+			return a.fail(err)
+		}
+		if host == "" {
+			return a.fail(fmt.Errorf("-H HOST required"))
+		}
+		if a.Discover == nil {
+			return a.fail(fmt.Errorf("discover service unavailable"))
+		}
+		card, err := a.Discover.Discover(ctx, host)
+		if err != nil {
+			return a.fail(err)
+		}
+		if a.JSON {
+			return a.errOut(a.out(card))
+		}
+		fmt.Print(core.FormatDiscoverText(card))
+		if card.ProposalYAML != "" && card.HostYAML == "missing" {
+			fmt.Fprintf(os.Stderr, "\n# proposal (not written; use: relay host init -H %s --apply)\n", host)
+			fmt.Print(card.ProposalYAML)
+		}
+		return 0
+	case "init":
+		if host == "" {
+			return a.fail(fmt.Errorf("-H HOST required"))
+		}
+		opts := core.InitOptions{}
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case "--apply":
+				opts.Apply = true
+			case "--force":
+				opts.Force = true
+			default:
+				return a.fail(rejectUnknownFlag(rest[i]))
+			}
+		}
+		if a.Discover == nil {
+			return a.fail(fmt.Errorf("discover service unavailable"))
+		}
+		res, err := a.Discover.Init(ctx, host, opts, a.Bootstrap)
+		if err != nil {
+			return a.fail(err)
+		}
+		if a.JSON {
+			return a.errOut(a.out(res))
+		}
+		fmt.Printf("host %s  dry_run=%v  applied=%v  wrote_profile=%v\n", res.HostID, res.DryRun, res.Applied, res.WroteProfile)
+		if res.Detail != "" {
+			fmt.Println(res.Detail)
+		}
+		if res.Discover != nil {
+			fmt.Print(core.FormatDiscoverText(res.Discover))
+		}
+		if res.DryRun && res.Discover != nil && res.Discover.ProposalYAML != "" {
+			fmt.Fprintf(os.Stderr, "\n# proposal → %s\n", core.RemoteHostProfilePath())
+			fmt.Print(res.Discover.ProposalYAML)
+		}
+		if res.Next != "" {
+			fmt.Println("next:", res.Next)
+		}
+		if !res.OK {
+			return 1
 		}
 		return 0
 	default:
