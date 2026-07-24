@@ -64,8 +64,8 @@ type Viz interface {
 	SaveRestorable(ctx context.Context) (saved int, err error)
 	// RestoreSaved re-attaches saved panes after cmux restart (manual path).
 	RestoreSaved(ctx context.Context) (restored int, err error)
-	// BrandLabels refreshes ◆ RELAY · <project> tab titles + workspace pills.
-	// labels maps session_id → project display name.
+	// BrandLabels refreshes ◆ RELAY · <project> tab titles + workspace status
+	// pills (not workspace descriptions). labels maps session_id → project name.
 	BrandLabels(ctx context.Context, labels map[string]string) error
 }
 

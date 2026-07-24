@@ -215,7 +215,8 @@ func (v *Viz) brandSurface(ctx context.Context, surface, persistName string) err
 }
 
 // BrandLabels renames bound tabs to ◆ RELAY · <project> and refreshes workspace
-// status pills / descriptions to ◆ RELAY · a, b (comma-separated projects).
+// status pills to ◆ RELAY · a, b (comma-separated projects). Does not touch
+// workspace descriptions — those are user-owned.
 func (v *Viz) BrandLabels(ctx context.Context, labels map[string]string) error {
 	type hit struct {
 		project string
@@ -260,7 +261,6 @@ func (v *Viz) BrandLabels(ctx context.Context, labels map[string]string) error {
 		sort.Strings(projects)
 		status := "◆ RELAY · " + strings.Join(projects, ", ")
 		_, _ = v.run(ctx, "set-status", "relay", status, "--color", "#14b8a6", "--priority", "90", "--workspace", ws)
-		_, _ = v.run(ctx, "workspace-action", "--workspace", ws, "--action", "set-description", "--description", status)
 	}
 	return nil
 }
