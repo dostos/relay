@@ -202,7 +202,8 @@ Sessions (explicit id; no guesswork):
   relay session exec ID -- CMD
   relay session resize ID
   relay session attach ID             Interactive (humans only)
-  relay session destroy ID [--keep-remote]
+  relay session destroy ID [--keep-remote] [--keep-viz]
+                                      Also closes the presented cmux pane; --keep-viz leaves it.
   relay session sensors ID [--silence SEC]   Reinstall quiet idle/exit hooks
 
 Handoffs (goal-based / long-running):
@@ -231,7 +232,7 @@ Visualization (optional cmux adapter):
                                       Default: side-by-side split. --tab stacks in PANE.
   relay viz brand                     Refresh ◆ RELAY · <project> tabs + workspace pills
   relay viz focus SESSION_ID
-  relay viz close SESSION_ID
+  relay viz close SESSION_ID          Retire just the pane (session destroy does this automatically)
   relay viz layout
   relay viz save                      Snapshot live relay panes for cmux restart
   relay viz restore                   Re-attach saved panes after cmux restart
@@ -636,16 +637,25 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 			return a.fail(fmt.Errorf("session id required"))
 		}
 		keep := false
+		closeViz := true
 		for _, x := range args[2:] {
 			switch x {
 			case "--keep-remote":
 				keep = true
+			case "--keep-viz":
+				closeViz = false
 			default:
 				return a.fail(rejectUnknownFlag(x))
 			}
 		}
 		if err := a.Sessions.Destroy(ctx, args[1], keep); err != nil {
 			return a.fail(err)
+		}
+		// Retiring the session retires its presented pane too (exact bound
+		// surface, keyed by session_id — never any other pane). Best-effort:
+		// a headless/unbound session simply has no binding to close.
+		if closeViz && a.Viz != nil {
+			_ = a.Viz.Close(ctx, args[1])
 		}
 		return 0
 	case "sensors":

@@ -315,7 +315,9 @@ func (v *Viz) relayProjectsInWorkspace(ctx context.Context, workspace string) []
 }
 
 func (v *Viz) workspaceOfSurface(ctx context.Context, surface string) string {
-	out, err := v.run(ctx, "tree", "--json")
+	// --all so a surface is resolvable regardless of which window is focused;
+	// plain `tree --json` only reports the current window.
+	out, err := v.run(ctx, "tree", "--all", "--json")
 	if err != nil {
 		return ""
 	}
@@ -387,8 +389,17 @@ func (v *Viz) Close(ctx context.Context, sessionID string) error {
 	v.mu.Lock()
 	delete(v.bindings, sessionID)
 	v.mu.Unlock()
-	_, err = v.run(ctx, "close-surface", "--surface", b.Surface)
-	_ = os.Remove(bindPath(sessionID))
+	defer os.Remove(bindPath(sessionID))
+	// cmux short refs (surface:N) resolve within a window/workspace context, so
+	// scope close-surface to the bound surface's own workspace. A bare
+	// --surface fails not_found whenever that surface is not in the focused
+	// window, silently orphaning the pane. An empty workspace means the surface
+	// is no longer in any window — already gone, nothing to close.
+	ws := v.workspaceOfSurface(ctx, b.Surface)
+	if ws == "" {
+		return nil
+	}
+	_, err = v.run(ctx, "close-surface", "--surface", b.Surface, "--workspace", ws)
 	return err
 }
 
