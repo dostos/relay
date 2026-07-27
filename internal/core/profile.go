@@ -94,7 +94,14 @@ func (p *HostProfile) ResolveRemoteCWD(localRepo string) (string, error) {
 	return "", fmt.Errorf("no path_map entry for %q on host (configure ~/.config/relay/host.yaml)", localRepo)
 }
 
-// FindAgent returns the agent spec by name (exact), or preferred default.
+// FindAgent returns the agent spec by name, or the preferred default.
+//
+// Matching is exact first. On a miss it falls back to a single unambiguous
+// alias: the requested name is a prefix of, or the binary base name of,
+// exactly one listed agent — so "cursor" resolves to "cursor-agent" and "ccs"
+// resolves to a lone "ccs:personal". If the name matches nothing, or is
+// ambiguous across several agents, the error enumerates the available agents
+// so the caller can correct it instead of guessing again.
 func (p *HostProfile) FindAgent(name string) (*AgentSpec, error) {
 	if p == nil {
 		return nil, fmt.Errorf("nil host profile")
@@ -105,12 +112,54 @@ func (p *HostProfile) FindAgent(name string) (*AgentSpec, error) {
 	if name == "" && len(p.Agents) > 0 {
 		return &p.Agents[0], nil
 	}
+	// Exact match wins.
 	for i := range p.Agents {
 		if p.Agents[i].Name == name {
 			return &p.Agents[i], nil
 		}
 	}
-	return nil, fmt.Errorf("agent %q not listed in host profile", name)
+	// Unambiguous alias: prefix of, or binary base name of, exactly one agent.
+	var match *AgentSpec
+	matches := 0
+	for i := range p.Agents {
+		if agentNameMatchesAlias(p.Agents[i], name) {
+			match = &p.Agents[i]
+			matches++
+		}
+	}
+	if matches == 1 {
+		return match, nil
+	}
+	avail := make([]string, 0, len(p.Agents))
+	for i := range p.Agents {
+		avail = append(avail, p.Agents[i].Name)
+	}
+	if matches > 1 {
+		return nil, fmt.Errorf("agent %q is ambiguous; available: %s", name, strings.Join(avail, ", "))
+	}
+	return nil, fmt.Errorf("agent %q not listed in host profile; available: %s", name, strings.Join(avail, ", "))
+}
+
+// agentNameMatchesAlias reports whether a short/alias name unambiguously refers
+// to this agent: a prefix of its listed name (cursor → cursor-agent) or the
+// base name of its launch binary (matches regardless of a path/args prefix).
+func agentNameMatchesAlias(a AgentSpec, name string) bool {
+	if name == "" {
+		return false
+	}
+	if strings.HasPrefix(a.Name, name) {
+		return true
+	}
+	cmd := a.Command
+	if cmd == "" {
+		cmd = a.Name
+	}
+	if fields := strings.Fields(cmd); len(fields) > 0 {
+		if path.Base(fields[0]) == name {
+			return true
+		}
+	}
+	return false
 }
 
 // LaunchCommand builds the remote shell command to start an agent with a goal.

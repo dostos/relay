@@ -7,6 +7,11 @@ description: Use when handing a goal to a remote relay session. Prefer relay age
 
 Always use the JSON agent surface. **Never** `events tail -f` in a loop. **Never** `session attach`.
 
+`NAME` must match the host profile. Discover valid names with `relay host discover -H HOST`
+(typically `claude` / `cursor-agent` / `codex` / `ccs:<profile>`). It is **`cursor-agent`**,
+not `cursor` — though an unambiguous prefix now resolves (`cursor`→`cursor-agent`,
+`ccs`→a lone `ccs:personal`), and a bad name errors with the list of available agents.
+
 ```bash
 relay agent start -H HOST --agent NAME --goal "…"     # or --cmd "…"
 # → {"next":"wait","argv":["relay","agent","wait",…]}
