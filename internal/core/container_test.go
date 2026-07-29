@@ -107,3 +107,28 @@ func TestExecPlanHostPassthrough(t *testing.T) {
 		t.Fatalf("host passthrough broken: cwd=%q cmd=%q", cwd, cmd)
 	}
 }
+
+func TestClassifyContainerVerify(t *testing.T) {
+	cases := []struct {
+		name   string
+		output string
+		ok     bool
+		want   string // substring of guidance when ok==false
+	}{
+		{"glibc", "node: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.28' not found (required by node)", false, "newer base image"},
+		{"root", "--dangerously-skip-permissions cannot be used with root/sudo privileges", false, "non-root user:"},
+		{"perm", "bash: line 1: claude: Permission denied", false, "user: uid must match"},
+		{"missing", "bash: codex: command not found", false, "provision:"},
+		{"hook", "SyntaxError: Unexpected token '.'", false, "hooks: off"},
+		{"clean", "2.1.220 (Claude Code)", true, ""},
+	}
+	for _, c := range cases {
+		ok, guidance := ClassifyContainerVerify(c.output)
+		if ok != c.ok {
+			t.Fatalf("%s: ok=%v want %v (guidance=%q)", c.name, ok, c.ok, guidance)
+		}
+		if !c.ok && !strings.Contains(guidance, c.want) {
+			t.Fatalf("%s: guidance %q missing %q", c.name, guidance, c.want)
+		}
+	}
+}

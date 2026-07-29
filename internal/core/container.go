@@ -114,3 +114,23 @@ func (p *HostProfile) ResolveContainer(name string) (*ContainerSpec, error) {
 	}
 	return nil, fmt.Errorf("container %q not in host profile; available: %s", name, strings.Join(avail, ", "))
 }
+
+// ClassifyContainerVerify inspects combined stdout+stderr from an in-container
+// agent probe. It returns ok=false with actionable guidance when a known
+// failure signature is present; ok=true means no known failure was detected.
+func ClassifyContainerVerify(output string) (ok bool, guidance string) {
+	low := strings.ToLower(output)
+	switch {
+	case strings.Contains(output, "GLIBC_") && strings.Contains(low, "not found"):
+		return false, "container libc is older than the host toolchain requires; use a self-contained agent that runs here, or a newer base image (node ≥18 needs glibc ≥2.28)"
+	case strings.Contains(low, "cannot be used with root") || strings.Contains(low, "root/sudo"):
+		return false, "agent refuses to run as root; set a non-root user: (default is the host owner uid)"
+	case strings.Contains(low, "permission denied"):
+		return false, "permission denied on the agent binary; user: uid must match the owner of the bound files (the host file-owner uid)"
+	case strings.Contains(low, "command not found"):
+		return false, "agent binary not present in the container; declare a provision: command or use toolchain: bind"
+	case strings.Contains(low, "syntaxerror") || strings.Contains(low, "unexpected token"):
+		return false, "agent hook/plugin failed under the container toolchain; set hooks: off (default) or the container node is too old"
+	}
+	return true, ""
+}
