@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -14,6 +15,10 @@ import (
 	"github.com/dostos/relay/internal/ports"
 	"gopkg.in/yaml.v3"
 )
+
+// ErrMissingProfile means a host has no ~/.config/relay/host.yaml yet — it has
+// never been onboarded. Callers can offer `relay host init` as the fix.
+var ErrMissingProfile = errors.New("relay host profile missing")
 
 // HostProfile is authoritative on each remote (~/.config/relay/host.yaml).
 type HostProfile struct {
@@ -232,7 +237,7 @@ func (s *ProfileService) Fetch(ctx context.Context, hostID string) (*HostProfile
 	}
 	data, err := t.ReadFile(ctx, RemoteHostProfilePath())
 	if err != nil {
-		return nil, fmt.Errorf("host %s: missing profile at %s (%w); create it on the remote", hostID, RemoteHostProfilePath(), err)
+		return nil, fmt.Errorf("%w: host %s has no %s (%v); run: relay host init -H %s --apply", ErrMissingProfile, hostID, RemoteHostProfilePath(), err, hostID)
 	}
 	p, err := ParseHostProfileYAML(data)
 	if err != nil {

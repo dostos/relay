@@ -114,6 +114,20 @@ func (a *App) fail(err error) int {
 	return 1
 }
 
+// failNext prints a structured failure carrying a self-heal hint (a `next`
+// label + ready-to-run `argv`) and returns exit 1, so a blind caller can
+// recover in one step without parsing prose.
+func (a *App) failNext(err error, extra map[string]any) int {
+	payload := map[string]any{"ok": false, "error": err.Error()}
+	for k, v := range extra {
+		payload[k] = v
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(payload)
+	return 1
+}
+
 func rejectUnknownFlag(arg string) error {
 	if strings.HasPrefix(arg, "-") {
 		return fmt.Errorf("unknown flag %q", arg)
@@ -261,7 +275,11 @@ cmux session restore (survive cmux quit / Mac reboot):
   relay resume [--session NAME] [--cwd DIR] [--no-reconnect]
                                       Bare form uses this cmux pane's history.
                                       Re-attach; waits/retries on SSH drop (session frozen).
-  relay resume list                         live | disconnected | cleaned
+  relay resume list [--probe]               live | disconnected | cleaned
+                                      --probe adds real remote tmux liveness
+  relay resume reap [--dry-run]             Clean entries whose remote tmux is gone
+  relay resume prune [--cleaned|--all] [--days N]
+                                      Drop registry tombstones (default: cleaned)
 
   relay doctor
 `)
@@ -673,6 +691,14 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 		}
 		s, err := a.Sessions.Create(ctx, opts)
 		if err != nil {
+			if errors.Is(err, core.ErrMissingProfile) {
+				return a.failNext(err, map[string]any{
+					"reason":  "missing_host_profile",
+					"host_id": host,
+					"next":    "host init",
+					"argv":    []string{"relay", "host", "init", "-H", host, "--apply"},
+				})
+			}
 			return a.fail(err)
 		}
 		return a.errOut(a.out(s))
@@ -1384,12 +1410,77 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 
 func (a *App) cmdResume(ctx context.Context, args []string) int {
 	if len(args) > 0 && args[0] == "list" {
-		list, err := a.Sessions.ListResumeStatus()
+		probe := false
+		for _, x := range args[1:] {
+			switch x {
+			case "--probe":
+				probe = true
+			default:
+				return a.fail(rejectUnknownFlag(x))
+			}
+		}
+		var list []core.ResumeInfo
+		var err error
+		if probe {
+			list, err = a.Sessions.ListResumeStatusProbed(ctx)
+		} else {
+			list, err = a.Sessions.ListResumeStatus()
+		}
 		if err != nil {
 			return a.fail(err)
 		}
 		a.JSON = true
-		return a.errOut(a.out(map[string]any{"ok": true, "sessions": list}))
+		return a.errOut(a.out(map[string]any{"ok": true, "probed": probe, "sessions": list}))
+	}
+	if len(args) > 0 && args[0] == "reap" {
+		dryRun := false
+		for _, x := range args[1:] {
+			switch x {
+			case "--dry-run", "-n":
+				dryRun = true
+			default:
+				return a.fail(rejectUnknownFlag(x))
+			}
+		}
+		res, err := a.Handoffs.ReapDead(ctx, dryRun)
+		if err != nil {
+			return a.fail(err)
+		}
+		a.JSON = true
+		return a.errOut(a.out(map[string]any{"ok": true, "reap": res}))
+	}
+	if len(args) > 0 && args[0] == "prune" {
+		cleanedOnly := true
+		days := 0
+		for i := 1; i < len(args); i++ {
+			switch args[i] {
+			case "--all":
+				cleanedOnly = false
+			case "--cleaned":
+				cleanedOnly = true
+			case "--days":
+				i++
+				if i < len(args) {
+					days, _ = strconv.Atoi(args[i])
+				}
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
+			}
+		}
+		// Clamp so time.Duration (int64 ns) can't overflow and wrap into a
+		// future cutoff that would delete everything.
+		if days < 0 {
+			days = 0
+		}
+		if days > 36500 {
+			days = 36500
+		}
+		removed, err := core.PruneResume(cleanedOnly, time.Duration(days)*24*time.Hour)
+		if err != nil {
+			return a.fail(err)
+		}
+		a.JSON = true
+		return a.errOut(a.out(map[string]any{"ok": true, "removed": removed, "count": len(removed)}))
 	}
 	var session, cwd string
 	opts := core.ResumeOpts{}

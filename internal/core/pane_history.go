@@ -92,6 +92,51 @@ func RememberPanePersist(surface, persistName, hostID, remoteCWD, cwd string, pi
 	})
 }
 
+// RemovePaneBinding deletes the local resume history for one surface.
+// Missing files are not an error.
+func RemovePaneBinding(surface string) error {
+	err := os.Remove(paneBindingPath(surface))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+// RemovePaneBindingsForPersist deletes every local pane-history file that pins
+// the given persist name. Used on intentional teardown so stale surface_*.json
+// don't try to resurrect a destroyed session on the next cmux restore. Returns
+// the number removed.
+func RemovePaneBindingsForPersist(persistName string) int {
+	if strings.TrimSpace(persistName) == "" {
+		return 0
+	}
+	entries, err := os.ReadDir(PanesDir())
+	if err != nil {
+		return 0
+	}
+	removed := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		p := filepath.Join(PanesDir(), e.Name())
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var b PaneBinding
+		if json.Unmarshal(raw, &b) != nil {
+			continue
+		}
+		if b.PersistName == persistName {
+			if os.Remove(p) == nil {
+				removed++
+			}
+		}
+	}
+	return removed
+}
+
 // ReadPaneBinding loads history for a surface.
 func ReadPaneBinding(surface string) (*PaneBinding, error) {
 	surface = normalizeSurface(surface)

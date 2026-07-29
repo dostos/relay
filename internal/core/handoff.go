@@ -435,8 +435,77 @@ func (h *HandoffService) Finalize(ctx context.Context, handoffID string, outcome
 	if !keepSession {
 		_ = h.Sessions.Destroy(ctx, sess.ID, false)
 	}
-	// Viz close is separate — never required for finalize correctness.
+	// Viz close is intentionally NOT done here: the interactive `agent done`
+	// path closes the pane itself (honoring --keep-viz), and doing it here too
+	// would ignore that flag. Non-interactive callers (Reconcile) close the
+	// pane explicitly. Close itself is now robust (all duplicate surfaces +
+	// pane-state files) thanks to the cmux adapter fix.
 	return ho, nil
+}
+
+// closePaneFor closes the presented pane(s) for a finished session, best-effort.
+func (h *HandoffService) closePaneFor(ctx context.Context, sessionID string) {
+	if h.Viz != nil && h.Viz.Available(ctx) {
+		_ = h.Viz.Close(ctx, sessionID)
+	}
+}
+
+// ReapResult reports what a stale-registry reap did.
+type ReapResult struct {
+	Reaped    []string `json:"reaped"`     // remote tmux confirmed gone → cleaned + panes closed
+	KeptAlive []string `json:"kept_alive"` // remote tmux confirmed present
+	Skipped   []string `json:"skipped"`    // host unreachable → left untouched
+	DryRun    bool     `json:"dry_run"`
+}
+
+// ReapDead reconciles the resume registry against reality. It probes each
+// live/disconnected entry's host (storm-safe, one tmux list per host); any entry
+// whose remote tmux is confirmed gone is reaped: its local session rows are
+// dropped, its presented pane + pane-state files are closed/removed, and it is
+// marked cleaned so a later resume refuses cleanly instead of hanging on a dead
+// attach. Unreachable hosts are skipped (never guessed). With dryRun set it only
+// reports what it would do.
+func (h *HandoffService) ReapDead(ctx context.Context, dryRun bool) (ReapResult, error) {
+	rows, err := h.Sessions.ListResumeStatus()
+	if err != nil {
+		return ReapResult{}, err
+	}
+	var candidates []ResumeInfo
+	for _, r := range rows {
+		if r.Presence == PresenceLive || r.Presence == PresenceDisconnected {
+			candidates = append(candidates, r)
+		}
+	}
+	live := h.Sessions.ProbeRemoteTmux(ctx, candidates)
+	res := ReapResult{DryRun: dryRun}
+	for _, r := range candidates {
+		if !live.HostReached[r.HostID] {
+			res.Skipped = append(res.Skipped, r.PersistName)
+			continue
+		}
+		if live.Alive[r.PersistName] {
+			res.KeptAlive = append(res.KeptAlive, r.PersistName)
+			continue
+		}
+		res.Reaped = append(res.Reaped, r.PersistName)
+		if dryRun {
+			continue
+		}
+		if all, e := h.Reg.ListSessions(); e == nil {
+			for _, sx := range all {
+				if sx.Persist.Name != r.PersistName {
+					continue
+				}
+				if h.Viz != nil && h.Viz.Available(ctx) {
+					_ = h.Viz.Close(ctx, sx.ID)
+				}
+				_ = h.Reg.DeleteSession(sx.ID)
+			}
+		}
+		MarkResumeCleaned(r.PersistName, "reaped: remote tmux absent")
+		RemovePaneBindingsForPersist(r.PersistName)
+	}
+	return res, nil
 }
 
 // Reconcile finalizes open handoffs whose remote persist handle is dead.
@@ -464,6 +533,9 @@ func (h *HandoffService) Reconcile(ctx context.Context) (int, error) {
 			continue
 		}
 		if _, err := h.Finalize(ctx, ho.ID, "", false); err == nil {
+			// Auto-reconciled handoffs have no interactive `done` to close the
+			// pane, so close it here (idempotent).
+			h.closePaneFor(ctx, ho.SessionID)
 			n++
 		}
 	}

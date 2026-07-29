@@ -65,19 +65,37 @@ func (v *Viz) run(ctx context.Context, args ...string) (string, error) {
 }
 
 func (v *Viz) Present(ctx context.Context, sessionID, attachCmd string, layout ports.Layout) (string, error) {
-	v.mu.Lock()
-	if b, ok := v.bindings[sessionID]; ok && b.Surface != "" {
-		v.mu.Unlock()
-		_ = v.focusSurface(ctx, b)
-		sessName := extractSessionFlag(attachCmd)
-		_ = v.brandSurface(ctx, b.Surface, sessName)
-		if sessName != "" {
-			cwd, _ := os.Getwd()
-			core.RememberPanePersist(b.Surface, sessName, "", "", cwd, true)
+	sessName := extractSessionFlag(attachCmd)
+	// Idempotent across processes. Each `relay` CLI call is a fresh process, so
+	// the in-memory bindings map is always empty here; consult the persisted
+	// binding too (via lookup) and, when its surface is still open in cmux,
+	// reuse it instead of leaking a duplicate split. This lets an agent call
+	// `viz present` repeatedly (e.g. to keep a handoff visible) without piling
+	// up panes.
+	if b, err := v.lookup(sessionID); err == nil && b.Surface != "" {
+		if v.workspaceOfSurface(ctx, b.Surface) != "" {
+			_ = v.focusSurface(ctx, b)
+			_ = v.brandSurface(ctx, b.Surface, sessName)
+			if sessName != "" {
+				cwd, _ := os.Getwd()
+				core.RememberPanePersist(b.Surface, sessName, "", "", cwd, true)
+			}
+			return b.Surface, nil
 		}
-		return b.Surface, nil
+		// Bound surface is gone — drop the stale binding and open a fresh one.
+		v.mu.Lock()
+		delete(v.bindings, sessionID)
+		v.mu.Unlock()
+		_ = os.Remove(bindPath(sessionID))
 	}
-	v.mu.Unlock()
+
+	// Blind-usage default: when the caller omits --workspace, land the split in
+	// whatever workspace cmux currently has focused. Without this, cmux
+	// new-split fails "Surface not found" and present is unusable unless the
+	// caller first discovers the active workspace ref itself.
+	if layout.Workspace == "" {
+		layout.Workspace = v.activeWorkspace(ctx)
+	}
 
 	before, _ := v.listSurfaces(ctx)
 	surface, pane, err := v.openSurface(ctx, layout)
@@ -99,7 +117,6 @@ func (v *Viz) Present(ctx context.Context, sessionID, attachCmd string, layout p
 		return "", err
 	}
 	// Best-effort: stamp cmux resume binding so restart can re-run the same command.
-	sessName := extractSessionFlag(attachCmd)
 	if sessName != "" {
 		title := brandTitle(sessName)
 		_, _ = v.run(ctx, "surface", "resume", "set",
@@ -388,17 +405,58 @@ func (v *Viz) Close(ctx context.Context, sessionID string) error {
 	delete(v.bindings, sessionID)
 	v.mu.Unlock()
 	defer os.Remove(bindPath(sessionID))
-	// cmux short refs (surface:N) resolve within a window/workspace context, so
-	// scope close-surface to the bound surface's own workspace. A bare
-	// --surface fails not_found whenever that surface is not in the focused
-	// window, silently orphaning the pane. An empty workspace means the surface
-	// is no longer in any window — already gone, nothing to close.
-	ws := v.workspaceOfSurface(ctx, b.Surface)
-	if ws == "" {
-		return nil
+
+	persist := extractSessionFlag(b.Attach)
+	// Close the exact bound surface, then mop up any DUPLICATE panes bound to
+	// the same session. A re-present from a fresh process used to leak a new
+	// split each call, and destroy only knew the last binding — orphaning the
+	// earlier panes with a dead `relay resume`. Collecting by relay checkpoint
+	// (never by unrelated titles) closes them all.
+	closed := map[string]bool{}
+	v.closeSurface(ctx, b.Surface)
+	closed[b.Surface] = true
+	if persist != "" {
+		for ref := range v.surfacesForPersist(ctx, persist) {
+			if closed[ref] {
+				continue
+			}
+			v.closeSurface(ctx, ref)
+			closed[ref] = true
+		}
+		// Drop lingering local pane-state files for this session so a later
+		// cmux restore won't try to resurrect the destroyed remote.
+		core.RemovePaneBindingsForPersist(persist)
 	}
-	_, err = v.run(ctx, "close-surface", "--surface", b.Surface, "--workspace", ws)
-	return err
+	return nil
+}
+
+// closeSurface closes one surface scoped to its own workspace (cmux short refs
+// resolve per-window, so a bare --surface fails not_found when the surface is
+// not in the focused window) and drops its local pane-state file. Best-effort:
+// a surface already gone is not an error.
+func (v *Viz) closeSurface(ctx context.Context, surface string) {
+	if surface == "" {
+		return
+	}
+	if ws := v.workspaceOfSurface(ctx, surface); ws != "" {
+		_, _ = v.run(ctx, "close-surface", "--surface", surface, "--workspace", ws)
+	}
+	_ = core.RemovePaneBinding(surface)
+}
+
+// surfacesForPersist returns every cmux surface whose relay checkpoint targets
+// persistName — i.e. duplicate panes presented for the same session.
+func (v *Viz) surfacesForPersist(ctx context.Context, persistName string) map[string]bool {
+	out := map[string]bool{}
+	if persistName == "" {
+		return out
+	}
+	for ref := range v.relayBoundSurfaces(ctx) {
+		if name, _, _ := v.relayCheckpoint(ctx, ref); name == persistName {
+			out[ref] = true
+		}
+	}
+	return out
 }
 
 func (v *Viz) Layout(ctx context.Context) (string, error) {
@@ -407,6 +465,27 @@ func (v *Viz) Layout(ctx context.Context) (string, error) {
 		return v.run(ctx, "tree", "--json")
 	}
 	return out, nil
+}
+
+// activeWorkspace returns the workspace_ref cmux currently reports as focused,
+// so a present that omits --workspace still lands its split in the right place
+// instead of failing cmux new-split with "Surface not found".
+func (v *Viz) activeWorkspace(ctx context.Context) string {
+	out, err := v.run(ctx, "list-panes", "--json")
+	if err != nil {
+		return ""
+	}
+	return parseWorkspaceRef([]byte(out))
+}
+
+func parseWorkspaceRef(out []byte) string {
+	var doc struct {
+		WorkspaceRef string `json:"workspace_ref"`
+	}
+	if json.Unmarshal(out, &doc) != nil {
+		return ""
+	}
+	return doc.WorkspaceRef
 }
 
 // SaveRestorable stamps resume bindings + pane history on every live relay pane.

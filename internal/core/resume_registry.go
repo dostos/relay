@@ -140,6 +140,41 @@ func upsertResume(sess *Session, state ResumeState, reason string) {
 	_ = saveResumeRegistry(f)
 }
 
+// PruneResume drops registry entries. When cleanedOnly is set only cleaned
+// tombstones are considered; otherwise every state is eligible. When olderThan
+// > 0 only entries last updated before now-olderThan are dropped. Returns the
+// removed persist names. Bounds the tombstone growth that otherwise only clears
+// on the 60-day sweep in saveResumeRegistry.
+func PruneResume(cleanedOnly bool, olderThan time.Duration) ([]string, error) {
+	f, err := loadResumeRegistry()
+	if err != nil {
+		return nil, err
+	}
+	// A negative duration would put the cutoff in the future and match every
+	// entry — treat it as "no age filter" instead.
+	if olderThan < 0 {
+		olderThan = 0
+	}
+	cutoff := time.Now().UTC().Add(-olderThan)
+	var removed []string
+	for k, e := range f.Entries {
+		if cleanedOnly && e.State != ResumeStateCleaned {
+			continue
+		}
+		if olderThan > 0 && e.UpdatedAt.After(cutoff) {
+			continue
+		}
+		removed = append(removed, k)
+		delete(f.Entries, k)
+	}
+	if len(removed) > 0 {
+		if err := saveResumeRegistry(f); err != nil {
+			return nil, err
+		}
+	}
+	return removed, nil
+}
+
 // LookupResume finds a registry entry (any state).
 func LookupResume(persistName string) (*ResumeEntry, error) {
 	if err := shellquote.ValidateSessionName(persistName); err != nil {

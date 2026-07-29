@@ -232,6 +232,11 @@ type ResumeInfo struct {
 	RemoteCWD   string         `json:"remote_cwd,omitempty"`
 	Reason      string         `json:"reason,omitempty"`
 	UpdatedAt   time.Time      `json:"updated_at,omitempty"`
+	// RemoteAlive is set only when --probe ran: true/false = remote tmux
+	// present/absent; nil = not probed or host unreachable (see HostReachable).
+	// This is the ground truth the registry `presence` alone overstates.
+	RemoteAlive   *bool `json:"remote_alive,omitempty"`
+	HostReachable *bool `json:"host_reachable,omitempty"`
 }
 
 // ListResumeStatus merges live sessions + registry for operators/agents.
@@ -279,6 +284,41 @@ func (s *SessionService) ListResumeStatus() ([]ResumeInfo, error) {
 		})
 	}
 	return out, nil
+}
+
+// ListResumeStatusProbed is ListResumeStatus plus a storm-safe remote liveness
+// probe: it fills RemoteAlive/HostReachable so callers see whether a `live`
+// entry's remote tmux actually still exists (the registry alone overstates it).
+// Only live/disconnected rows are probed; cleaned/unknown are left untouched.
+func (s *SessionService) ListResumeStatusProbed(ctx context.Context) ([]ResumeInfo, error) {
+	rows, err := s.ListResumeStatus()
+	if err != nil {
+		return nil, err
+	}
+	var probeable []ResumeInfo
+	for _, r := range rows {
+		if r.Presence == PresenceLive || r.Presence == PresenceDisconnected {
+			probeable = append(probeable, r)
+		}
+	}
+	live := s.ProbeRemoteTmux(ctx, probeable)
+	for i := range rows {
+		r := &rows[i]
+		if r.Presence != PresenceLive && r.Presence != PresenceDisconnected {
+			continue
+		}
+		reached, ok := live.HostReached[r.HostID]
+		if !ok || !reached {
+			b := false
+			r.HostReachable = &b
+			continue // leave RemoteAlive nil — unknown, not dead
+		}
+		b := true
+		r.HostReachable = &b
+		alive := live.Alive[r.PersistName]
+		r.RemoteAlive = &alive
+	}
+	return rows, nil
 }
 
 // FormatResumeError makes cleaned vs unknown clear for CLI (no shell fallback on cleaned).

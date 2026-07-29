@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/dostos/relay/internal/ports"
@@ -303,3 +305,78 @@ func (s *SessionService) KillPersist(ctx context.Context, hostID, persistName st
 	return nil
 }
 
+// RemoteLiveness is the result of probing whether persist names actually have a
+// live remote tmux. Alive[name]=true means the remote session exists;
+// HostReached[host]=false means the host could not be reached (probe skipped,
+// do not treat its names as dead).
+type RemoteLiveness struct {
+	Alive       map[string]bool
+	HostReached map[string]bool
+}
+
+// ProbeRemoteTmux checks which persist names are actually alive on their hosts.
+// It is storm-safe: ONE `tmux list-sessions` per host (reusing the ssh
+// ControlMaster), never one probe per session, with bounded concurrency and a
+// short timeout. Unreachable hosts are reported (HostReached=false), not
+// guessed. This is what turns the optimistic registry `live` into ground truth.
+func (s *SessionService) ProbeRemoteTmux(ctx context.Context, names []ResumeInfo) RemoteLiveness {
+	byHost := map[string][]string{}
+	for _, n := range names {
+		if n.HostID == "" || n.PersistName == "" {
+			continue
+		}
+		byHost[n.HostID] = append(byHost[n.HostID], n.PersistName)
+	}
+	res := RemoteLiveness{Alive: map[string]bool{}, HostReached: map[string]bool{}}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4) // cap concurrent hosts — IPS-safe
+	for host, hostNames := range byHost {
+		host, hostNames := host, hostNames
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			set, reached := s.remoteTmuxSet(ctx, host)
+			mu.Lock()
+			defer mu.Unlock()
+			res.HostReached[host] = reached
+			if !reached {
+				return
+			}
+			for _, n := range hostNames {
+				if set[n] {
+					res.Alive[n] = true
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return res
+}
+
+// remoteTmuxSet lists live tmux session names on one host. reached=false means
+// the host was unreachable (transport error) — distinct from a reachable host
+// with no tmux server (reached=true, empty set).
+func (s *SessionService) remoteTmuxSet(ctx context.Context, hostID string) (set map[string]bool, reached bool) {
+	t, err := s.NewTransport(hostID)
+	if err != nil {
+		return nil, false
+	}
+	cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+	// `|| true` so "no server running" (exit 1) is not read as a transport
+	// failure; a real ssh failure still returns err.
+	out, _, err := t.Run(cctx, "~", "tmux list-sessions -F '#{session_name}' 2>/dev/null || true")
+	if err != nil {
+		return nil, false
+	}
+	set = map[string]bool{}
+	for _, ln := range strings.Split(out, "\n") {
+		if ln = strings.TrimSpace(ln); ln != "" {
+			set[ln] = true
+		}
+	}
+	return set, true
+}
