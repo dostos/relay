@@ -12,6 +12,7 @@ import (
 
 	"github.com/dostos/relay/internal/coord"
 	"github.com/dostos/relay/internal/ports"
+	"github.com/dostos/relay/internal/shellquote"
 )
 
 // A relay message channel is a relayd event stream named chan.<channel>. This
@@ -92,6 +93,29 @@ func (s *MsgService) Send(ctx context.Context, host, channel, kind, from, text s
 		full = nil
 	}
 	return s.Coord.Emit(ctx, t, channelStream(channel), kind, full)
+}
+
+// RemoveChannels deletes channel event logs on host (explicit per-task cleanup,
+// e.g. drop a coordination channel when the task is done). Returns the names it
+// acted on (validated). Reuses the same rm path as `relay gc`.
+func (s *MsgService) RemoveChannels(ctx context.Context, host string, channels []string) ([]string, error) {
+	if host == "" || len(channels) == 0 {
+		return nil, fmt.Errorf("host and at least one channel required")
+	}
+	t, err := s.NewTransport(host)
+	if err != nil {
+		return nil, err
+	}
+	var ok []string
+	for _, c := range channels {
+		if shellquote.ValidateSessionName(c) == nil {
+			ok = append(ok, c)
+		}
+	}
+	if len(ok) > 0 {
+		removeChannels(ctx, t, ok)
+	}
+	return ok, nil
 }
 
 // Read drains messages on a channel from fromSeq. With follow it streams until

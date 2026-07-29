@@ -85,6 +85,24 @@ Workflow: [`examples/fan-in.sh`](examples/fan-in.sh).
   just A over N channels. B remains worth keeping because it upgrades the
   *existing* handoff loop with no new caller surface.
 
+### Cleanup
+
+Channels are relayd `.jsonl` files, so they persist until removed. Drop one
+explicitly when a task is done — `relay msg rm -H HOST -c CHANNEL` — or let the
+unified sweep handle stale/empty ones:
+
+```bash
+relay gc [-H HOST] [--dry-run] [--channel-ttl DAYS]   # reap dead sessions +
+                                                      # prune tombstones +
+                                                      # drop stale panes +
+                                                      # GC empty/old channels
+```
+
+`relay gc` is the single "clean up when done" entry point: one probe SSH per
+host (tmux sessions + channels in one exec), unreachable hosts skipped,
+`--dry-run` to preview. `relay resume reap` is the same sweep scoped to
+sessions only.
+
 ### Storm safety
 
 Every read is a single blocking `subscribe` (ControlMaster-reused), bounded by

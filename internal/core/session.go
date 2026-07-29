@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -338,7 +337,7 @@ func (s *SessionService) ProbeRemoteTmux(ctx context.Context, names []ResumeInfo
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-			set, reached := s.remoteTmuxSet(ctx, host)
+			set, reached := s.tmuxSet(ctx, host)
 			mu.Lock()
 			defer mu.Unlock()
 			res.HostReached[host] = reached
@@ -356,27 +355,15 @@ func (s *SessionService) ProbeRemoteTmux(ctx context.Context, names []ResumeInfo
 	return res
 }
 
-// remoteTmuxSet lists live tmux session names on one host. reached=false means
-// the host was unreachable (transport error) — distinct from a reachable host
-// with no tmux server (reached=true, empty set).
-func (s *SessionService) remoteTmuxSet(ctx context.Context, hostID string) (set map[string]bool, reached bool) {
+// tmuxSet returns live tmux session names on one host via the shared host probe
+// (channels ignored here). reached=false means the host was unreachable.
+func (s *SessionService) tmuxSet(ctx context.Context, hostID string) (map[string]bool, bool) {
 	t, err := s.NewTransport(hostID)
 	if err != nil {
 		return nil, false
 	}
 	cctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
-	// `|| true` so "no server running" (exit 1) is not read as a transport
-	// failure; a real ssh failure still returns err.
-	out, _, err := t.Run(cctx, "~", "tmux list-sessions -F '#{session_name}' 2>/dev/null || true")
-	if err != nil {
-		return nil, false
-	}
-	set = map[string]bool{}
-	for _, ln := range strings.Split(out, "\n") {
-		if ln = strings.TrimSpace(ln); ln != "" {
-			set[ln] = true
-		}
-	}
-	return set, true
+	tmux, _, ok := probeHostState(cctx, t)
+	return tmux, ok
 }

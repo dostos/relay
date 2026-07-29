@@ -32,6 +32,7 @@ type App struct {
 	Reg       *core.Registry
 	Coord     ports.Coord
 	Msg       *core.MsgService
+	Maint     *core.MaintenanceService
 	Viz       ports.Viz
 	JSON      bool
 	tf        core.TransportFactory
@@ -86,6 +87,7 @@ func New() *App {
 		Reg:   reg,
 		Coord: coord,
 		Msg:   &core.MsgService{Coord: coord, NewTransport: tf},
+		Maint: &core.MaintenanceService{Sessions: sessions, Reg: reg, Viz: viz, NewTransport: tf},
 		Viz:   viz,
 		tf:    tf,
 	}
@@ -184,6 +186,8 @@ func (a *App) Run(args []string) int {
 		return a.cmdAgent(ctx, filtered[1:])
 	case "msg":
 		return a.cmdMsg(ctx, filtered[1:])
+	case "gc":
+		return a.cmdGC(ctx, filtered[1:])
 	case "events":
 		return a.cmdEvents(ctx, filtered[1:])
 	case "viz", "pane":
@@ -266,7 +270,12 @@ Agent-to-agent messages (relayd channels; any channel name):
   relay msg send -H HOST -c CHANNEL [--kind K] [--from ID] [--text ... | -- ...] [--meta JSON]
   relay msg read -H HOST -c CHANNEL [--from SEQ] [--follow] [--timeout SEC]
   relay msg wait -H HOST -c CHANNEL[:SEQ] [-c CHANNEL2[:SEQ] …] [--timeout SEC]   # fan-in; first wins
+  relay msg rm   -H HOST -c CHANNEL [-c CHANNEL2 …]                                # drop a channel when done
   # Thread the returned next_from per channel; NAME:SEQ gives each its own cursor.
+
+Cleanup (one pass; reap dead sessions + prune tombstones + drop stale panes + GC channels):
+  relay gc [-H HOST] [--dry-run] [--channel-ttl DAYS | --no-channel-ttl]
+  # Default sweeps every registry host; one probe SSH per host. Unreachable hosts skipped.
 
 Events (via always-on relayd on the host):
   relay events tail [-f] --handoff ID [--from SEQ]
@@ -1016,6 +1025,46 @@ func (a *App) cmdHandoff(ctx context.Context, args []string) int {
 	return 0
 }
 
+// cmdGC is the one-shot "clean up when done" sweep: reap dead sessions, prune
+// tombstones, drop stale pane-state, and GC stale/empty message channels — one
+// probe SSH per host. Default sweeps every registry host; -H scopes to one.
+//   relay gc [-H HOST] [--dry-run] [--channel-ttl DAYS | --no-channel-ttl]
+func (a *App) cmdGC(ctx context.Context, args []string) int {
+	host, rest := flagHost(args)
+	dryRun := false
+	channelTTLDays := 7
+	for i := 0; i < len(rest); i++ {
+		switch rest[i] {
+		case "--dry-run", "-n":
+			dryRun = true
+		case "--channel-ttl":
+			i++
+			if i < len(rest) {
+				channelTTLDays, _ = strconv.Atoi(rest[i])
+			}
+		case "--no-channel-ttl":
+			channelTTLDays = 0
+		case "--all":
+			// default already sweeps all registry hosts when -H is absent
+		default:
+			return a.fail(rejectUnknownFlag(rest[i]))
+		}
+	}
+	if channelTTLDays < 0 {
+		channelTTLDays = 0
+	}
+	var hosts []string
+	if host != "" {
+		hosts = []string{host}
+	}
+	rep, err := a.Maint.GC(ctx, hosts, time.Duration(channelTTLDays)*24*time.Hour, false, dryRun)
+	if err != nil {
+		return a.fail(err)
+	}
+	a.JSON = true
+	return a.errOut(a.out(map[string]any{"ok": true, "gc": rep}))
+}
+
 // cmdMsg is the agent-to-agent message bus over relayd channels.
 //   relay msg send -H HOST -c CHANNEL [--kind K] [--from ID] [--text ... | -- ...] [--meta JSON]
 //   relay msg read -H HOST -c CHANNEL [--from SEQ] [--follow] [--timeout S]
@@ -1079,6 +1128,29 @@ func (a *App) cmdMsg(ctx context.Context, args []string) int {
 		}
 		a.JSON = true
 		return a.errOut(a.out(map[string]any{"ok": true, "channel": channel, "seq": seq}))
+	case "rm":
+		host, rest := flagHost(rest)
+		var channels []string
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case "--channel", "-c":
+				i++
+				if i < len(rest) {
+					channels = append(channels, rest[i])
+				}
+			default:
+				return a.fail(rejectUnknownFlag(rest[i]))
+			}
+		}
+		if host == "" || len(channels) == 0 {
+			return a.fail(fmt.Errorf("usage: relay msg rm -H HOST --channel NAME [--channel NAME2 …]"))
+		}
+		removed, err := a.Msg.RemoveChannels(ctx, host, channels)
+		if err != nil {
+			return a.fail(err)
+		}
+		a.JSON = true
+		return a.errOut(a.out(map[string]any{"ok": true, "removed": removed}))
 	case "read":
 		host, rest := flagHost(rest)
 		var channel string
@@ -1615,12 +1687,25 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 				return a.fail(rejectUnknownFlag(x))
 			}
 		}
-		res, err := a.Handoffs.ReapDead(ctx, dryRun)
+		// Sessions-only sweep — shares MaintenanceService.GC (single reap impl).
+		rep, err := a.Maint.GC(ctx, nil, 0, true, dryRun)
 		if err != nil {
 			return a.fail(err)
 		}
+		var reaped, skippedHosts []string
+		kept := 0
+		for _, h := range rep.Hosts {
+			if !h.Reachable {
+				skippedHosts = append(skippedHosts, h.Host)
+				continue
+			}
+			reaped = append(reaped, h.ReapedSessions...)
+			kept += h.KeptSessions
+		}
 		a.JSON = true
-		return a.errOut(a.out(map[string]any{"ok": true, "reap": res}))
+		return a.errOut(a.out(map[string]any{"ok": true, "reap": map[string]any{
+			"reaped": reaped, "kept": kept, "skipped_hosts": skippedHosts, "dry_run": dryRun,
+		}}))
 	}
 	if len(args) > 0 && args[0] == "prune" {
 		cleanedOnly := true

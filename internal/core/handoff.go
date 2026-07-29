@@ -450,63 +450,9 @@ func (h *HandoffService) closePaneFor(ctx context.Context, sessionID string) {
 	}
 }
 
-// ReapResult reports what a stale-registry reap did.
-type ReapResult struct {
-	Reaped    []string `json:"reaped"`     // remote tmux confirmed gone → cleaned + panes closed
-	KeptAlive []string `json:"kept_alive"` // remote tmux confirmed present
-	Skipped   []string `json:"skipped"`    // host unreachable → left untouched
-	DryRun    bool     `json:"dry_run"`
-}
-
-// ReapDead reconciles the resume registry against reality. It probes each
-// live/disconnected entry's host (storm-safe, one tmux list per host); any entry
-// whose remote tmux is confirmed gone is reaped: its local session rows are
-// dropped, its presented pane + pane-state files are closed/removed, and it is
-// marked cleaned so a later resume refuses cleanly instead of hanging on a dead
-// attach. Unreachable hosts are skipped (never guessed). With dryRun set it only
-// reports what it would do.
-func (h *HandoffService) ReapDead(ctx context.Context, dryRun bool) (ReapResult, error) {
-	rows, err := h.Sessions.ListResumeStatus()
-	if err != nil {
-		return ReapResult{}, err
-	}
-	var candidates []ResumeInfo
-	for _, r := range rows {
-		if r.Presence == PresenceLive || r.Presence == PresenceDisconnected {
-			candidates = append(candidates, r)
-		}
-	}
-	live := h.Sessions.ProbeRemoteTmux(ctx, candidates)
-	res := ReapResult{DryRun: dryRun}
-	for _, r := range candidates {
-		if !live.HostReached[r.HostID] {
-			res.Skipped = append(res.Skipped, r.PersistName)
-			continue
-		}
-		if live.Alive[r.PersistName] {
-			res.KeptAlive = append(res.KeptAlive, r.PersistName)
-			continue
-		}
-		res.Reaped = append(res.Reaped, r.PersistName)
-		if dryRun {
-			continue
-		}
-		if all, e := h.Reg.ListSessions(); e == nil {
-			for _, sx := range all {
-				if sx.Persist.Name != r.PersistName {
-					continue
-				}
-				if h.Viz != nil && h.Viz.Available(ctx) {
-					_ = h.Viz.Close(ctx, sx.ID)
-				}
-				_ = h.Reg.DeleteSession(sx.ID)
-			}
-		}
-		MarkResumeCleaned(r.PersistName, "reaped: remote tmux absent")
-		RemovePaneBindingsForPersist(r.PersistName)
-	}
-	return res, nil
-}
+// Session reaping now lives in MaintenanceService.GC (sessions-only mode) so
+// there is a single reap + host-probe implementation; `relay resume reap` and
+// `relay gc` share it. See internal/core/maintenance.go.
 
 // Reconcile finalizes open handoffs whose remote persist handle is dead.
 func (h *HandoffService) Reconcile(ctx context.Context) (int, error) {
