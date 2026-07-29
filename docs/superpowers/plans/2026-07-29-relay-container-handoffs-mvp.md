@@ -78,7 +78,9 @@ func TestContainerExecNonTTY(t *testing.T) {
 	if !strings.Contains(got, "bash -lc") || strings.Contains(got, "bash -ilc") {
 		t.Fatalf("non-tty should use login (non-interactive) shell: %q", got)
 	}
-	if !strings.Contains(got, "cd '/w' && ls -la") {
+	// PathExpr single-quotes the path and the whole inner script is re-quoted for
+	// bash -lc, so the unescaped literal never appears — assert decomposed substrings.
+	if !strings.Contains(got, "/w") || !strings.Contains(got, "&& ls -la") {
 		t.Fatalf("cwd/join wrong: %q", got)
 	}
 }

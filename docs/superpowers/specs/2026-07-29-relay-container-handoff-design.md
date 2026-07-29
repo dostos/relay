@@ -109,6 +109,7 @@ Notes:
 | `Permission denied` on the binary | `user:` uid must match the owner of the bound files (host uid N). |
 | hook / plugin `SyntaxError` or node error | Set `hooks: off` (default) — the container's node is too old for the host's hooks/plugins. |
 | `<agent>: command not found` | Strategy B and the agent is not in the image; declare a `provision:` command or bind (Strategy A). |
+| `EROFS: read-only file system` under `$HOME` | The agent's state dir was bound read-only; bind only the auth credential ro and leave `$HOME/.claude` writable + container-local. |
 
 ## Commands
 
@@ -140,7 +141,7 @@ relay container up -H HOST --container NAME
 
 ## Security
 
-- Prefer **read-only** binds; bind **minimal auth** (`~/.claude.json`) not the whole `~/.claude`.
+- Prefer **read-only** binds; bind **minimal auth** (`~/.claude.json`) not the whole `~/.claude`. A whole-`~/.claude` **read-only** bind *breaks the agent*: claude writes runtime state to `~/.claude/session-env/` → `EROFS: read-only file system` (verified 2026-07-29, live `relay agent start --container`). Rule: bind the auth credential read-only; keep the agent's state dir (`$HOME/.claude`) **writable and container-local** (a fresh dir the agent owns). This is the same reason to avoid the whole-dir bind as the hook-crash finding — the dir carries host hooks/plugins too.
 - `docker cp` of creds leaves them in the container FS until it dies — gated behind an explicit flag + warning; bind-mode keeps creds out of the writable FS.
 - Never log credential contents. `host.yaml` references paths and env **names**, never secret values.
 
