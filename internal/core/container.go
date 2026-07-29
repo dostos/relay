@@ -57,3 +57,60 @@ func ContainerExec(runtime string, ref ContainerRef, inner string, tty bool) (st
 	args = append(args, shell, shellquote.Quote(script))
 	return strings.Join(args, " "), nil
 }
+
+// ContainerSpec declares a container target in a host profile (host.yaml).
+type ContainerSpec struct {
+	Name       string         `yaml:"name" json:"name"`
+	Runtime    string         `yaml:"runtime,omitempty" json:"runtime,omitempty"`
+	Container  string         `yaml:"container" json:"container"`
+	Image      string         `yaml:"image,omitempty" json:"image,omitempty"`
+	User       string         `yaml:"user,omitempty" json:"user,omitempty"`
+	DefaultCWD string         `yaml:"default_cwd,omitempty" json:"default_cwd,omitempty"`
+	Toolchain  string         `yaml:"toolchain,omitempty" json:"toolchain,omitempty"`
+	Hooks      string         `yaml:"hooks,omitempty" json:"hooks,omitempty"`
+	PathMap    []PathMapEntry `yaml:"path_map,omitempty" json:"path_map,omitempty"`
+	Expose     []string       `yaml:"expose,omitempty" json:"expose,omitempty"`
+	Env        []string       `yaml:"env,omitempty" json:"env,omitempty"`
+}
+
+// RuntimeVerb is the container CLI to invoke (default docker).
+func (c *ContainerSpec) RuntimeVerb() string {
+	if c == nil || c.Runtime == "" {
+		return "docker"
+	}
+	return c.Runtime
+}
+
+// ResolveCWD picks the container working dir for a local repo: path_map first,
+// then default_cwd, then "/".
+func (c *ContainerSpec) ResolveCWD(localRepo string) string {
+	if c == nil {
+		return "/"
+	}
+	if localRepo != "" {
+		if cwd, ok := matchPathMap(c.PathMap, localRepo); ok {
+			return cwd
+		}
+	}
+	if c.DefaultCWD != "" {
+		return c.DefaultCWD
+	}
+	return "/"
+}
+
+// ResolveContainer finds a container spec by name in the host profile.
+func (p *HostProfile) ResolveContainer(name string) (*ContainerSpec, error) {
+	if p == nil {
+		return nil, fmt.Errorf("nil host profile")
+	}
+	for i := range p.Containers {
+		if p.Containers[i].Name == name {
+			return &p.Containers[i], nil
+		}
+	}
+	avail := make([]string, 0, len(p.Containers))
+	for i := range p.Containers {
+		avail = append(avail, p.Containers[i].Name)
+	}
+	return nil, fmt.Errorf("container %q not in host profile; available: %s", name, strings.Join(avail, ", "))
+}

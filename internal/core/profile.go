@@ -22,14 +22,15 @@ var ErrMissingProfile = errors.New("relay host profile missing")
 
 // HostProfile is authoritative on each remote (~/.config/relay/host.yaml).
 type HostProfile struct {
-	Version  int                    `yaml:"version" json:"version"`
-	HostID   string                 `yaml:"host_id,omitempty" json:"host_id,omitempty"`
-	Agents   []AgentSpec            `yaml:"agents" json:"agents"`
-	PathMap  []PathMapEntry         `yaml:"path_map" json:"path_map"`
-	Defaults HostDefaults           `yaml:"defaults" json:"defaults"`
-	Meta     map[string]any         `yaml:"meta,omitempty" json:"meta,omitempty"`
-	ProbedAt *time.Time             `yaml:"probed_at,omitempty" json:"probed_at,omitempty"`
-	Probe    map[string]ProbeResult `yaml:"probe,omitempty" json:"probe,omitempty"`
+	Version    int                    `yaml:"version" json:"version"`
+	HostID     string                 `yaml:"host_id,omitempty" json:"host_id,omitempty"`
+	Agents     []AgentSpec            `yaml:"agents" json:"agents"`
+	PathMap    []PathMapEntry         `yaml:"path_map" json:"path_map"`
+	Containers []ContainerSpec        `yaml:"containers,omitempty" json:"containers,omitempty"`
+	Defaults   HostDefaults           `yaml:"defaults" json:"defaults"`
+	Meta       map[string]any         `yaml:"meta,omitempty" json:"meta,omitempty"`
+	ProbedAt   *time.Time             `yaml:"probed_at,omitempty" json:"probed_at,omitempty"`
+	Probe      map[string]ProbeResult `yaml:"probe,omitempty" json:"probe,omitempty"`
 }
 
 // AgentSpec describes an agent CLI available on the host.
@@ -81,20 +82,28 @@ func ParseHostProfileYAML(data []byte) (*HostProfile, error) {
 	return &p, nil
 }
 
+// matchPathMap returns the remote cwd for a local repo/basename, or ("", false).
+func matchPathMap(entries []PathMapEntry, localRepo string) (string, bool) {
+	base := filepath.Base(strings.TrimRight(localRepo, string(filepath.Separator)))
+	for _, e := range entries {
+		m := e.Match
+		if m == localRepo || m == base || filepath.Base(m) == base {
+			return e.RemoteCWD, true
+		}
+		if strings.HasSuffix(localRepo, string(filepath.Separator)+m) || strings.HasSuffix(localRepo, "/"+m) {
+			return e.RemoteCWD, true
+		}
+	}
+	return "", false
+}
+
 // ResolveRemoteCWD finds a path_map entry for the given local repo root / basename.
 func (p *HostProfile) ResolveRemoteCWD(localRepo string) (string, error) {
 	if p == nil {
 		return "", fmt.Errorf("nil host profile")
 	}
-	base := filepath.Base(strings.TrimRight(localRepo, string(filepath.Separator)))
-	for _, e := range p.PathMap {
-		m := e.Match
-		if m == localRepo || m == base || filepath.Base(m) == base {
-			return e.RemoteCWD, nil
-		}
-		if strings.HasSuffix(localRepo, string(filepath.Separator)+m) || strings.HasSuffix(localRepo, "/"+m) {
-			return e.RemoteCWD, nil
-		}
+	if cwd, ok := matchPathMap(p.PathMap, localRepo); ok {
+		return cwd, nil
 	}
 	return "", fmt.Errorf("no path_map entry for %q on host (configure ~/.config/relay/host.yaml)", localRepo)
 }

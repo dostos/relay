@@ -42,3 +42,41 @@ func TestContainerExecRequiresRef(t *testing.T) {
 		t.Fatal("expected error for empty container ref")
 	}
 }
+
+func TestParseContainersAndResolve(t *testing.T) {
+	yaml := `
+version: 1
+host_id: hamburg
+agents:
+  - name: claude
+    command: claude
+containers:
+  - name: beholder
+    runtime: docker
+    container: beholder-run
+    default_cwd: /workspace
+    path_map:
+      - match: beholder
+        remote_cwd: /workspace/beholder
+`
+	p, err := ParseHostProfileYAML([]byte(yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := p.ResolveContainer("beholder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Container != "beholder-run" || c.RuntimeVerb() != "docker" {
+		t.Fatalf("spec wrong: %+v", c)
+	}
+	if cwd := c.ResolveCWD("/Users/x/dev/beholder"); cwd != "/workspace/beholder" {
+		t.Fatalf("path_map cwd %q", cwd)
+	}
+	if cwd := c.ResolveCWD("/Users/x/dev/other"); cwd != "/workspace" {
+		t.Fatalf("default cwd %q", cwd)
+	}
+	if _, err := p.ResolveContainer("nope"); err == nil {
+		t.Fatal("expected miss error")
+	}
+}
