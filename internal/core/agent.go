@@ -1,12 +1,8 @@
 package core
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"strings"
 	"time"
 )
 
@@ -184,29 +180,10 @@ func (h *HandoffService) AgentWait(ctx context.Context, handoffID string, fromSe
 	wctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	pr, pw := io.Pipe()
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- h.Coord.Subscribe(wctx, t, sess.Persist.Name, fromSeq, true, pw)
-		_ = pw.Close()
-	}()
-
-	sc := bufio.NewScanner(pr)
-	buf := make([]byte, 0, 64*1024)
-	sc.Buffer(buf, 1024*1024)
 	var got *Event
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
-		}
-		var ev Event
-		if json.Unmarshal([]byte(line), &ev) != nil {
-			continue
-		}
-		if ev.Kind == "heartbeat" || ev.Seq <= fromSeq {
-			continue
-		}
+	// Shared subscribe/decode loop (see streamEvents). fn declares the agent
+	// status transitions and stops at the first actionable event.
+	subErr := streamEvents(wctx, h.Coord, t, sess.Persist.Name, fromSeq, true, func(ev Event) bool {
 		ho.LastSeq = ev.Seq
 		switch ev.Kind {
 		case "needs_input", "ask":
@@ -226,15 +203,13 @@ func (h *HandoffService) AgentWait(ctx context.Context, handoffID string, fromSe
 			ev.Kind == "ask" || ev.Kind == "note" || ev.Kind == "progress" || ev.Kind == "result" ||
 			(ev.Kind == "idle" && ho.Kind == KindAgent)
 		if !actionable {
-			continue
+			return true // keep waiting
 		}
 		cp := ev
 		got = &cp
 		cancel() // stop subscribe
-		break
-	}
-	_ = pr.Close()
-	subErr := <-errCh
+		return false
+	})
 
 	// reload for latest status
 	if latest, err := h.Reg.GetHandoff(handoffID); err == nil {

@@ -3,6 +3,7 @@ package core
 import (
 	"time"
 
+	"github.com/dostos/relay/internal/coord"
 	"github.com/dostos/relay/internal/ports"
 )
 
@@ -59,14 +60,10 @@ type Handoff struct {
 }
 
 // Event is one line from the remote JSONL event log.
-type Event struct {
-	TS   string         `json:"ts"`
-	Seq  int64          `json:"seq"`
-	Sess string         `json:"sess"`
-	Kind string         `json:"kind"` // started|idle|needs_input|note|inject|exit
-	Pane string         `json:"pane,omitempty"`
-	Meta map[string]any `json:"meta,omitempty"`
-}
+// Event is the coordination event on the relayd bus. It is an alias for
+// coord.Event (one wire type, not two): kind ∈ started|idle|needs_input|
+// ask|note|progress|result|inject|exit|heartbeat, with optional meta.
+type Event = coord.Event
 
 // Binding is the JSON handoff returns for agents to re-attach after compaction.
 type Binding struct {

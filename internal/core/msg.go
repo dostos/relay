@@ -1,12 +1,8 @@
 package core
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"strings"
 	"sync"
 	"time"
 
@@ -135,41 +131,16 @@ func (s *MsgService) Read(ctx context.Context, host, channel string, fromSeq int
 		rctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	pr, pw := io.Pipe()
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- s.Coord.Subscribe(rctx, t, channelStream(channel), fromSeq, follow, pw)
-		_ = pw.Close()
-	}()
-	out, last := drainEnvelopes(pr, channel, fromSeq)
-	_ = pr.Close()
-	<-errCh
-	return out, last, nil
-}
-
-func drainEnvelopes(r io.Reader, channel string, fromSeq int64) ([]MsgEnvelope, int64) {
 	var out []MsgEnvelope
 	last := fromSeq
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
-			continue
-		}
-		var ev coord.Event
-		if json.Unmarshal([]byte(line), &ev) != nil {
-			continue
-		}
-		if ev.Heartbeat || ev.Kind == "heartbeat" || ev.Seq <= fromSeq {
-			continue
-		}
+	_ = streamEvents(rctx, s.Coord, t, channelStream(channel), fromSeq, follow, func(ev coord.Event) bool {
 		out = append(out, envelopeFromEvent(channel, ev))
 		if ev.Seq > last {
 			last = ev.Seq
 		}
-	}
-	return out, last
+		return true // drain all
+	})
+	return out, last, nil
 }
 
 // WaitOne blocks until the first new message on ANY of channels (each with its
@@ -200,34 +171,14 @@ func (s *MsgService) WaitOne(ctx context.Context, host string, channels []string
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			pr, pw := io.Pipe()
-			go func() {
-				_ = s.Coord.Subscribe(wctx, t, channelStream(ch), from, true, pw)
-				_ = pw.Close()
-			}()
-			sc := bufio.NewScanner(pr)
-			sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-			for sc.Scan() {
-				line := strings.TrimSpace(sc.Text())
-				if line == "" {
-					continue
-				}
-				var ev coord.Event
-				if json.Unmarshal([]byte(line), &ev) != nil {
-					continue
-				}
-				if ev.Heartbeat || ev.Kind == "heartbeat" || ev.Seq <= from {
-					continue
-				}
+			_ = streamEvents(wctx, s.Coord, t, channelStream(ch), from, true, func(ev coord.Event) bool {
 				select {
 				case found <- envelopeFromEvent(ch, ev):
 					cancel() // first message wins; stop the others
 				default:
 				}
-				_ = pr.Close()
-				return
-			}
-			_ = pr.Close()
+				return false // stop after the first event on this channel
+			})
 		}()
 	}
 	go func() { wg.Wait(); close(found) }()
