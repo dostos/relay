@@ -162,22 +162,46 @@ func agentNameMatchesAlias(a AgentSpec, name string) bool {
 	return false
 }
 
-// LaunchCommand builds the remote shell command to start an agent with a goal.
-func (a *AgentSpec) LaunchCommand(goal string) string {
-	cmd := a.Command
-	if cmd == "" {
-		cmd = a.Name
-		if strings.HasPrefix(a.Name, "ccs:") {
-			parts := strings.SplitN(a.Name, ":", 2)
-			cmd = "ccs " + parts[1]
-		}
+// InnerCommand is the bare agent invocation (no login-shell wrap).
+func (a *AgentSpec) InnerCommand() string {
+	if a == nil {
+		return ""
 	}
-	// Prefer interactive agent; goal is injected via Send after ready.
+	if strings.TrimSpace(a.Command) != "" {
+		return strings.TrimSpace(a.Command)
+	}
+	if strings.HasPrefix(a.Name, "ccs:") {
+		return "ccs " + strings.TrimPrefix(a.Name, "ccs:")
+	}
+	return a.Name
+}
+
+// LaunchCommand builds the remote shell command to start an agent with a goal.
+// Always runs under a login interactive shell so nvm/cargo/~/.local/bin are on PATH.
+func (a *AgentSpec) LaunchCommand(goal string) string {
+	inner := a.InnerCommand()
 	if len(a.Args) > 0 {
-		return shellJoin(append([]string{cmd}, a.Args...))
+		inner = shellJoin(append([]string{inner}, a.Args...))
 	}
 	_ = goal
-	return cmd
+	return wrapLoginShell(inner)
+}
+
+// wrapLoginShell ensures remotes see a full user PATH (nvm, ~/.local/bin, …).
+func wrapLoginShell(inner string) string {
+	inner = strings.TrimSpace(inner)
+	if inner == "" {
+		return "bash -ilc 'exec bash'"
+	}
+	if strings.Contains(inner, "bash -ilc") || strings.Contains(inner, "bash -lc") {
+		return inner
+	}
+	return "bash -ilc " + shellQuote("exec "+inner)
+}
+
+// loginShellRun wraps a remote one-shot command for probes.
+func loginShellRun(script string) string {
+	return "bash -ilc " + shellQuote(script)
 }
 
 func shellJoin(parts []string) string {
@@ -307,7 +331,6 @@ func probeAgentCatalog(ctx context.Context, t ports.Transport) []AgentDetect {
 		if pr.Present {
 			s := spec
 			if s.Name == "ccs" {
-				// Expand to ccs:<profile> entries when profiles are detectable.
 				profiles := listCCSProfiles(ctx, t)
 				if len(profiles) == 0 {
 					profiles = []string{"personal"}
@@ -331,45 +354,53 @@ func probeAgentCatalog(ctx context.Context, t ports.Transport) []AgentDetect {
 }
 
 func listCCSProfiles(ctx context.Context, t ports.Transport) []string {
-	// Best-effort: ccs may print profile names; also scan ~/.config/ccs.
-	stdout, _, _ := t.Run(ctx, "", `bash -ic '
+	stdout, _, _ := t.Run(ctx, "", loginShellRun(`
 if command -v ccs >/dev/null 2>&1; then
-  ccs --list 2>/dev/null || ccs list 2>/dev/null || true
+  ccs auth list 2>/dev/null || true
 fi
-ls "$HOME"/.config/ccs 2>/dev/null | sed -n "s/\\.yaml$//p; s/\\.yml$//p"
-'`)
+ls -1 "$HOME"/.ccs/instances 2>/dev/null || true
+`))
 	seen := map[string]bool{}
 	var out []string
-	for _, line := range strings.Fields(stdout) {
-		line = strings.Trim(line, ",:[]\"'")
-		if line == "" || line == "ccs" || strings.HasPrefix(line, "-") {
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" || name == "Profile" || name == "ccs" || strings.HasSuffix(name, ".lock") {
+			return
+		}
+		if strings.ContainsAny(name, "/ \\") || strings.Contains(name, "─") {
+			return
+		}
+		if seen[name] {
+			return
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
-		// ignore path-like tokens
-		if strings.Contains(line, "/") {
+		if strings.Contains(line, "│") {
+			fields := strings.Split(line, "│")
+			if len(fields) >= 2 {
+				add(fields[1])
+			}
 			continue
 		}
-		if seen[line] {
-			continue
+		if !strings.Contains(line, " ") {
+			add(line)
 		}
-		seen[line] = true
-		out = append(out, line)
 	}
 	sort.Strings(out)
 	return out
 }
 
 func probeOneAgent(ctx context.Context, t ports.Transport, a AgentSpec) ProbeResult {
-	cmdName := a.Command
-	if cmdName == "" {
-		cmdName = a.Name
-		if strings.HasPrefix(a.Name, "ccs:") {
-			cmdName = "ccs"
-		}
-	}
-	bin := path.Base(strings.Fields(cmdName)[0])
-	check := fmt.Sprintf(`bash -ic 'command -v %s >/dev/null 2>&1 && echo PRESENT || echo MISSING'`, shellQuote(bin))
-	stdout, _, _ := t.Run(ctx, "", check)
+	bin := agentBinName(a)
+	stdout, _, _ := t.Run(ctx, "", loginShellRun(
+		fmt.Sprintf(`command -v %s >/dev/null 2>&1 && echo PRESENT || echo MISSING`, shellQuote(bin)),
+	))
 	present := strings.Contains(stdout, "PRESENT")
 	authed := false
 	detail := strings.TrimSpace(stdout)
@@ -377,29 +408,37 @@ func probeOneAgent(ctx context.Context, t ports.Transport, a AgentSpec) ProbeRes
 		return ProbeResult{Present: false, Authed: false, Detail: detail}
 	}
 	switch {
-	case a.Name == "claude" || strings.HasSuffix(cmdName, "claude"):
-		o, _, _ := t.Run(ctx, "", `bash -ic 'claude -p PONG --model haiku 2>&1 | head -c 200'`)
+	case a.Name == "claude" || bin == "claude":
+		o, _, _ := t.Run(ctx, "", loginShellRun(`claude auth status 2>&1 | head -c 300; echo; claude -p PONG --model haiku 2>&1 | head -c 200`))
 		detail = strings.TrimSpace(o)
 		low := strings.ToLower(detail)
 		authed = detail != "" &&
 			!strings.Contains(low, "not logged in") &&
+			!strings.Contains(low, `"loggedin": false`) &&
 			!strings.Contains(low, "unauthorized") &&
 			!strings.Contains(low, "oauth session expired") &&
 			!strings.Contains(low, "failed to authenticate")
-	case a.Name == "cursor-agent" || strings.Contains(cmdName, "cursor"):
-		o, _, _ := t.Run(ctx, "", `bash -ic 'cursor-agent status 2>&1 | head -c 200'`)
+	case a.Name == "cursor-agent" || bin == "cursor-agent" || strings.Contains(bin, "cursor"):
+		o, _, _ := t.Run(ctx, "", loginShellRun(`cursor-agent status 2>&1 | head -c 300`))
 		detail = strings.TrimSpace(o)
-		authed = !strings.Contains(strings.ToLower(detail), "not logged") && detail != ""
-	case a.Name == "ccs" || strings.HasPrefix(a.Name, "ccs:"):
+		low := strings.ToLower(detail)
+		authed = detail != "" && !strings.Contains(low, "not logged") && !strings.Contains(low, "logged out")
+	case a.Name == "ccs" || strings.HasPrefix(a.Name, "ccs:") || bin == "ccs":
 		prof := strings.TrimPrefix(a.Name, "ccs:")
 		if prof == "" || prof == a.Name {
 			prof = "personal"
 		}
-		o, _, _ := t.Run(ctx, "", fmt.Sprintf(`bash -ic 'ccs %s -p PONG 2>&1 | head -c 200'`, shellQuote(prof)))
+		o, _, _ := t.Run(ctx, "", loginShellRun(fmt.Sprintf(`ccs %s -p PONG 2>&1 | head -c 400`, shellQuote(prof))))
 		detail = strings.TrimSpace(o)
-		authed = !strings.Contains(strings.ToLower(detail), "oauth") && !strings.Contains(strings.ToLower(detail), "not logged")
-	case a.Name == "codex" || strings.Contains(cmdName, "codex"):
-		o, _, _ := t.Run(ctx, "", `bash -ic 'codex login status 2>&1 | head -c 200'`)
+		low := strings.ToLower(detail)
+		// Weekly limit means auth works; only hard auth failures count as unauthed.
+		authed = detail != "" &&
+			!strings.Contains(low, "failed to authenticate") &&
+			!strings.Contains(low, "oauth session expired") &&
+			!strings.Contains(low, "not logged") &&
+			!strings.Contains(low, "e301")
+	case a.Name == "codex" || bin == "codex":
+		o, _, _ := t.Run(ctx, "", loginShellRun(`codex login status 2>&1 | head -c 300`))
 		detail = strings.TrimSpace(o)
 		low := strings.ToLower(detail)
 		authed = detail != "" && !strings.Contains(low, "not logged") && !strings.Contains(low, "unauthenticated")
@@ -411,6 +450,27 @@ func probeOneAgent(ctx context.Context, t ports.Transport, a AgentSpec) ProbeRes
 		authed = present
 	}
 	return ProbeResult{Present: present, Authed: authed, Detail: detail}
+}
+
+func agentBinName(a AgentSpec) string {
+	inner := a.InnerCommand()
+	if inner == "" {
+		return "true"
+	}
+	fields := strings.Fields(inner)
+	bin := fields[0]
+	if bin == "bash" || bin == "env" {
+		for _, f := range fields {
+			base := path.Base(f)
+			if base == "ccs" || base == "claude" || base == "codex" || base == "cursor-agent" {
+				return base
+			}
+		}
+	}
+	if strings.HasPrefix(a.Name, "ccs:") {
+		return "ccs"
+	}
+	return path.Base(bin)
 }
 
 func shellQuote(s string) string {
@@ -433,6 +493,8 @@ agents:
     command: codex
   - name: ccs:personal
     command: ccs personal
+  - name: ccs:hcs
+    command: ccs hcs
 
 path_map:
   # match: local git basename or path fragment → remote cwd

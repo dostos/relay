@@ -265,3 +265,41 @@ func (s *SessionService) Destroy(ctx context.Context, id string, keepRemote bool
 	}
 	return s.Reg.DeleteSession(id)
 }
+
+// ReplaceCreate kills any existing remote session with opts.Name (and local
+// registry rows for it), then Create. Used by ephemeral flows like auth login.
+func (s *SessionService) ReplaceCreate(ctx context.Context, opts CreateOpts) (*Session, error) {
+	if opts.Name != "" && opts.HostID != "" {
+		_ = s.KillPersist(ctx, opts.HostID, opts.Name)
+	}
+	return s.Create(ctx, opts)
+}
+
+// KillPersist destroys a remote persist session by name and drops local rows.
+func (s *SessionService) KillPersist(ctx context.Context, hostID, persistName string) error {
+	if hostID == "" || persistName == "" {
+		return fmt.Errorf("host and persist name required")
+	}
+	safe, err := shellquote.SanitizeSessionName(persistName)
+	if err != nil {
+		return err
+	}
+	t, err := s.NewTransport(hostID)
+	if err != nil {
+		return err
+	}
+	h := ports.PersistHandle{Kind: s.Persist.Kind(), Name: safe}
+	_ = s.Persist.Destroy(ctx, t, h)
+	MarkResumeCleaned(safe, "replaced")
+	list, err := s.Reg.ListSessions()
+	if err != nil {
+		return nil
+	}
+	for _, sess := range list {
+		if sess.HostID == hostID && sess.Persist.Name == safe {
+			_ = s.Reg.DeleteSession(sess.ID)
+		}
+	}
+	return nil
+}
+

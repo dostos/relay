@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +26,7 @@ type App struct {
 	Sessions  *core.SessionService
 	Handoffs  *core.HandoffService
 	Profiles  *core.ProfileService
+	Auth      *core.AuthService
 	Bootstrap *core.BootstrapService
 	Discover  *core.DiscoverService
 	Reg       *core.Registry
@@ -63,10 +65,17 @@ func New() *App {
 		NewTransport: tf,
 	}
 	boot := &core.BootstrapService{NewTransport: tf}
+	auth := &core.AuthService{
+		Profiles:     profiles,
+		Sessions:     sessions,
+		Viz:          viz,
+		NewTransport: tf,
+	}
 	return &App{
 		Sessions:  sessions,
 		Handoffs:  handoffs,
 		Profiles:  profiles,
+		Auth:      auth,
 		Bootstrap: boot,
 		Discover: &core.DiscoverService{
 			NewTransport: tf,
@@ -147,6 +156,8 @@ func (a *App) Run(args []string) int {
 		return 0
 	case "host":
 		return a.cmdHost(ctx, filtered[1:])
+	case "auth":
+		return a.cmdAuth(ctx, filtered[1:])
 	case "targets":
 		return a.cmdTargets(ctx, filtered[1:])
 	case "session", "sess":
@@ -190,6 +201,14 @@ Host profiles (authoritative on each remote ~/.config/relay/host.yaml):
   relay host cache -H HOST
   relay host example -H HOST          Print starter host.yaml
   relay host bootstrap -H HOST        Install always-on relayd (unix socket; one quiet SSH)
+
+Agent auth (claude / cursor-agent / codex / ccs:<profile> / …):
+  relay auth status -H HOST [--agent NAME]
+  relay auth login -H HOST --agent NAME
+                                      Pane + reassemble wrapped OAuth URL + open locally
+  relay auth url --session ID         Re-extract/open auth URL if the pane cropped it
+  relay auth copy --from HOST --to HOST --agent NAME
+                                      Copy known cred files between Linux hosts (when supported)
 
 Sessions (explicit id; no guesswork):
   relay session create -H HOST [--repo DIR] [--cwd REMOTE] [--name NAME]
@@ -278,6 +297,147 @@ func (a *App) cmdTargets(ctx context.Context, args []string) int {
 	}
 	fmt.Print(core.FormatTargetsText(list))
 	return 0
+}
+
+func (a *App) cmdAuth(ctx context.Context, args []string) int {
+	if len(args) == 0 {
+		return a.fail(fmt.Errorf("usage: relay auth status|login|copy …"))
+	}
+	sub := args[0]
+	rest := args[1:]
+	switch sub {
+	case "status":
+		host, rest := flagHost(rest)
+		agent := ""
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case "--agent", "-a":
+				i++
+				if i < len(rest) {
+					agent = rest[i]
+				}
+			default:
+				return a.fail(rejectUnknownFlag(rest[i]))
+			}
+		}
+		if host == "" {
+			return a.fail(fmt.Errorf("-H HOST required"))
+		}
+		rows, err := a.Auth.Status(ctx, host, agent)
+		if err != nil {
+			return a.fail(err)
+		}
+		a.JSON = true
+		return a.errOut(a.out(map[string]any{"ok": true, "host_id": host, "agents": rows}))
+	case "login":
+		host, rest := flagHost(rest)
+		agent := ""
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case "--agent", "-a":
+				i++
+				if i < len(rest) {
+					agent = rest[i]
+				}
+			default:
+				return a.fail(rejectUnknownFlag(rest[i]))
+			}
+		}
+		if host == "" || agent == "" {
+			return a.fail(fmt.Errorf("usage: relay auth login -H HOST --agent NAME"))
+		}
+		res, err := a.Auth.Login(ctx, host, agent)
+		if err != nil {
+			return a.fail(err)
+		}
+		a.JSON = true
+		return a.errOut(a.out(res))
+	case "url":
+		sessionID := ""
+		doOpen := true
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case "--session", "-s":
+				i++
+				if i < len(rest) {
+					sessionID = rest[i]
+				}
+			case "--no-open":
+				doOpen = false
+			default:
+				if sessionID == "" && !strings.HasPrefix(rest[i], "-") {
+					sessionID = rest[i]
+					continue
+				}
+				return a.fail(rejectUnknownFlag(rest[i]))
+			}
+		}
+		if sessionID == "" {
+			return a.fail(fmt.Errorf("usage: relay auth url --session ID [--no-open]"))
+		}
+		u, err := a.Auth.ExtractAuthURL(ctx, sessionID)
+		if err != nil {
+			return a.fail(err)
+		}
+		opened := false
+		if doOpen && os.Getenv("RELAY_NO_OPEN") != "1" {
+			opened = openAuthURL(u)
+		}
+		a.JSON = true
+		return a.errOut(a.out(map[string]any{"ok": true, "auth_url": u, "opened": opened, "session_id": sessionID}))
+	case "copy":
+		var from, to, agent string
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case "--from":
+				i++
+				if i < len(rest) {
+					from = rest[i]
+				}
+			case "--to":
+				i++
+				if i < len(rest) {
+					to = rest[i]
+				}
+			case "--agent", "-a":
+				i++
+				if i < len(rest) {
+					agent = rest[i]
+				}
+			case "-H", "--host":
+				return a.fail(fmt.Errorf("auth copy uses --from / --to, not -H"))
+			default:
+				return a.fail(rejectUnknownFlag(rest[i]))
+			}
+		}
+		if from == "" || to == "" || agent == "" {
+			return a.fail(fmt.Errorf("usage: relay auth copy --from HOST --to HOST --agent NAME"))
+		}
+		res, err := a.Auth.Copy(ctx, from, to, agent)
+		if err != nil {
+			return a.fail(err)
+		}
+		a.JSON = true
+		return a.errOut(a.out(res))
+	default:
+		return a.fail(fmt.Errorf("unknown auth subcommand %q", sub))
+	}
+}
+
+func openAuthURL(u string) bool {
+	if u == "" {
+		return false
+	}
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", u)
+	case "linux":
+		cmd = exec.Command("xdg-open", u)
+	default:
+		return false
+	}
+	return cmd.Start() == nil
 }
 
 func (a *App) cmdHost(ctx context.Context, args []string) int {

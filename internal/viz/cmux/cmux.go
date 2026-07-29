@@ -215,10 +215,8 @@ func (v *Viz) brandSurface(ctx context.Context, surface, persistName string) err
 		return nil
 	}
 	title := brandTitle(persistName)
+	// Title only — do not pin; pinning is a user choice.
 	_, err := v.run(ctx, "rename-tab", "--surface", surface, "--title", title)
-	if err == nil {
-		_, _ = v.run(ctx, "tab-action", "--surface", surface, "--action", "pin")
-	}
 	return err
 }
 

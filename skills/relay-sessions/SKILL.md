@@ -16,6 +16,21 @@ relay host init -H HOST --apply               # bootstrap relayd + write proposa
 
 Follow `next` / `argv` on the discover/init cards. Do not hand-edit connection coords — ssh config is source of truth.
 
+## Agent auth
+
+Works for any agent type (`claude`, `cursor-agent`, `codex`, `ccs:personal`, `ccs:hcs`, …):
+
+```bash
+relay auth status -H HOST --json
+relay auth login -H HOST --agent claude   # pane + reassemble wrapped OAuth URL + open locally
+relay auth url --session sess-…           # if the pane still looks cropped
+relay auth copy --from c3 --to c1 --agent ccs:personal   # when copy_supported
+```
+
+Narrow cmux panes wrap long OAuth URLs mid-token (`https://claude.com/ca` / `i/oauth/…`). `auth login` / `auth url` stitch them and `open` on the Mac. `RELAY_NO_OPEN=1` skips the browser.
+
+Probes/launches use a login shell so nvm/`~/.local/bin` agents are visible.
+
 ## Ad-hoc sessions
 
 Handoffs → skill **relay-handoff** (`relay agent …`). Ad-hoc only:

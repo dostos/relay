@@ -25,13 +25,30 @@ var VaultAgent = map[string]any{
 	"resumeCommand": "relay resume --session {{sessionId}} --cwd {{cwd}}",
 }
 
-// DefaultCmuxJSONPath returns ~/Library/Application Support/cmux/cmux.json on macOS.
+// DefaultCmuxJSONPath returns the cmux config file relay should register into.
+//
+// cmux reads its config from XDG_CONFIG_HOME/cmux (~/.config/cmux) — NOT the
+// Electron ~/Library/Application Support default. Registering the vault agent
+// into the Library path silently no-ops (cmux never reads it), so prefer the
+// XDG path; fall back to Library only when that is the file that exists.
 func DefaultCmuxJSONPath() string {
 	if v := os.Getenv("CMUX_CONFIG"); v != "" {
 		return v
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "Application Support", "cmux", "cmux.json")
+	xdg := os.Getenv("XDG_CONFIG_HOME")
+	if xdg == "" {
+		xdg = filepath.Join(home, ".config")
+	}
+	xdgPath := filepath.Join(xdg, "cmux", "cmux.json")
+	libPath := filepath.Join(home, "Library", "Application Support", "cmux", "cmux.json")
+	if _, err := os.Stat(xdgPath); err == nil {
+		return xdgPath
+	}
+	if _, err := os.Stat(libPath); err == nil {
+		return libPath
+	}
+	return xdgPath
 }
 
 // InstallVaultAgent merges the relay vault agent into cmux.json (JSONC-tolerant).
