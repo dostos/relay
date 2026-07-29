@@ -35,6 +35,7 @@ type HandoffOpts struct {
 	NoPane    bool
 	Silence   int
 	Name      string
+	Container string // optional: container name from host.yaml `containers:`
 }
 
 // Launch creates a session, starts work, installs events, optionally presents viz, returns binding.
@@ -45,6 +46,23 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 	profile, err := h.Profiles.Get(ctx, opts.HostID, false)
 	if err != nil {
 		return nil, nil, err
+	}
+	var cref *ContainerRef
+	if opts.Container != "" {
+		cspec, err := profile.ResolveContainer(opts.Container)
+		if err != nil {
+			return nil, nil, err
+		}
+		cwd := opts.RemoteCWD
+		if cwd == "" {
+			cwd = cspec.ResolveCWD(opts.RepoRef)
+		}
+		cref = &ContainerRef{
+			Runtime: cspec.RuntimeVerb(),
+			Ref:     cspec.Container,
+			CWD:     cwd,
+			User:    cspec.User,
+		}
 	}
 	silence := opts.Silence
 	if silence <= 0 {
@@ -71,6 +89,12 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 		}
 		agentName = ag.Name
 		launchCmd = ag.LaunchCommand(opts.Goal)
+		if cref != nil {
+			launchCmd, err = ContainerExec(cref.Runtime, *cref, ag.InnerCommand(), true)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
 	}
 
 	// Holding shell first so we can install events before the real work starts.
@@ -89,6 +113,20 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 	t, err := h.NewTransport(opts.HostID)
 	if err != nil {
 		return nil, nil, err
+	}
+	if cref != nil {
+		sess.Container = cref
+		_ = h.Sessions.Reg.PutSession(sess)
+		agInner := "" // resolved agent inner command for the probe
+		if ag, aerr := profile.FindAgent(agentName); aerr == nil {
+			agInner = ag.InnerCommand()
+		}
+		if agInner != "" {
+			if verr := h.verifyContainerAgent(ctx, t, *cref, agInner); verr != nil {
+				_ = h.Sessions.Destroy(ctx, sess.ID, false) // tear down the holding shell
+				return nil, nil, verr
+			}
+		}
 	}
 	if h.Coord == nil {
 		return nil, nil, fmt.Errorf("coord adapter not configured")
@@ -179,6 +217,22 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 		Pane:      pane,
 	}
 	return b, ho, nil
+}
+
+// verifyContainerAgent runs the agent's --version inside the container and maps
+// known failure signatures to an actionable error. Returns nil when the agent
+// appears runnable.
+func (h *HandoffService) verifyContainerAgent(ctx context.Context, t ports.Transport, ref ContainerRef, agentInner string) error {
+	probe, err := ContainerExec(ref.Runtime, ref, agentInner+" --version", false)
+	if err != nil {
+		return err
+	}
+	out, errOut, _ := t.Run(ctx, "", probe)
+	combined := strings.TrimSpace(out + "\n" + errOut)
+	if ok, guidance := ClassifyContainerVerify(combined); !ok {
+		return fmt.Errorf("container verify failed: %s\n--- probe output ---\n%s", guidance, combined)
+	}
+	return nil
 }
 
 func waitReady(ctx context.Context, p ports.Persistence, t ports.Transport, h ports.PersistHandle, timeout time.Duration) error {

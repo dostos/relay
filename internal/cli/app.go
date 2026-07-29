@@ -1028,7 +1028,8 @@ func (a *App) cmdHandoff(ctx context.Context, args []string) int {
 // cmdGC is the one-shot "clean up when done" sweep: reap dead sessions, prune
 // tombstones, drop stale pane-state, and GC stale/empty message channels — one
 // probe SSH per host. Default sweeps every registry host; -H scopes to one.
-//   relay gc [-H HOST] [--dry-run] [--channel-ttl DAYS | --no-channel-ttl]
+//
+//	relay gc [-H HOST] [--dry-run] [--channel-ttl DAYS | --no-channel-ttl]
 func (a *App) cmdGC(ctx context.Context, args []string) int {
 	host, rest := flagHost(args)
 	dryRun := false
@@ -1066,9 +1067,10 @@ func (a *App) cmdGC(ctx context.Context, args []string) int {
 }
 
 // cmdMsg is the agent-to-agent message bus over relayd channels.
-//   relay msg send -H HOST -c CHANNEL [--kind K] [--from ID] [--text ... | -- ...] [--meta JSON]
-//   relay msg read -H HOST -c CHANNEL [--from SEQ] [--follow] [--timeout S]
-//   relay msg wait -H HOST -c CHANNEL [-c CHANNEL2 …] [--from SEQ] [--timeout S]   (fan-in)
+//
+//	relay msg send -H HOST -c CHANNEL [--kind K] [--from ID] [--text ... | -- ...] [--meta JSON]
+//	relay msg read -H HOST -c CHANNEL [--from SEQ] [--follow] [--timeout S]
+//	relay msg wait -H HOST -c CHANNEL [-c CHANNEL2 …] [--from SEQ] [--timeout S]   (fan-in)
 func (a *App) cmdMsg(ctx context.Context, args []string) int {
 	if len(args) == 0 {
 		return a.fail(fmt.Errorf("usage: relay msg send|read|wait …"))
@@ -1358,6 +1360,11 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 				i++
 				if i < len(rest) {
 					opts.Name = rest[i]
+				}
+			case "--container":
+				i++
+				if i < len(rest) {
+					opts.Container = rest[i]
 				}
 			case "--no-pane":
 				opts.NoPane = true
