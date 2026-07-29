@@ -31,6 +31,7 @@ type App struct {
 	Discover  *core.DiscoverService
 	Reg       *core.Registry
 	Coord     ports.Coord
+	Msg       *core.MsgService
 	Viz       ports.Viz
 	JSON      bool
 	tf        core.TransportFactory
@@ -84,6 +85,7 @@ func New() *App {
 		},
 		Reg:   reg,
 		Coord: coord,
+		Msg:   &core.MsgService{Coord: coord, NewTransport: tf},
 		Viz:   viz,
 		tf:    tf,
 	}
@@ -180,6 +182,8 @@ func (a *App) Run(args []string) int {
 		return a.cmdHandoff(ctx, filtered[1:])
 	case "agent":
 		return a.cmdAgent(ctx, filtered[1:])
+	case "msg":
+		return a.cmdMsg(ctx, filtered[1:])
 	case "events":
 		return a.cmdEvents(ctx, filtered[1:])
 	case "viz", "pane":
@@ -255,6 +259,14 @@ Agent surface (token-efficient; always JSON; NO poll loops):
   relay agent done --handoff ID [--outcome done|failed|abandoned] [--keep-session]
   relay agent status --handoff ID
   # Follow response.next / response.argv. Never events tail -f in a loop.
+  # Agents may also DECLARE state instead of going idle: emit kind
+  # ask|note|progress|result (with meta.q/text) and 'agent wait' surfaces it.
+
+Agent-to-agent messages (relayd channels; any channel name):
+  relay msg send -H HOST -c CHANNEL [--kind K] [--from ID] [--text ... | -- ...] [--meta JSON]
+  relay msg read -H HOST -c CHANNEL [--from SEQ] [--follow] [--timeout SEC]
+  relay msg wait -H HOST -c CHANNEL[:SEQ] [-c CHANNEL2[:SEQ] …] [--timeout SEC]   # fan-in; first wins
+  # Thread the returned next_from per channel; NAME:SEQ gives each its own cursor.
 
 Events (via always-on relayd on the host):
   relay events tail [-f] --handoff ID [--from SEQ]
@@ -1002,6 +1014,167 @@ func (a *App) cmdHandoff(ctx context.Context, args []string) int {
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(b)
 	return 0
+}
+
+// cmdMsg is the agent-to-agent message bus over relayd channels.
+//   relay msg send -H HOST -c CHANNEL [--kind K] [--from ID] [--text ... | -- ...] [--meta JSON]
+//   relay msg read -H HOST -c CHANNEL [--from SEQ] [--follow] [--timeout S]
+//   relay msg wait -H HOST -c CHANNEL [-c CHANNEL2 …] [--from SEQ] [--timeout S]   (fan-in)
+func (a *App) cmdMsg(ctx context.Context, args []string) int {
+	if len(args) == 0 {
+		return a.fail(fmt.Errorf("usage: relay msg send|read|wait …"))
+	}
+	sub := args[0]
+	rest := args[1:]
+	switch sub {
+	case "send":
+		host, rest := flagHost(rest)
+		var channel, kind, from, text, metaJSON string
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case "--channel", "-c":
+				i++
+				if i < len(rest) {
+					channel = rest[i]
+				}
+			case "--kind":
+				i++
+				if i < len(rest) {
+					kind = rest[i]
+				}
+			case "--from":
+				i++
+				if i < len(rest) {
+					from = rest[i]
+				}
+			case "--text":
+				i++
+				if i < len(rest) {
+					text = rest[i]
+				}
+			case "--meta":
+				i++
+				if i < len(rest) {
+					metaJSON = rest[i]
+				}
+			case "--":
+				text = strings.Join(rest[i+1:], " ")
+				i = len(rest)
+			default:
+				return a.fail(rejectUnknownFlag(rest[i]))
+			}
+		}
+		if host == "" || channel == "" {
+			return a.fail(fmt.Errorf("usage: relay msg send -H HOST --channel NAME [--kind K] [--from ID] [--text ...] [--meta JSON]"))
+		}
+		var meta map[string]any
+		if metaJSON != "" {
+			if err := json.Unmarshal([]byte(metaJSON), &meta); err != nil {
+				return a.fail(fmt.Errorf("--meta not valid JSON: %w", err))
+			}
+		}
+		seq, err := a.Msg.Send(ctx, host, channel, kind, from, text, meta)
+		if err != nil {
+			return a.fail(err)
+		}
+		a.JSON = true
+		return a.errOut(a.out(map[string]any{"ok": true, "channel": channel, "seq": seq}))
+	case "read":
+		host, rest := flagHost(rest)
+		var channel string
+		var from int64
+		follow := false
+		timeout := 0
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case "--channel", "-c":
+				i++
+				if i < len(rest) {
+					channel = rest[i]
+				}
+			case "--from":
+				i++
+				if i < len(rest) {
+					from, _ = strconv.ParseInt(rest[i], 10, 64)
+				}
+			case "--follow", "-f":
+				follow = true
+			case "--timeout":
+				i++
+				if i < len(rest) {
+					timeout, _ = strconv.Atoi(rest[i])
+				}
+			default:
+				return a.fail(rejectUnknownFlag(rest[i]))
+			}
+		}
+		if host == "" || channel == "" {
+			return a.fail(fmt.Errorf("usage: relay msg read -H HOST --channel NAME [--from SEQ] [--follow] [--timeout S]"))
+		}
+		msgs, last, err := a.Msg.Read(ctx, host, channel, from, follow, time.Duration(timeout)*time.Second)
+		if err != nil {
+			return a.fail(err)
+		}
+		a.JSON = true
+		return a.errOut(a.out(map[string]any{"ok": true, "channel": channel, "messages": msgs, "count": len(msgs), "next_from": last}))
+	case "wait":
+		host, rest := flagHost(rest)
+		var channels []string
+		var from int64
+		timeout := 0
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case "--channel", "-c":
+				i++
+				if i < len(rest) {
+					channels = append(channels, rest[i])
+				}
+			case "--from":
+				i++
+				if i < len(rest) {
+					from, _ = strconv.ParseInt(rest[i], 10, 64)
+				}
+			case "--timeout":
+				i++
+				if i < len(rest) {
+					timeout, _ = strconv.Atoi(rest[i])
+				}
+			default:
+				return a.fail(rejectUnknownFlag(rest[i]))
+			}
+		}
+		if host == "" || len(channels) == 0 {
+			return a.fail(fmt.Errorf("usage: relay msg wait -H HOST --channel NAME[:SEQ] [--channel NAME2[:SEQ] …] [--from SEQ] [--timeout S]"))
+		}
+		// Each channel has its OWN seq space, so a single --from is a footgun for
+		// fan-in. Accept a per-channel cursor as NAME:SEQ; fall back to --from.
+		fromMap := map[string]int64{}
+		names := make([]string, 0, len(channels))
+		for _, ch := range channels {
+			name := ch
+			cur := from
+			if i := strings.LastIndex(ch, ":"); i > 0 {
+				if v, err := strconv.ParseInt(ch[i+1:], 10, 64); err == nil {
+					name = ch[:i]
+					cur = v
+				}
+			}
+			names = append(names, name)
+			fromMap[name] = cur
+		}
+		channels = names
+		m, timedOut, err := a.Msg.WaitOne(ctx, host, channels, fromMap, time.Duration(timeout)*time.Second)
+		if err != nil {
+			return a.fail(err)
+		}
+		a.JSON = true
+		if timedOut {
+			return a.errOut(a.out(map[string]any{"ok": true, "timed_out": true, "next": "wait", "hint": "no message before timeout; call wait again on a new turn (do not spin)"}))
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "timed_out": false, "message": m, "next_from": m.Seq}))
+	default:
+		return a.fail(fmt.Errorf("unknown msg subcommand %q", sub))
+	}
 }
 
 func (a *App) cmdEvents(ctx context.Context, args []string) int {

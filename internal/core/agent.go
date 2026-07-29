@@ -46,6 +46,15 @@ func DecideNext(kind HandoffKind, evKind string, timedOut bool) (next string, hi
 			return "escalate", "job needs_input — do not inject; escalate to human"
 		}
 		return "send", "agent needs input; send a reply or escalate"
+	case "ask":
+		// Explicit, declared question from the agent (meta.q/text) — no idle
+		// guessing. Always actionable, even for jobs (a job that explicitly
+		// asks is legitimately blocked on input).
+		return "send", "agent asked a question (see text); send an answer or escalate"
+	case "note", "progress":
+		return "wait", "agent posted a note (see text); informational — keep waiting"
+	case "result":
+		return "wait", "agent posted a result (see text/meta); wait for exit to finalize"
 	case "idle":
 		if kind == KindJob {
 			return "wait", "job idle is informational — do not send; wait for exit"
@@ -56,6 +65,22 @@ func DecideNext(kind HandoffKind, evKind string, timedOut bool) (next string, hi
 	default:
 		return "wait", "continue waiting"
 	}
+}
+
+// eventText lifts a human-readable string out of an event's meta, for the
+// explicit-signaling kinds (ask/note/progress/result). Falls back to "".
+func eventText(ev *Event) string {
+	if ev == nil || ev.Meta == nil {
+		return ""
+	}
+	for _, k := range []string{"text", "q", "question", "msg", "note"} {
+		if v, ok := ev.Meta[k]; ok {
+			if s, ok := v.(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	return ""
 }
 
 func argvFor(next, handoffID, sessionID string) []string {
@@ -184,7 +209,7 @@ func (h *HandoffService) AgentWait(ctx context.Context, handoffID string, fromSe
 		}
 		ho.LastSeq = ev.Seq
 		switch ev.Kind {
-		case "needs_input":
+		case "needs_input", "ask":
 			ho.Status = StatusNeedsInput
 		case "idle":
 			if ho.Kind == KindAgent {
@@ -195,7 +220,10 @@ func (h *HandoffService) AgentWait(ctx context.Context, handoffID string, fromSe
 		}
 		_ = h.Reg.PutHandoff(ho)
 
+		// Explicit-signaling kinds are actionable regardless of handoff kind:
+		// the agent declared its state instead of us inferring it from silence.
 		actionable := ev.Kind == "exit" || ev.Kind == "needs_input" ||
+			ev.Kind == "ask" || ev.Kind == "note" || ev.Kind == "progress" || ev.Kind == "result" ||
 			(ev.Kind == "idle" && ho.Kind == KindAgent)
 		if !actionable {
 			continue
@@ -216,6 +244,7 @@ func (h *HandoffService) AgentWait(ctx context.Context, handoffID string, fromSe
 	if got != nil {
 		resp.Event = got
 		resp.LastSeq = got.Seq
+		resp.Text = eventText(got) // surface declared ask/note/result text
 		next, hint := DecideNext(ho.Kind, got.Kind, false)
 		resp.Next = next
 		resp.Hint = hint
