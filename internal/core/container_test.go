@@ -80,3 +80,30 @@ containers:
 		t.Fatal("expected miss error")
 	}
 }
+
+func TestExecPlanWrapsContainer(t *testing.T) {
+	s := &SessionService{}
+	sess := &Session{Container: &ContainerRef{Ref: "cbox", CWD: "/w"}}
+	cwd, cmd, err := s.execPlan(sess, "echo hi")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cwd != "" {
+		t.Fatalf("container exec must not set a host cwd, got %q", cwd)
+	}
+	if !strings.Contains(cmd, "docker exec -i") || !strings.Contains(cmd, "echo hi") {
+		t.Fatalf("exec not wrapped: %q", cmd)
+	}
+}
+
+func TestExecPlanHostPassthrough(t *testing.T) {
+	s := &SessionService{}
+	sess := &Session{RemoteCWD: "/home/x"}
+	cwd, cmd, err := s.execPlan(sess, "ls")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cwd != "/home/x" || cmd != "ls" {
+		t.Fatalf("host passthrough broken: cwd=%q cmd=%q", cwd, cmd)
+	}
+}

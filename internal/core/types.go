@@ -15,6 +15,7 @@ type Session struct {
 	Persist       ports.PersistHandle `json:"persist"`
 	RepoRef       string              `json:"repo_ref,omitempty"` // local git root if known
 	Labels        map[string]string   `json:"labels,omitempty"`
+	Container     *ContainerRef       `json:"container,omitempty"`
 	CreatedAt     time.Time           `json:"created_at"`
 	UpdatedAt     time.Time           `json:"updated_at"`
 	VizSurfaceRef string              `json:"viz_surface_ref,omitempty"`
@@ -32,12 +33,12 @@ const (
 type HandoffStatus string
 
 const (
-	StatusPending     HandoffStatus = "pending"
-	StatusRunning     HandoffStatus = "running"
-	StatusNeedsInput  HandoffStatus = "needs_input"
-	StatusDone        HandoffStatus = "done"
-	StatusFailed      HandoffStatus = "failed"
-	StatusAbandoned   HandoffStatus = "abandoned"
+	StatusPending    HandoffStatus = "pending"
+	StatusRunning    HandoffStatus = "running"
+	StatusNeedsInput HandoffStatus = "needs_input"
+	StatusDone       HandoffStatus = "done"
+	StatusFailed     HandoffStatus = "failed"
+	StatusAbandoned  HandoffStatus = "abandoned"
 )
 
 // Handoff is a goal-driven remote work unit bound to a session.

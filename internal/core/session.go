@@ -18,10 +18,10 @@ type TransportFactory func(hostID string) (ports.Transport, error)
 
 // SessionService manages durable sessions via Transport + Persistence adapters.
 type SessionService struct {
-	Reg       *Registry
-	Profiles  *ProfileService
+	Reg          *Registry
+	Profiles     *ProfileService
 	NewTransport TransportFactory
-	Persist   ports.Persistence
+	Persist      ports.Persistence
 }
 
 func newID(prefix string) string {
@@ -211,7 +211,25 @@ func (s *SessionService) Exec(ctx context.Context, id, command string) (stdout, 
 	if err != nil {
 		return "", "", err
 	}
-	return t.Run(ctx, sess.RemoteCWD, command)
+	cwd, cmd, err := s.execPlan(sess, command)
+	if err != nil {
+		return "", "", err
+	}
+	return t.Run(ctx, cwd, cmd)
+}
+
+// execPlan resolves the (cwd, command) for an ad-hoc exec. Container sessions
+// are wrapped with `docker exec` (no host cwd — the cwd is inside the wrap);
+// host sessions pass through with their RemoteCWD.
+func (s *SessionService) execPlan(sess *Session, command string) (cwd, cmd string, err error) {
+	if sess.Container != nil {
+		wrapped, werr := ContainerExec(sess.Container.Runtime, *sess.Container, command, false)
+		if werr != nil {
+			return "", "", werr
+		}
+		return "", wrapped, nil
+	}
+	return sess.RemoteCWD, command, nil
 }
 
 func (s *SessionService) Resize(ctx context.Context, id string) error {
