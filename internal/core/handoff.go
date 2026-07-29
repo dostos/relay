@@ -29,6 +29,7 @@ type HandoffOpts struct {
 	HostID    string
 	RepoRef   string
 	RemoteCWD string
+	Workspace string // optional cmux workspace ref for the presented pane
 	Agent     string // for kind=agent
 	Goal      string
 	Command   string // for kind=job
@@ -36,6 +37,13 @@ type HandoffOpts struct {
 	Silence   int
 	Name      string
 	Container string // optional: container name from host.yaml `containers:`
+}
+
+func handoffLayout(opts HandoffOpts) ports.Layout {
+	return ports.Layout{
+		Mode:      "remote",
+		Workspace: opts.Workspace,
+	}
 }
 
 // Launch creates a session, starts work, installs events, optionally presents viz, returns binding.
@@ -188,7 +196,7 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 	if !opts.NoPane && h.Viz != nil && h.Viz.Available(ctx) {
 		// Restorable argv: `relay resume --session <persist>` (cmux Vault extracts --session).
 		launch := ResumeLaunchCmd(sess.Persist.Name)
-		ref, err := h.Viz.Present(ctx, sess.ID, launch, ports.Layout{Mode: "remote"})
+		ref, err := h.Viz.Present(ctx, sess.ID, launch, handoffLayout(opts))
 		if err == nil {
 			pane = true
 			sess.VizSurfaceRef = ref

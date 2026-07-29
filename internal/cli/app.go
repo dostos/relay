@@ -248,7 +248,7 @@ Sessions (explicit id; no guesswork):
   relay session sensors ID [--silence SEC]   Reinstall quiet idle/exit hooks
 
 Handoffs (goal-based / long-running):
-  relay handoff -H HOST --agent NAME --goal TEXT [--repo DIR] [--no-pane]
+  relay handoff -H HOST --agent NAME --goal TEXT [--repo DIR] [--workspace WS] [--no-pane]
   relay handoff -H HOST --cmd "make train" [--no-pane]
   relay handoff list
   relay handoff get ID
@@ -256,7 +256,7 @@ Handoffs (goal-based / long-running):
   relay handoff reconcile
 
 Agent surface (token-efficient; always JSON; NO poll loops):
-  relay agent start -H HOST --agent NAME --goal TEXT | --cmd CMD [--no-pane]
+  relay agent start -H HOST --agent NAME --goal TEXT | --cmd CMD [--workspace WS] [--no-pane]
   relay agent wait --handoff ID [--from SEQ] [--timeout SEC]   # blocks once
   relay agent send --handoff ID -- TEXT
   relay agent capture --handoff ID [-n LINES]
@@ -998,6 +998,11 @@ func (a *App) cmdHandoff(ctx context.Context, args []string) int {
 			if i < len(rest) {
 				opts.Name = rest[i]
 			}
+		case "--workspace":
+			i++
+			if i < len(rest) {
+				opts.Workspace = rest[i]
+			}
 		case "--no-pane":
 			opts.NoPane = true
 		case "--silence":
@@ -1360,6 +1365,11 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 				i++
 				if i < len(rest) {
 					opts.Name = rest[i]
+				}
+			case "--workspace":
+				i++
+				if i < len(rest) {
+					opts.Workspace = rest[i]
 				}
 			case "--container":
 				i++
