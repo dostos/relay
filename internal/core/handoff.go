@@ -6,11 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/dostos/relay/internal/ports"
+	"github.com/dostos/relay/internal/ui"
 )
 
 // HandoffService launches and coordinates goal-based remote work.
@@ -372,11 +372,17 @@ func (h *HandoffService) TailEvents(ctx context.Context, handoffID string, fromS
 			delay = 60 * time.Second
 		}
 		delay += time.Duration(time.Now().UnixNano()%500) * time.Millisecond
-		fmt.Fprintf(os.Stderr, "relay: reconnecting subscribe on %s (%d/6) in %s…\n", ho.HostID, attempts, delay.Round(time.Millisecond))
-		select {
-		case <-ctx.Done():
+		st := ui.NewStatus()
+		ok := st.Wait(delay, func(left time.Duration) string {
+			return ui.JoinStatus(
+				"subscribe "+ho.HostID,
+				fmt.Sprintf("%d/6", attempts),
+				"retry in "+ui.FormatDuration(left),
+			)
+		}, ctx.Done())
+		st.Clear()
+		if !ok {
 			return ctx.Err()
-		case <-time.After(delay):
 		}
 	}
 }

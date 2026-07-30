@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dostos/relay/internal/shellquote"
+	"github.com/dostos/relay/internal/ui"
 )
 
 // RelayBin returns an absolute path to the relay binary when possible.
@@ -146,26 +148,51 @@ func (s *SessionService) ResumeOpts(ctx context.Context, persistName, cwd string
 	cmd := s.Persist.AttachCommand(connHandle, connRemote)
 	reconnect := autoReconnectEnabled(opts.NoReconnect)
 	delay := reconnectDelay()
-	if reconnect {
-		fmt.Fprintf(os.Stderr, "relay resume: auto-reconnect on (delay %s; RELAY_AUTO_RECONNECT=0 or --no-reconnect to disable)\n", delay)
+	target := connHost + "/" + connPersist
+
+	// Filter ssh disconnect chatter so it does not scroll past the status line.
+	filter := &ui.SSHNoiseFilter{W: os.Stderr}
+	if setter, ok := t.(interface{ SetStderr(io.Writer) }); ok {
+		setter.SetStderr(filter)
 	}
+
+	status := ui.NewStatus()
 	attempt := 0
+	started := time.Time{}
+	announced := false
 	for {
 		attempt++
 		err := t.Interactive(ctx, cmd)
+		_ = filter.Flush()
 		code := exitCode(err)
-		if err == nil || !shouldRetryAttach(code) || !reconnect {
+		if err == nil {
+			status.Clear()
+			if announced {
+				n := attempt - 1
+				ui.Done(fmt.Sprintf("%s  ·  %d %s  ·  %s", target, n, ui.AttemptLabel(n), ui.FormatDuration(time.Since(started))))
+			}
+			return nil
+		}
+		if !shouldRetryAttach(code) || !reconnect {
+			status.Clear()
 			return err
 		}
 		if ctx.Err() != nil {
+			status.Clear()
 			return ctx.Err()
 		}
-		fmt.Fprintf(os.Stderr, "relay resume: disconnected from %s/%s (exit %d); reconnecting in %s (attempt %d, Ctrl+C to stop)\n",
-			connHost, connPersist, code, delay, attempt)
-		select {
-		case <-ctx.Done():
+		if !announced {
+			announced = true
+			started = time.Now()
+			status.Clear()
+			ui.Warn(fmt.Sprintf("disconnected  %s  (exit %d)", target, code))
+		}
+		ok := status.Wait(delay, func(left time.Duration) string {
+			return ui.JoinStatus(target, fmt.Sprintf("attempt %d", attempt), "retry in "+ui.FormatDuration(left), "Ctrl+C")
+		}, ctx.Done())
+		status.Clear()
+		if !ok {
 			return ctx.Err()
-		case <-time.After(delay):
 		}
 		// Reconnect uses frozen connPersist/connHost — never re-resolve.
 	}

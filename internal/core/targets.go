@@ -238,6 +238,7 @@ func FormatTargetsText(targets []Target) string {
 		return "(no Host aliases found in ssh config)\n"
 	}
 	var b strings.Builder
+	fmt.Fprintf(&b, "targets  %d\n", len(targets))
 	for _, t := range targets {
 		flags := []string{}
 		if t.ProxyJump {
@@ -251,7 +252,7 @@ func FormatTargetsText(targets []Target) string {
 		}
 		extra := ""
 		if len(flags) > 0 {
-			extra = " [" + strings.Join(flags, ",") + "]"
+			extra = "  ·  " + strings.Join(flags, ", ")
 		}
 		host := t.Hostname
 		if host == "" {
@@ -261,7 +262,7 @@ func FormatTargetsText(targets []Target) string {
 		if user == "" {
 			user = "-"
 		}
-		fmt.Fprintf(&b, "%-16s %s@%s%s\n", t.HostID, user, host, extra)
+		fmt.Fprintf(&b, "  %-16s %s@%s%s\n", t.HostID, user, host, extra)
 	}
 	return b.String()
 }

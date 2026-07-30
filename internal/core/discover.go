@@ -444,23 +444,39 @@ func FormatDiscoverText(c *DiscoverCard) string {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "host %s  reachable=%v  host.yaml=%s  relayd=%s  tmux=%v\n",
-		c.HostID, c.Reachable, c.HostYAML, c.Relayd, c.Tmux.Present)
+	reach := "no"
+	if c.Reachable {
+		reach = "yes"
+	}
+	tmux := "no"
+	if c.Tmux.Present {
+		tmux = "yes"
+	}
+	fmt.Fprintf(&b, "host %s\n", c.HostID)
+	fmt.Fprintf(&b, "  reachable   %s\n", reach)
+	fmt.Fprintf(&b, "  host.yaml   %s\n", c.HostYAML)
+	fmt.Fprintf(&b, "  relayd      %s\n", c.Relayd)
+	fmt.Fprintf(&b, "  tmux        %s\n", tmux)
 	if c.ReachDetail != "" && !c.Reachable {
-		fmt.Fprintf(&b, "  reach: %s\n", c.ReachDetail)
+		fmt.Fprintf(&b, "  reach       %s\n", c.ReachDetail)
 	}
-	for _, a := range c.AgentsDetected {
-		mark := "missing"
-		if a.Present && a.Authed {
-			mark = "ready"
-		} else if a.Present {
-			mark = "present"
+	if len(c.AgentsDetected) > 0 {
+		fmt.Fprintf(&b, "  agents\n")
+		for _, a := range c.AgentsDetected {
+			mark := "missing"
+			if a.Present && a.Authed {
+				mark = "ready"
+			} else if a.Present {
+				mark = "present"
+			}
+			fmt.Fprintf(&b, "    %-14s %s\n", a.Name, mark)
 		}
-		fmt.Fprintf(&b, "  agent %-14s %s\n", a.Name, mark)
 	}
-	fmt.Fprintf(&b, "  path_suggestions: %d\n", len(c.PathSuggestions))
+	if n := len(c.PathSuggestions); n > 0 {
+		fmt.Fprintf(&b, "  paths       %d suggestion(s)\n", n)
+	}
 	if c.Next != "" {
-		fmt.Fprintf(&b, "next: %s\n", c.Next)
+		fmt.Fprintf(&b, "  next        %s\n", c.Next)
 	}
 	return b.String()
 }

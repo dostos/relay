@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/dostos/relay/internal/coord/sshcoord"
@@ -18,6 +20,7 @@ import (
 	"github.com/dostos/relay/internal/persist/tmux"
 	"github.com/dostos/relay/internal/ports"
 	sshtransport "github.com/dostos/relay/internal/transport/ssh"
+	"github.com/dostos/relay/internal/ui"
 	"github.com/dostos/relay/internal/viz/cmux"
 )
 
@@ -114,7 +117,7 @@ func (a *App) fail(err error) int {
 		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": false, "error": err.Error()})
 		return 1
 	}
-	fmt.Fprintf(os.Stderr, "relay: %v\n", err)
+	ui.Warn(err.Error())
 	return 1
 }
 
@@ -165,7 +168,8 @@ func (a *App) Run(args []string) int {
 	if len(filtered) == 0 {
 		return a.cmdHelp()
 	}
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	switch filtered[0] {
 	case "help", "-h", "--help":
 		return a.cmdHelp()
@@ -199,7 +203,7 @@ func (a *App) Run(args []string) int {
 	case "doctor":
 		return a.cmdDoctor(ctx, filtered[1:])
 	default:
-		fmt.Fprintf(os.Stderr, "relay: unknown command %q\n", filtered[0])
+		ui.Warn(fmt.Sprintf("unknown command %q", filtered[0]))
 		return a.cmdHelp()
 	}
 }
@@ -572,7 +576,7 @@ func (a *App) cmdHost(ctx context.Context, args []string) int {
 		}
 		fmt.Print(core.FormatDiscoverText(card))
 		if card.ProposalYAML != "" && card.HostYAML == "missing" {
-			fmt.Fprintf(os.Stderr, "\n# proposal (not written; use: relay host init -H %s --apply)\n", host)
+			ui.Note(fmt.Sprintf("proposal (not written) — relay host init -H %s --apply", host))
 			fmt.Print(card.ProposalYAML)
 		}
 		return 0
@@ -601,19 +605,22 @@ func (a *App) cmdHost(ctx context.Context, args []string) int {
 		if a.JSON {
 			return a.errOut(a.out(res))
 		}
-		fmt.Printf("host %s  dry_run=%v  applied=%v  wrote_profile=%v\n", res.HostID, res.DryRun, res.Applied, res.WroteProfile)
+		fmt.Printf("host %s\n", res.HostID)
+		fmt.Printf("  dry_run     %v\n", res.DryRun)
+		fmt.Printf("  applied     %v\n", res.Applied)
+		fmt.Printf("  profile     %v\n", res.WroteProfile)
 		if res.Detail != "" {
-			fmt.Println(res.Detail)
+			fmt.Printf("  detail      %s\n", res.Detail)
 		}
 		if res.Discover != nil {
 			fmt.Print(core.FormatDiscoverText(res.Discover))
 		}
 		if res.DryRun && res.Discover != nil && res.Discover.ProposalYAML != "" {
-			fmt.Fprintf(os.Stderr, "\n# proposal → %s\n", core.RemoteHostProfilePath())
+			ui.Note("proposal → " + core.RemoteHostProfilePath())
 			fmt.Print(res.Discover.ProposalYAML)
 		}
 		if res.Next != "" {
-			fmt.Println("next:", res.Next)
+			fmt.Printf("  next        %s\n", res.Next)
 		}
 		if !res.OK {
 			return 1
@@ -1790,18 +1797,18 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 		if cwd == "" {
 			cwd = paneCWD
 		}
-		fmt.Fprintf(os.Stderr, "relay resume: using pane history %s → %s\n", surface, session)
+		ui.Note(fmt.Sprintf("pane %s → %s", surface, session))
 	}
 	if err := a.Sessions.ResumeOpts(ctx, session, cwd, opts); err != nil {
 		msg := core.FormatResumeError(err)
-		fmt.Fprintf(os.Stderr, "relay resume: %s\n", msg)
+		ui.Warn(msg)
 		// Cleaned = intentional; never open a fake shell.
 		if errors.Is(err, core.ErrResumeCleaned) {
 			return 1
 		}
 		// Unknown/missing binding only — not SSH drops (those retry inside Resume).
 		if isUnknownResumeBinding(err) {
-			fmt.Fprintf(os.Stderr, "relay resume: no binding for %q — open a local shell\n", session)
+			ui.Note(fmt.Sprintf("no binding for %q — opening local shell", session))
 			shell := os.Getenv("SHELL")
 			if shell == "" {
 				shell = "/bin/bash"

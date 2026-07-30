@@ -77,7 +77,7 @@ func TestFormatDiscoverText(t *testing.T) {
 		},
 		Next: "relay host init -H c1 --apply",
 	})
-	if !strings.Contains(s, "host c1") || !strings.Contains(s, "next:") {
+	if !strings.Contains(s, "host c1") || !strings.Contains(s, "next") {
 		t.Fatalf("bad summary: %s", s)
 	}
 }

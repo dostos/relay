@@ -17,11 +17,17 @@ import (
 // Transport is an SSH-backed remote transport.
 type Transport struct {
 	Host string
+	// Stderr overrides the interactive session's stderr (nil → os.Stderr).
+	// Used by resume reconnect to filter ssh disconnect chatter.
+	Stderr io.Writer
 }
 
 func New(host string) *Transport {
 	return &Transport{Host: host}
 }
+
+// SetStderr implements an optional stderr override for Interactive.
+func (t *Transport) SetStderr(w io.Writer) { t.Stderr = w }
 
 func (t *Transport) ID() string { return t.Host }
 
@@ -159,7 +165,11 @@ func (t *Transport) Interactive(ctx context.Context, command string) error {
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	stderr := t.Stderr
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+	cmd.Stderr = stderr
 	return cmd.Run()
 }
 

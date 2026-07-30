@@ -97,7 +97,7 @@ relay resume --session NAME       # pin + waits/retries on SSH drop
 relay viz restore                 # optional manual path
 ```
 
-`relay resume` keeps the pane alive across sleep and “Shared connection … closed”: it reconnects after a short delay (default 3s), frozen to that pane’s session. Bare `relay resume` (no `--session`) reads `~/.local/state/relay/panes/<surface>.json` (or the cmux surface resume binding). Disable reconnect with `--no-reconnect` or `RELAY_AUTO_RECONNECT=0`.
+`relay resume` keeps the pane alive across sleep and “Shared connection … closed”: on drop it shows a single animated status line (spinner + countdown) and retries after a short delay (default 3s), frozen to that pane’s session. Bare `relay resume` (no `--session`) reads `~/.local/state/relay/panes/<surface>.json` (or the cmux surface resume binding). Disable reconnect with `--no-reconnect` or `RELAY_AUTO_RECONNECT=0`.
 
 
 | Resume presence | Meaning | Resume? |
