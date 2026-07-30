@@ -261,6 +261,7 @@ Handoffs (goal-based / long-running):
 
 Agent surface (token-efficient; always JSON; NO poll loops):
   relay agent start -H HOST --agent NAME --goal TEXT | --cmd CMD [--workspace WS] [--no-pane]
+  relay agent pick -H HOST                                     # suggest agent by weekly headroom (advisory)
   relay agent wait --handoff ID [--from SEQ] [--timeout SEC]   # blocks once
   relay agent send --handoff ID -- TEXT
   relay agent capture --handoff ID [-n LINES]
@@ -1335,9 +1336,22 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 	// Agent surface is always JSON (token-efficient machine contract).
 	a.JSON = true
 	if len(args) == 0 {
-		return a.fail(fmt.Errorf("usage: relay agent start|wait|send|capture|done|status …"))
+		return a.fail(fmt.Errorf("usage: relay agent start|pick|wait|send|capture|done|status …"))
 	}
 	switch args[0] {
+	case "pick":
+		host, _ := flagHost(args[1:])
+		if host == "" {
+			return a.fail(fmt.Errorf("-H HOST required"))
+		}
+		profile, err := a.Profiles.Get(ctx, host, true)
+		if err != nil {
+			return a.fail(err)
+		}
+		picked, ranking := core.Suggest(ctx, profile)
+		return a.errOut(a.out(map[string]any{
+			"ok": true, "host_id": host, "picked": picked, "ranking": ranking,
+		}))
 	case "start":
 		host, rest := flagHost(args[1:])
 		opts := core.HandoffOpts{HostID: host}

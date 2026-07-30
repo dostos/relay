@@ -46,6 +46,17 @@ func handoffLayout(opts HandoffOpts) ports.Layout {
 	}
 }
 
+// selectPreferredAgent returns a usage-aware default agent name, or "" when no
+// usage hook is configured (so callers preserve the original preferred_agent
+// behavior byte-for-byte). See usage.go for the ranking rules.
+func (h *HandoffService) selectPreferredAgent(ctx context.Context, profile *HostProfile) string {
+	if usageHookFor(profile) == "" {
+		return ""
+	}
+	pick, _ := Suggest(ctx, profile)
+	return pick
+}
+
 // Launch creates a session, starts work, installs events, optionally presents viz, returns binding.
 func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding, *Handoff, error) {
 	if opts.HostID == "" {
@@ -90,6 +101,14 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 		kind = KindAgent
 		if opts.Goal == "" {
 			return nil, nil, fmt.Errorf("--goal required for agent handoff")
+		}
+		if agentName == "" {
+			// No explicit --agent: let a configured usage hook steer the
+			// default toward the agent with weekly headroom. Absent/failed
+			// hook returns "" and FindAgent falls back to preferred_agent.
+			if pick := h.selectPreferredAgent(ctx, profile); pick != "" {
+				agentName = pick
+			}
 		}
 		ag, err := profile.FindAgent(agentName)
 		if err != nil {

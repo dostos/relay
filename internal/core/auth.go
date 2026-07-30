@@ -22,6 +22,9 @@ type AuthStatusRow struct {
 	Detail  string `json:"detail,omitempty"`
 	Login   string `json:"login_cmd,omitempty"`
 	CopyOK  bool   `json:"copy_supported"`
+	// WeeklyRemaining is the account's remaining weekly usage (0–100, % LEFT)
+	// when a usage hook is configured; nil when unknown or no hook.
+	WeeklyRemaining *int `json:"weekly_remaining,omitempty"`
 }
 
 // AuthLoginResult is returned after opening an interactive login pane.
@@ -33,7 +36,7 @@ type AuthLoginResult struct {
 	Surface   string `json:"surface,omitempty"`
 	LoginCmd  string `json:"login_cmd"`
 	AuthURL   string `json:"auth_url,omitempty"` // reassembled; pane width often wraps/crops this
-	Opened    bool   `json:"opened,omitempty"`  // local browser open attempted
+	Opened    bool   `json:"opened,omitempty"`   // local browser open attempted
 	Hint      string `json:"hint"`
 	Next      string `json:"next"`
 }
@@ -164,6 +167,15 @@ func (s *AuthService) Status(ctx context.Context, hostID, agentFilter string) ([
 			Login:   LoginCommand(spec),
 			CopyOK:  len(CredentialPaths(spec)) > 0,
 		})
+	}
+	// Annotate with remaining weekly usage when a hook is configured.
+	if hint, ok := LoadUsageHint(ctx, usageHookFor(profile)); ok {
+		for i := range rows {
+			if v, known := hint.Remaining(rows[i].Agent); known {
+				vv := v
+				rows[i].WeeklyRemaining = &vv
+			}
+		}
 	}
 	return rows, nil
 }

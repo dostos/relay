@@ -54,6 +54,14 @@ type HostDefaults struct {
 	PreferredAgent string `yaml:"preferred_agent,omitempty" json:"preferred_agent,omitempty"`
 	SilenceSec     int    `yaml:"silence_sec,omitempty" json:"silence_sec,omitempty"`
 	WorkspaceHint  string `yaml:"workspace_hint,omitempty" json:"workspace_hint,omitempty"`
+	// UsageHook is a command relay runs locally to learn each agent's remaining
+	// weekly headroom; its stdout must be JSON like
+	// {"agents":{"cursor-agent":{"weekly_remaining":42}}}. Empty disables the
+	// usage hint (RELAY_USAGE_HOOK env is used as a machine-wide fallback).
+	UsageHook string `yaml:"usage_hook,omitempty" json:"usage_hook,omitempty"`
+	// UsageMinRemaining is the weekly % LEFT below which an agent is treated as
+	// exhausted during auto-selection (default 5 when unset).
+	UsageMinRemaining int `yaml:"usage_min_remaining,omitempty" json:"usage_min_remaining,omitempty"`
 }
 
 // ProbeResult records a capability probe for one agent.
@@ -520,5 +528,10 @@ path_map:
 defaults:
   preferred_agent: claude
   silence_sec: 45
+  # Optional: usage-aware selection. relay runs this locally, expecting
+  # {"agents":{"<name>":{"weekly_remaining":0-100}}} on stdout; the preferred
+  # agent is used while it has headroom, else the highest-remaining one.
+  # usage_hook: agent-usage --json
+  # usage_min_remaining: 5
 `, hostID)
 }
