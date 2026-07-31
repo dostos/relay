@@ -256,6 +256,17 @@ func (s *SessionService) ProvisionBridge(ctx context.Context, sessionID string) 
 	if sess.HostID == LocalHostID {
 		return nil, fmt.Errorf("local sessions do not use a remote bridge identity")
 	}
+	t, err := s.NewTransport(sess.HostID)
+	if err != nil {
+		return nil, err
+	}
+	exists, err := s.Persist.Exists(ctx, t, sess.Persist)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, fmt.Errorf("remote session %s/%s is not live", sess.HostID, sess.Persist.Name)
+	}
 	token := ""
 	if raw, readErr := os.ReadFile(bridgeTokenPath(sess.ID)); readErr == nil {
 		token = strings.TrimSpace(string(raw))
@@ -265,10 +276,6 @@ func (s *SessionService) ProvisionBridge(ctx context.Context, sessionID string) 
 		if err := rememberBridgeToken(sess.ID, token); err != nil {
 			return nil, err
 		}
-	}
-	t, err := s.NewTransport(sess.HostID)
-	if err != nil {
-		return nil, err
 	}
 	if err := provisionBridgeIdentity(ctx, t, sess, token); err != nil {
 		return nil, err
