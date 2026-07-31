@@ -387,16 +387,16 @@ func (v *Viz) BrandLabels(ctx context.Context, labels map[string]string) error {
 		if err != nil || b.Surface == "" {
 			continue
 		}
-		persist := extractSessionFlag(b.Attach)
-		if persist == "" {
-			persist = project
+		displayName := strings.TrimSpace(project)
+		if displayName == "" {
+			displayName = extractSessionFlag(b.Attach)
 		}
-		_ = v.brandSurface(ctx, b.Surface, persist)
+		_ = v.brandSurface(ctx, b.Surface, displayName)
 		ws := v.workspaceOfSurface(ctx, b.Surface)
 		if ws == "" {
 			continue
 		}
-		byWS[ws] = append(byWS[ws], hit{project: projectLabel(persist)})
+		byWS[ws] = append(byWS[ws], hit{project: projectLabel(displayName)})
 	}
 	for ws, hits := range byWS {
 		seen := map[string]bool{}
@@ -791,6 +791,11 @@ func (v *Viz) SaveRestorable(ctx context.Context) (int, error) {
 		if name == "" {
 			continue
 		}
+		sess, findErr := (&core.Registry{}).FindByPersistName(name, cwd)
+		displayName := name
+		if findErr == nil {
+			displayName = core.SessionDisplayName(sess)
+		}
 		// cmux returns a shell-rendered command from resume get. Reusing that
 		// value compounds quoting on every save, so always regenerate the
 		// canonical Relay argv from the checkpoint identity.
@@ -798,15 +803,15 @@ func (v *Viz) SaveRestorable(ctx context.Context) (int, error) {
 		if _, err := v.run(ctx, "surface", "resume", "set",
 			"--surface", ref,
 			"--kind", "relay",
-			"--name", brandTitle(name),
+			"--name", brandTitle(displayName),
 			"--checkpoint", name,
 			"--", cmd,
 		); err == nil {
-			_ = v.brandSurface(ctx, ref, name)
+			_ = v.brandSurface(ctx, ref, displayName)
 			if cwd == "" {
 				cwd, _ = os.Getwd()
 			}
-			if sess, findErr := (&core.Registry{}).FindByPersistName(name, cwd); findErr == nil {
+			if findErr == nil {
 				core.RememberPane(ref, sess, true)
 				loc := v.locationOfSurface(ctx, ref)
 				b := binding{

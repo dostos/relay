@@ -1,6 +1,10 @@
 package core
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/dostos/relay/internal/ports"
+)
 
 func TestProjectLabel(t *testing.T) {
 	cases := map[string]string{
@@ -20,6 +24,20 @@ func TestProjectLabel(t *testing.T) {
 func TestBrandTitle(t *testing.T) {
 	if got := BrandTitle("dostos-workspace-cdx"); got != "◆ RELAY · cdx" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestSessionDisplayName(t *testing.T) {
+	sess := &Session{
+		Persist: ports.PersistHandle{Name: "dostos-workspace-6ec0e2"},
+		Labels:  map[string]string{DisplayNameLabel: "personal-db"},
+	}
+	if got := SessionDisplayName(sess); got != "personal-db" {
+		t.Fatalf("got %q", got)
+	}
+	delete(sess.Labels, DisplayNameLabel)
+	if got := SessionDisplayName(sess); got != "6ec0e2" {
+		t.Fatalf("fallback = %q", got)
 	}
 }
 

@@ -2,6 +2,8 @@ package core
 
 import "strings"
 
+const DisplayNameLabel = "display_name"
+
 // ProjectLabel returns the short project name shown in ◆ RELAY · <project>.
 // Strips the common dostos-workspace- prefix used by older session names.
 func ProjectLabel(persistName string) string {
@@ -11,6 +13,18 @@ func ProjectLabel(persistName string) string {
 		return persistName
 	}
 	return name
+}
+
+// SessionDisplayName returns a stable human alias without changing the tmux
+// checkpoint identity used for resume, bridge authentication, and history.
+func SessionDisplayName(sess *Session) string {
+	if sess == nil {
+		return ""
+	}
+	if display := strings.TrimSpace(sess.Labels[DisplayNameLabel]); display != "" {
+		return display
+	}
+	return ProjectLabel(sess.Persist.Name)
 }
 
 // BrandTitle is the cmux tab / status marker for a relay-managed project.

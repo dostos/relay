@@ -420,6 +420,7 @@ Events (via always-on relayd on the host):
 
 Visualization (optional cmux adapter):
   relay pane list                     Session-keyed pane, workspace, parent, and liveness inventory
+  relay pane rename SESSION_ID NAME   Set a durable display alias; tmux identity is unchanged
   relay viz present SESSION_ID [--workspace WS] [--pane PANE] [--tab]
                                       First child splits right; later siblings stack downward.
                                       --tab stacks in PANE; explicit placement overrides defaults.
@@ -1856,6 +1857,35 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 		}
 		a.JSON = true
 		return a.errOut(a.out(map[string]any{"ok": true, "panes": panes}))
+	case "rename":
+		if len(args) != 3 {
+			return a.fail(fmt.Errorf("usage: relay pane rename SESSION_ID NAME"))
+		}
+		displayName := strings.TrimSpace(args[2])
+		if displayName == "" || len(displayName) > 64 || strings.ContainsAny(displayName, "\r\n\t") {
+			return a.fail(fmt.Errorf("invalid pane display name %q", args[2]))
+		}
+		sess, err := a.Reg.GetSession(args[1])
+		if err != nil {
+			return a.fail(err)
+		}
+		if sess.Labels == nil {
+			sess.Labels = map[string]string{}
+		}
+		sess.Labels[core.DisplayNameLabel] = displayName
+		if err := a.Reg.PutSession(sess); err != nil {
+			return a.fail(err)
+		}
+		if err := a.brandAll(ctx); err != nil {
+			return a.fail(err)
+		}
+		if _, err := a.Viz.SaveRestorable(ctx); err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{
+			"ok": true, "session_id": sess.ID, "display_name": displayName,
+			"persist_name": sess.Persist.Name,
+		}))
 	case "layout":
 		out, err := a.Viz.Layout(ctx)
 		if err != nil {
@@ -2218,7 +2248,7 @@ func (a *App) brandAll(ctx context.Context) error {
 	}
 	labels := make(map[string]string, len(list))
 	for _, s := range list {
-		labels[s.ID] = core.ProjectLabel(s.Persist.Name)
+		labels[s.ID] = core.SessionDisplayName(s)
 	}
 	return a.Viz.BrandLabels(ctx, labels)
 }

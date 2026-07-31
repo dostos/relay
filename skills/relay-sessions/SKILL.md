@@ -55,6 +55,7 @@ relay session send sess-… -- "…"
 relay session exec sess-… -- "…"
 relay viz present|close sess-…
 relay pane list                                # exact workspace/pane/parent bindings
+relay pane rename sess-… personal-db           # persistent UI alias; tmux identity stays stable
 relay history                                 # durable source → destination graph
 ```
 

@@ -174,6 +174,7 @@ relay session … / session adopt             # durable tmux
 relay agent start|wait|send|capture|done    # orchestrator API
 relay history                               # source → destination lineage
 relay pane list                             # owned surface/workspace/pane + parent + liveness
+relay pane rename SESSION_ID NAME           # durable display alias; leaves tmux identity intact
 relay viz present|brand|save|restore        # cmux surface
 relay resume --session NAME                 # Vault target
 ```
