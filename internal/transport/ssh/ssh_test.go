@@ -59,3 +59,13 @@ func TestInteractiveBridgeUsesDedicatedReverseForward(t *testing.T) {
 		t.Fatalf("bridge attach must not share a control master: %s", joined)
 	}
 }
+
+func TestReverseSocketCleanupCommandQuotesExactPath(t *testing.T) {
+	got, err := reverseSocketCleanupCommand("/tmp/relay-bridge-sess-a.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "rm -f -- '/tmp/relay-bridge-sess-a.sock'" {
+		t.Fatalf("cleanup = %q", got)
+	}
+}

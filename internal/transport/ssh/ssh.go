@@ -214,6 +214,11 @@ func (t *Transport) WriteFile(ctx context.Context, path string, data []byte, mod
 }
 
 func (t *Transport) Interactive(ctx context.Context, command string) error {
+	if t.reverseRemoteSocket != "" && t.reverseLocalSocket != "" {
+		if err := t.prepareReverseUnixForward(ctx); err != nil {
+			return err
+		}
+	}
 	args, err := t.interactiveArgs(command)
 	if err != nil {
 		return err
@@ -227,6 +232,34 @@ func (t *Transport) Interactive(ctx context.Context, command string) error {
 	}
 	cmd.Stderr = stderr
 	return cmd.Run()
+}
+
+// prepareReverseUnixForward removes only this session's stale socket before a
+// dedicated attach reconnects. StreamLocalBindUnlink is not honored reliably
+// by every server for remote stream-local forwards.
+func (t *Transport) prepareReverseUnixForward(ctx context.Context) error {
+	cleanup, err := reverseSocketCleanupCommand(t.reverseRemoteSocket)
+	if err != nil {
+		return err
+	}
+	cmd, err := t.sshBase(ctx, cleanup)
+	if err != nil {
+		return err
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("clear stale relay bridge socket on %s: %w (%s)", t.Host, err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+func reverseSocketCleanupCommand(remoteSocket string) (string, error) {
+	expr, err := shellquote.PathExpr(remoteSocket)
+	if err != nil {
+		return "", err
+	}
+	return "rm -f -- " + expr, nil
 }
 
 func (t *Transport) interactiveArgs(command string) ([]string, error) {

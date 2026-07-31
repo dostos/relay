@@ -73,6 +73,7 @@ var (
 	reSSHReadReset  = regexp.MustCompile(`^Read from remote host \S+: Connection reset`)
 	reSSHClientLoop = regexp.MustCompile(`^client_loop:`)
 	reSSHConnect    = regexp.MustCompile(`^ssh: connect to host \S+(?: port \d+)?: `)
+	reSSHForward    = regexp.MustCompile(`^(?:Warning|Error): remote port forwarding failed for listen path `)
 )
 
 func isSSHNoise(line string) bool {
@@ -90,6 +91,8 @@ func isSSHNoise(line string) bool {
 	case reSSHClientLoop.MatchString(s):
 		return true
 	case reSSHConnect.MatchString(s):
+		return true
+	case reSSHForward.MatchString(s):
 		return true
 	default:
 		return false
