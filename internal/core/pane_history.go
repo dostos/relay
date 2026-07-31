@@ -157,10 +157,8 @@ func ReadPaneBinding(surface string) (*PaneBinding, error) {
 
 // CurrentSurface returns the cmux surface running this process, if any.
 func CurrentSurface() (string, error) {
-	for _, k := range []string{"CMUX_SURFACE_REF", "CMUX_SURFACE"} {
-		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
-			return normalizeSurface(v), nil
-		}
+	if surface, ok := SurfaceFromEnvironment(); ok {
+		return surface, nil
 	}
 	if identifySurface != nil {
 		if s, err := identifySurface(); err == nil && s != "" {
@@ -168,6 +166,17 @@ func CurrentSurface() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("not inside a cmux surface (set CMUX_SURFACE_REF or pass --session)")
+}
+
+// SurfaceFromEnvironment returns only the caller-owned cmux surface reference.
+// Unlike CurrentSurface it never falls back to globally focused UI state.
+func SurfaceFromEnvironment() (string, bool) {
+	for _, k := range []string{"CMUX_SURFACE_REF", "CMUX_SURFACE"} {
+		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
+			return normalizeSurface(v), true
+		}
+	}
+	return "", false
 }
 
 // identifySurface is swappable for tests; default shells out to cmux identify.

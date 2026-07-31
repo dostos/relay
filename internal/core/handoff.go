@@ -26,23 +26,31 @@ type HandoffService struct {
 
 // HandoffOpts configures a launch.
 type HandoffOpts struct {
-	HostID    string
-	RepoRef   string
-	RemoteCWD string
-	Workspace string // optional cmux workspace ref for the presented pane
-	Agent     string // for kind=agent
-	Goal      string
-	Command   string // for kind=job
-	NoPane    bool
-	Silence   int
-	Name      string
-	Container string // optional: container name from host.yaml `containers:`
+	HostID            string
+	RepoRef           string
+	RemoteCWD         string
+	Workspace         string // optional cmux workspace ref for the presented pane
+	Pane              string // optional source cmux pane ref for relative placement
+	ExplicitPlace     bool   // workspace/pane was explicitly selected by the caller
+	Agent             string // for kind=agent
+	Goal              string
+	Command           string // for kind=job
+	NoPane            bool
+	Silence           int
+	Name              string
+	Container         string // optional: container name from host.yaml `containers:`
+	SourceSessionID   string
+	SourceHostID      string
+	SourcePersistName string
 }
 
 func handoffLayout(opts HandoffOpts) ports.Layout {
 	return ports.Layout{
-		Mode:      "remote",
-		Workspace: opts.Workspace,
+		Mode:            "remote",
+		Workspace:       opts.Workspace,
+		Pane:            opts.Pane,
+		SourceSessionID: opts.SourceSessionID,
+		ExplicitPlace:   opts.ExplicitPlace,
 	}
 }
 
@@ -124,14 +132,25 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 		}
 	}
 
+	// Allocate the edge id before the target session so session history can name
+	// the exact handoff that created it.
+	hid := newID("ho")
 	// Holding shell first so we can install events before the real work starts.
+	labels := map[string]string{"role": "handoff"}
+	if agentName != "" {
+		labels["agent"] = agentName
+	}
 	sess, err := h.Sessions.Create(ctx, CreateOpts{
-		HostID:    opts.HostID,
-		Name:      opts.Name,
-		RepoRef:   opts.RepoRef,
-		RemoteCWD: opts.RemoteCWD,
-		Command:   "bash -l",
-		Labels:    map[string]string{"role": "handoff"},
+		HostID:             opts.HostID,
+		Name:               opts.Name,
+		RepoRef:            opts.RepoRef,
+		RemoteCWD:          opts.RemoteCWD,
+		Command:            "bash -l",
+		Labels:             labels,
+		SourceSessionID:    opts.SourceSessionID,
+		SourceHostID:       opts.SourceHostID,
+		SourcePersistName:  opts.SourcePersistName,
+		CreatedByHandoffID: hid,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -169,20 +188,22 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 	}
 
 	eventsPath := h.Coord.EventsPath(sess.Persist.Name)
-	hid := newID("ho")
 	now := time.Now().UTC()
 	ho := &Handoff{
-		ID:         hid,
-		SessionID:  sess.ID,
-		HostID:     opts.HostID,
-		Kind:       kind,
-		Status:     StatusPending,
-		Goal:       opts.Goal,
-		Agent:      agentName,
-		Command:    launchCmd,
-		EventsPath: eventsPath,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		ID:                hid,
+		SessionID:         sess.ID,
+		HostID:            opts.HostID,
+		Kind:              kind,
+		Status:            StatusPending,
+		Goal:              opts.Goal,
+		Agent:             agentName,
+		Command:           launchCmd,
+		EventsPath:        eventsPath,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+		SourceSessionID:   opts.SourceSessionID,
+		SourceHostID:      opts.SourceHostID,
+		SourcePersistName: opts.SourcePersistName,
 	}
 	if err := h.Reg.PutHandoff(ho); err != nil {
 		return nil, nil, err
@@ -191,6 +212,8 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 		"v": 1, "type": "start", "ts": now.Format(time.RFC3339),
 		"handoff_id": hid, "session_id": sess.ID, "host_id": opts.HostID,
 		"kind": string(kind), "goal": opts.Goal, "agent": agentName, "command": launchCmd,
+		"source_session_id": opts.SourceSessionID, "source_host_id": opts.SourceHostID,
+		"source_persist_name": opts.SourcePersistName,
 	})
 
 	// Start work: send launch command into the holding shell.
@@ -233,15 +256,18 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 	}
 
 	b := &Binding{
-		V:         1,
-		HandoffID: hid,
-		SessionID: sess.ID,
-		HostID:    opts.HostID,
-		Kind:      string(kind),
-		Goal:      opts.Goal,
-		Events:    eventsPath,
-		Watch:     fmt.Sprintf("relay agent wait --handoff %s", hid),
-		Pane:      pane,
+		V:                 1,
+		HandoffID:         hid,
+		SessionID:         sess.ID,
+		HostID:            opts.HostID,
+		Kind:              string(kind),
+		Goal:              opts.Goal,
+		Events:            eventsPath,
+		Watch:             fmt.Sprintf("relay agent wait --handoff %s", hid),
+		Pane:              pane,
+		SourceSessionID:   opts.SourceSessionID,
+		SourceHostID:      opts.SourceHostID,
+		SourcePersistName: opts.SourcePersistName,
 	}
 	return b, ho, nil
 }

@@ -38,3 +38,24 @@ func TestStreamErrorKeepsOnlyLastDiagnosticLine(t *testing.T) {
 		t.Fatalf("included stale diagnostic: %q", got)
 	}
 }
+
+func TestInteractiveBridgeUsesDedicatedReverseForward(t *testing.T) {
+	tr := New("c3")
+	tr.SetReverseUnixForward("/tmp/remote.sock", "/tmp/local.sock")
+	args, err := tr.interactiveArgs("tmux attach -t named")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{
+		"ControlMaster=no", "StreamLocalBindUnlink=yes", "StreamLocalBindMask=0177",
+		"-R /tmp/remote.sock:/tmp/local.sock", "-t c3 tmux attach -t named",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("args missing %q: %s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "ControlMaster=auto") {
+		t.Fatalf("bridge attach must not share a control master: %s", joined)
+	}
+}

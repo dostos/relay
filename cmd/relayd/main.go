@@ -1,4 +1,4 @@
-// relayd — always-on per-host event coordinator (Unix socket only; no TCP).
+// relayd — per-host events and desktop relay bridge (Unix sockets; no TCP).
 package main
 
 import (
@@ -9,8 +9,10 @@ import (
 	"strconv"
 	"syscall"
 
+	"github.com/dostos/relay/internal/bridge"
 	"github.com/dostos/relay/internal/coord"
 	"github.com/dostos/relay/internal/coord/relayd"
+	"github.com/dostos/relay/internal/core"
 )
 
 func main() {
@@ -21,6 +23,8 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		os.Exit(cmdServe())
+	case "bridge":
+		os.Exit(cmdBridge(os.Args[2:]))
 	case "ping":
 		os.Exit(cmdPing())
 	case "status":
@@ -41,15 +45,50 @@ func main() {
 }
 
 func usage() {
-	fmt.Print(`relayd — host-local event bus (Unix socket ONLY; no TCP)
+	fmt.Print(`relayd — Unix-socket event bus + desktop bridge (NO TCP)
 
 Usage:
   relayd serve                 Listen on ~/.local/state/relay/relayd.sock
+  relayd bridge [--relay-bin PATH]
+                               Desktop bridge for remote relay → local cmux
   relayd ping
   relayd status
   relayd emit -s SESS --kind KIND [--meta JSON]
   relayd subscribe -s SESS [--from N] [-f]
 `)
+}
+
+func cmdBridge(args []string) int {
+	relayBin := core.RelayBin()
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--relay-bin":
+			i++
+			if i < len(args) {
+				relayBin = args[i]
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "relayd bridge: unknown argument %q\n", args[i])
+			return 2
+		}
+	}
+	sock := core.DesktopBridgeSocketPath()
+	if v := os.Getenv("RELAY_BRIDGE_LOCAL_SOCK"); v != "" {
+		sock = v
+	}
+	srv := &bridge.Server{SockPath: sock, RelayBin: relayBin, Authorize: core.AuthorizeBridgeSource}
+	fmt.Fprintf(os.Stderr, "relayd desktop bridge listening on unix:%s\n", sock)
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sig
+		_ = srv.Close()
+	}()
+	if err := srv.Serve(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
 }
 
 func sockPath() string {

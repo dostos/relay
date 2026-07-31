@@ -32,12 +32,56 @@ func newID(prefix string) string {
 
 // CreateOpts configures session creation.
 type CreateOpts struct {
-	HostID    string
-	Name      string // optional persist name; default derived
-	RepoRef   string // local git root
-	RemoteCWD string // optional override (skips path_map)
-	Command   string // optional initial command; default interactive shell
-	Labels    map[string]string
+	HostID             string
+	Name               string // optional persist name; default derived
+	RepoRef            string // local git root
+	RemoteCWD          string // optional override (skips path_map)
+	Command            string // optional initial command; default interactive shell
+	Labels             map[string]string
+	SourceSessionID    string
+	SourceHostID       string
+	SourcePersistName  string
+	CreatedByHandoffID string
+}
+
+// OpenNamed returns the existing host/name session or creates it. A remote
+// tmux session that predates the local registry is adopted without replacing
+// it, preserving the user's work.
+func (s *SessionService) OpenNamed(ctx context.Context, opts CreateOpts) (*Session, bool, error) {
+	if opts.HostID == "" || opts.Name == "" {
+		return nil, false, fmt.Errorf("host and name required")
+	}
+	safe, err := shellquote.SanitizeSessionName(opts.Name)
+	if err != nil {
+		return nil, false, err
+	}
+	opts.Name = safe
+	t, err := s.NewTransport(opts.HostID)
+	if err != nil {
+		return nil, false, err
+	}
+	handle := ports.PersistHandle{Kind: s.Persist.Kind(), Name: safe}
+	exists, err := s.Persist.Exists(ctx, t, handle)
+	if err != nil {
+		return nil, false, err
+	}
+	list, _ := s.List()
+	for _, sess := range list {
+		if sess.HostID != opts.HostID || sess.Persist.Name != safe {
+			continue
+		}
+		if exists {
+			RememberResume(sess)
+			return sess, false, nil
+		}
+		_ = s.Reg.DeleteSession(sess.ID)
+	}
+	if exists {
+		sess, err := s.Adopt(ctx, opts)
+		return sess, false, err
+	}
+	sess, err := s.Create(ctx, opts)
+	return sess, true, err
 }
 
 // Create creates a remote persistent session and registers it locally.
@@ -72,33 +116,46 @@ func (s *SessionService) Create(ctx context.Context, opts CreateOpts) (*Session,
 		return nil, err
 	}
 	name = safe
+	sessionID := newID("sess")
+	bridgeToken := newID("br")
+	if err := rememberBridgeToken(sessionID, bridgeToken); err != nil {
+		return nil, err
+	}
 	t, err := s.NewTransport(opts.HostID)
 	if err != nil {
+		forgetBridgeToken(sessionID)
 		return nil, err
 	}
 	cmd := opts.Command
 	if cmd == "" {
 		cmd = "bash -l"
 	}
+	cmd = relaySessionCommand(cmd, sessionID, opts.HostID, name, bridgeToken)
 	h, err := s.Persist.Create(ctx, t, name, cwd, cmd)
 	if err != nil {
+		forgetBridgeToken(sessionID)
 		return nil, err
 	}
 	now := time.Now().UTC()
 	sess := &Session{
-		ID:        newID("sess"),
-		HostID:    opts.HostID,
-		RemoteCWD: cwd,
-		Persist:   h,
-		RepoRef:   opts.RepoRef,
-		Labels:    opts.Labels,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:                 sessionID,
+		HostID:             opts.HostID,
+		RemoteCWD:          cwd,
+		Persist:            h,
+		RepoRef:            opts.RepoRef,
+		Labels:             opts.Labels,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+		SourceSessionID:    opts.SourceSessionID,
+		SourceHostID:       opts.SourceHostID,
+		SourcePersistName:  opts.SourcePersistName,
+		CreatedByHandoffID: opts.CreatedByHandoffID,
 	}
 	if err := s.Reg.PutSession(sess); err != nil {
 		return nil, err
 	}
 	RememberResume(sess)
+	_ = AppendSessionStart(sess)
 	return sess, nil
 }
 
@@ -147,19 +204,24 @@ func (s *SessionService) Adopt(ctx context.Context, opts CreateOpts) (*Session, 
 		labels["adopted"] = "existing"
 	}
 	sess := &Session{
-		ID:        newID("sess"),
-		HostID:    opts.HostID,
-		RemoteCWD: cwd,
-		Persist:   h,
-		RepoRef:   opts.RepoRef,
-		Labels:    labels,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:                 newID("sess"),
+		HostID:             opts.HostID,
+		RemoteCWD:          cwd,
+		Persist:            h,
+		RepoRef:            opts.RepoRef,
+		Labels:             labels,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+		SourceSessionID:    opts.SourceSessionID,
+		SourceHostID:       opts.SourceHostID,
+		SourcePersistName:  opts.SourcePersistName,
+		CreatedByHandoffID: opts.CreatedByHandoffID,
 	}
 	if err := s.Reg.PutSession(sess); err != nil {
 		return nil, err
 	}
 	RememberResume(sess)
+	_ = AppendSessionStart(sess)
 	return sess, nil
 }
 
@@ -278,6 +340,7 @@ func (s *SessionService) Destroy(ctx context.Context, id string, keepRemote bool
 		_ = s.Persist.Destroy(ctx, t, sess.Persist)
 		// Intentional teardown — cmux must not treat this as a reconnectable drop.
 		MarkResumeCleaned(sess.Persist.Name, "destroyed")
+		forgetBridgeToken(sess.ID)
 	} else {
 		// Local unbound; remote kept → disconnected/resumable.
 		RememberResume(sess)
@@ -316,6 +379,7 @@ func (s *SessionService) KillPersist(ctx context.Context, hostID, persistName st
 	}
 	for _, sess := range list {
 		if sess.HostID == hostID && sess.Persist.Name == safe {
+			forgetBridgeToken(sess.ID)
 			_ = s.Reg.DeleteSession(sess.ID)
 		}
 	}

@@ -7,14 +7,17 @@ import (
 	"time"
 )
 
-func TestHandoffLayoutPreservesExplicitWorkspace(t *testing.T) {
-	layout := handoffLayout(HandoffOpts{Workspace: "workspace:9"})
+func TestHandoffLayoutPreservesSourcePlacement(t *testing.T) {
+	layout := handoffLayout(HandoffOpts{Workspace: "workspace:9", Pane: "pane:12", SourceSessionID: "sess-parent"})
 
 	if layout.Mode != "remote" {
 		t.Fatalf("mode = %q, want remote", layout.Mode)
 	}
 	if layout.Workspace != "workspace:9" {
 		t.Fatalf("workspace = %q, want workspace:9", layout.Workspace)
+	}
+	if layout.Pane != "pane:12" || layout.SourceSessionID != "sess-parent" {
+		t.Fatalf("source placement lost: %+v", layout)
 	}
 }
 

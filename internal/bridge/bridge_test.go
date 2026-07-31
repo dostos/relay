@@ -1,0 +1,87 @@
+package bridge
+
+import (
+	"context"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestServerInvoke(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "bridge.sock")
+	srv := &Server{SockPath: sock, RelayBin: "/bin/echo"}
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve() }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	client := Client{SockPath: sock}
+	for client.Ping(ctx) != nil {
+		select {
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	resp, err := client.Invoke(ctx, []string{"c1", "named"}, Source{SessionID: "sess-source"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.OK || resp.ExitCode != 0 || strings.TrimSpace(resp.Stdout) != "c1 named" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+}
+
+func TestRejectInteractiveForward(t *testing.T) {
+	if err := validateArgv([]string{"resume", "--session", "x"}); err == nil {
+		t.Fatal("expected resume to be rejected")
+	}
+	if err := validateArgv([]string{"session", "attach", "x"}); err == nil {
+		t.Fatal("expected session attach to be rejected")
+	}
+}
+
+func TestBridgeAllowlist(t *testing.T) {
+	for _, argv := range [][]string{
+		{"c1", "named"}, {"agent", "start", "-H", "c1", "--goal", "x"}, {"--json", "history"},
+	} {
+		if err := validateArgv(argv); err != nil {
+			t.Fatalf("expected %v to be allowed: %v", argv, err)
+		}
+	}
+	for _, argv := range [][]string{
+		{"host", "bootstrap", "-H", "c1"}, {"auth", "copy"}, {"session", "destroy", "sess-x"},
+	} {
+		if err := validateArgv(argv); err == nil {
+			t.Fatalf("expected %v to be rejected", argv)
+		}
+	}
+}
+
+func TestDesktopInvokeEnvDropsStaleCmuxCaller(t *testing.T) {
+	got := strings.Join(desktopInvokeEnv([]string{
+		"PATH=/bin", "CMUX_WORKSPACE_ID=workspace:old", "CMUX_SURFACE_REF=surface:old", "RELAY_CMUX_BIN=/cmux",
+	}), "\n")
+	if strings.Contains(got, "workspace:old") || strings.Contains(got, "surface:old") {
+		t.Fatalf("stale caller context survived: %s", got)
+	}
+	if !strings.Contains(got, "PATH=/bin") || !strings.Contains(got, "RELAY_CMUX_BIN=/cmux") {
+		t.Fatalf("unrelated environment was removed: %s", got)
+	}
+}
+
+func TestSerializeInvocationDoesNotBlockWaits(t *testing.T) {
+	for _, argv := range [][]string{{"c1", "named"}, {"agent", "start", "-H", "c1"}, {"agent", "done", "--handoff", "ho-1"}} {
+		if !serializeInvocation(argv) {
+			t.Fatalf("expected %v to serialize", argv)
+		}
+	}
+	for _, argv := range [][]string{{"agent", "wait", "--handoff", "ho-1"}, {"agent", "capture", "--handoff", "ho-1"}, {"history"}} {
+		if serializeInvocation(argv) {
+			t.Fatalf("expected %v not to serialize", argv)
+		}
+	}
+}

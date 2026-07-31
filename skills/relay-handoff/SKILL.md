@@ -21,7 +21,15 @@ relay agent send --handoff ho-… -- "…"                # agent only; refused 
 relay agent capture --handoff ho-…                    # if unsure before send
 relay agent done --handoff ho-… --outcome done
 relay agent status --handoff ho-…                     # resume after compaction
+relay history                                          # who handed off to whom
 ```
+
+Inside a pane opened with `relay HOST NAME`, the command is forwarded through
+that pane's owner-only Unix-socket bridge to the desktop relay. The returned
+binding includes `source_session_id`, `source_host_id`, and
+`source_persist_name`; preserve them rather than synthesizing lineage. The
+desktop uses that source binding to split the first child right of its parent
+and stack later siblings downward in the same workspace.
 
 Rules encoded in `next` (do not re-derive):
 - Job `idle` → wait (do not send)
@@ -29,4 +37,5 @@ Rules encoded in `next` (do not re-derive):
 - `exit` → done
 - Timeout → wait again on a **new turn** (not a tight loop)
 
-Requires once per host: `relay host bootstrap -H HOST`.
+Requires once per host: `relay host bootstrap -H HOST` (installs both the
+remote `relay` client and `relayd`).

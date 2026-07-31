@@ -10,7 +10,7 @@ description: Use for relay remote sessions. Prefer relay agent for handoffs; use
 ```bash
 relay targets --json                          # ssh Host aliases (local, no SSH)
 relay host discover -H HOST --json            # inventory + proposed host.yaml
-relay host init -H HOST --apply               # bootstrap relayd + write proposal
+relay host init -H HOST --apply               # install relay+relayd + write proposal
 # existing host.yaml: add --force to overwrite
 ```
 
@@ -36,12 +36,26 @@ Probes/launches use a login shell so nvm/`~/.local/bin` agents are visible.
 Handoffs → skill **relay-handoff** (`relay agent …`). Ad-hoc only:
 
 ```bash
+relay HOST NAME                               # named tmux in current cmux pane
+```
+
+The shorthand starts or reuses `NAME`, binds the current cmux surface, and
+keeps a reverse Unix-socket bridge on its reconnecting SSH attach. From inside
+that remote pane, another `relay HOST NAME` or `relay agent start -H …` is
+forwarded to the desktop and opens the next pane in the parent's recorded cmux
+workspace. The first child splits right of the parent; later children from the
+same parent split down from the newest live sibling. Placement is based on the
+session binding, not current focus. Do not start cmux on a remote host.
+
+```bash
 relay session create -H HOST --json
 relay session list --json
 relay session capture sess-… -n 100
 relay session send sess-… -- "…"
 relay session exec sess-… -- "…"
 relay viz present|close sess-…
+relay pane list                                # exact workspace/pane/parent bindings
+relay history                                 # durable source → destination graph
 ```
 
 After cmux quit/reopen: panes re-attach via Vault (`relay install-cmux-restore`) or manually `relay viz save` then `relay viz restore`.

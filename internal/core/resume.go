@@ -89,7 +89,9 @@ type ResumeOpts struct {
 	// Explicit is true when the caller passed --session (pins pane history).
 	Explicit bool
 	// Surface overrides auto-detect for pane history stamping.
-	Surface string
+	Surface            string
+	BridgeLocalSocket  string
+	BridgeRemoteSocket string
 }
 
 // ResumeOpts attaches with optional auto-reconnect (default on).
@@ -130,11 +132,23 @@ func (s *SessionService) ResumeOpts(ctx context.Context, persistName, cwd string
 	if err != nil {
 		return err
 	}
+	if opts.BridgeLocalSocket != "" && opts.BridgeRemoteSocket != "" {
+		if forwarder, ok := t.(ports.ReverseUnixForwarder); ok {
+			forwarder.SetReverseUnixForward(opts.BridgeRemoteSocket, opts.BridgeLocalSocket)
+		}
+	}
 	// Rehydrate live local record when reconnecting a disconnect.
 	if presence == PresenceDisconnected {
 		now := time.Now().UTC()
+		resumeID := ""
+		if e, lookupErr := LookupResume(connPersist); lookupErr == nil {
+			resumeID = e.SessionID
+		}
+		if resumeID == "" {
+			resumeID = newID("sess")
+		}
 		sess := &Session{
-			ID:        newID("sess"),
+			ID:        resumeID,
 			HostID:    connHost,
 			RemoteCWD: connRemote,
 			Persist:   connHandle,

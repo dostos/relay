@@ -38,10 +38,11 @@ type GCHostResult struct {
 
 // GCReport is the whole-sweep summary (terse by design — token-efficient output).
 type GCReport struct {
-	DryRun           bool           `json:"dry_run"`
-	Hosts            []GCHostResult `json:"hosts"`
-	PaneFilesRemoved int            `json:"pane_files_removed"`
-	TombstonesPruned int            `json:"tombstones_pruned"`
+	DryRun             bool           `json:"dry_run"`
+	Hosts              []GCHostResult `json:"hosts"`
+	PaneFilesRemoved   int            `json:"pane_files_removed"`
+	VizBindingsRemoved int            `json:"viz_bindings_removed"`
+	TombstonesPruned   int            `json:"tombstones_pruned"`
 }
 
 type channelStat struct {
@@ -68,6 +69,11 @@ func (m *MaintenanceService) GC(ctx context.Context, hosts []string, channelTTL 
 			for _, e := range entries {
 				if e.Presence == PresenceCleaned {
 					report.PaneFilesRemoved += RemovePaneBindingsForPersist(e.PersistName)
+					if cleaner, ok := m.Viz.(interface {
+						ClosePersist(context.Context, string) int
+					}); ok {
+						report.VizBindingsRemoved += cleaner.ClosePersist(ctx, e.PersistName)
+					}
 				}
 			}
 		}
@@ -153,7 +159,7 @@ func (m *MaintenanceService) gcHost(ctx context.Context, host string, channelTTL
 		if dryRun {
 			continue
 		}
-		if m.Viz != nil && m.Viz.Available(ctx) {
+		if m.Viz != nil {
 			_ = m.Viz.Close(ctx, s.ID)
 		}
 		_ = m.Reg.DeleteSession(s.ID)

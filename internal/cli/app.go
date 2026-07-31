@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dostos/relay/internal/bridge"
 	"github.com/dostos/relay/internal/coord/sshcoord"
 	"github.com/dostos/relay/internal/core"
 	"github.com/dostos/relay/internal/persist/tmux"
@@ -142,10 +143,134 @@ func rejectUnknownFlag(arg string) error {
 	return fmt.Errorf("unexpected argument %q", arg)
 }
 
+func (a *App) forwardThroughDesktopBridge(args []string) (int, bool) {
+	sock := strings.TrimSpace(os.Getenv(bridge.SocketEnv))
+	if sock == "" || os.Getenv(bridge.LocalInvokeEnv) == "1" {
+		return 0, false
+	}
+	source := bridge.Source{
+		SessionID:   os.Getenv("RELAY_SESSION_ID"),
+		HostID:      os.Getenv("RELAY_SESSION_HOST"),
+		PersistName: os.Getenv("RELAY_SESSION_NAME"),
+		Token:       os.Getenv(bridge.SourceTokenEnv),
+	}
+	resp, err := (bridge.Client{SockPath: sock}).Invoke(context.Background(), args, source)
+	if err != nil {
+		return a.fail(err), true
+	}
+	if resp.Stdout != "" {
+		fmt.Fprint(os.Stdout, resp.Stdout)
+	}
+	if resp.Stderr != "" {
+		fmt.Fprint(os.Stderr, resp.Stderr)
+	}
+	if resp.Error != "" && resp.Stderr == "" {
+		ui.Warn(resp.Error)
+	}
+	return resp.ExitCode, true
+}
+
+func ensureDesktopBridge(ctx context.Context) (string, error) {
+	sock := core.DesktopBridgeSocketPath()
+	client := bridge.Client{SockPath: sock}
+	if client.Ping(ctx) == nil {
+		return sock, nil
+	}
+	relayBin := core.RelayBin()
+	relaydBin := filepath.Join(filepath.Dir(relayBin), "relayd")
+	if _, err := os.Stat(relaydBin); err != nil {
+		var lookupErr error
+		relaydBin, lookupErr = exec.LookPath("relayd")
+		if lookupErr != nil {
+			return "", fmt.Errorf("relayd not installed beside relay")
+		}
+	}
+	if err := core.EnsureStateDirs(); err != nil {
+		return "", err
+	}
+	logPath := filepath.Join(core.StateRoot(), "desktop-bridge.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.Command(relaydBin, "bridge", "--relay-bin", relayBin)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		return "", err
+	}
+	_ = cmd.Process.Release()
+	_ = logFile.Close()
+	for i := 0; i < 40; i++ {
+		if client.Ping(ctx) == nil {
+			return sock, nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return "", fmt.Errorf("desktop relay bridge did not start; see %s", logPath)
+}
+
+func sourceFromEnvironment(reg *core.Registry) (sessionID, hostID, persistName, repoRef string) {
+	sessionID = strings.TrimSpace(os.Getenv(bridge.SourceSessionEnv))
+	hostID = strings.TrimSpace(os.Getenv(bridge.SourceHostEnv))
+	persistName = strings.TrimSpace(os.Getenv(bridge.SourcePersistEnv))
+	if sessionID != "" && reg != nil {
+		if sess, err := reg.GetSession(sessionID); err == nil {
+			// The authenticated session id selects the local record. Do not trust
+			// host/name snapshots supplied by the remote process for lineage.
+			hostID = sess.HostID
+			persistName = sess.Persist.Name
+			repoRef = sess.RepoRef
+		}
+	}
+	return
+}
+
+func (a *App) applyHandoffSource(opts *core.HandoffOpts) string {
+	if opts == nil {
+		return ""
+	}
+	sessionID, hostID, persistName, repoRef := sourceFromEnvironment(a.Reg)
+	opts.SourceSessionID = sessionID
+	opts.SourceHostID = hostID
+	opts.SourcePersistName = persistName
+	if opts.Workspace == "" || opts.Pane == "" {
+		workspace, pane := a.locationForSource(sessionID)
+		if opts.Workspace == "" {
+			opts.Workspace = workspace
+		}
+		if opts.Pane == "" {
+			opts.Pane = pane
+		}
+	}
+	return repoRef
+}
+
+func (a *App) locationForSource(sessionID string) (workspace, pane string) {
+	if sessionID == "" || a.Reg == nil || a.Viz == nil {
+		return "", ""
+	}
+	sess, err := a.Reg.GetSession(sessionID)
+	if err != nil || sess.VizSurfaceRef == "" {
+		return "", ""
+	}
+	if resolver, ok := a.Viz.(interface {
+		LocationForSurface(context.Context, string) (string, string)
+	}); ok {
+		return resolver.LocationForSurface(context.Background(), sess.VizSurfaceRef)
+	}
+	return "", ""
+}
+
 // Run dispatches argv (without program name).
 func (a *App) Run(args []string) int {
 	if len(args) == 0 {
 		return a.cmdHelp()
+	}
+	if code, forwarded := a.forwardThroughDesktopBridge(args); forwarded {
+		return code
 	}
 	// global flags (only --json is global; other dashed tokens belong to subcommands)
 	filtered := make([]string, 0, len(args))
@@ -202,7 +327,12 @@ func (a *App) Run(args []string) int {
 		return a.cmdInstallCmuxRestore()
 	case "doctor":
 		return a.cmdDoctor(ctx, filtered[1:])
+	case "history":
+		return a.cmdHistory(filtered[1:])
 	default:
+		if len(filtered) == 2 {
+			return a.cmdNamed(ctx, filtered[0], filtered[1])
+		}
 		ui.Warn(fmt.Sprintf("unknown command %q", filtered[0]))
 		return a.cmdHelp()
 	}
@@ -213,12 +343,13 @@ func (a *App) cmdHelp() int {
 
 Usage:
   relay [--json] <command> ...
+  relay HOST NAME                    Open/create named tmux on HOST in this pane
 
 New machine (ssh config → discover → init):
   relay targets                       List Host aliases from ~/.ssh/config (+ Include)
   relay host discover -H HOST         Inventory + proposed host.yaml (no writes)
   relay host init -H HOST [--apply] [--force]
-                                      Bootstrap relayd; write proposal with --apply
+                                      Install relay + relayd; write proposal with --apply
 
 Host profiles (authoritative on each remote ~/.config/relay/host.yaml):
   relay host show -H HOST
@@ -252,15 +383,16 @@ Sessions (explicit id; no guesswork):
   relay session sensors ID [--silence SEC]   Reinstall quiet idle/exit hooks
 
 Handoffs (goal-based / long-running):
-  relay handoff -H HOST --agent NAME --goal TEXT [--repo DIR] [--workspace WS] [--no-pane]
+  relay handoff -H HOST --agent NAME --goal TEXT [--repo DIR] [--workspace WS] [--pane PANE] [--no-pane]
   relay handoff -H HOST --cmd "make train" [--no-pane]
   relay handoff list
   relay handoff get ID
   relay handoff finalize ID [--outcome done|failed|abandoned] [--keep-session]
   relay handoff reconcile
+  relay history                      Show durable relay/handoff lineage
 
 Agent surface (token-efficient; always JSON; NO poll loops):
-  relay agent start -H HOST --agent NAME --goal TEXT | --cmd CMD [--workspace WS] [--no-pane]
+  relay agent start -H HOST --agent NAME --goal TEXT | --cmd CMD [--workspace WS] [--pane PANE] [--no-pane]
   relay agent pick -H HOST                                     # suggest agent by weekly headroom (advisory)
   relay agent wait --handoff ID [--from SEQ] [--timeout SEC]   # blocks once
   relay agent send --handoff ID -- TEXT
@@ -287,8 +419,10 @@ Events (via always-on relayd on the host):
   relay events emit --handoff ID --kind KIND
 
 Visualization (optional cmux adapter):
+  relay pane list                     Session-keyed pane, workspace, parent, and liveness inventory
   relay viz present SESSION_ID [--workspace WS] [--pane PANE] [--tab]
-                                      Default: side-by-side split. --tab stacks in PANE.
+                                      First child splits right; later siblings stack downward.
+                                      --tab stacks in PANE; explicit placement overrides defaults.
   relay viz brand                     Refresh ◆ RELAY · <project> tabs + workspace pills
   relay viz focus SESSION_ID
   relay viz close SESSION_ID          Retire just the pane (session destroy does this automatically)
@@ -663,6 +797,97 @@ func findGitRoot(dir string) (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
+func (a *App) cmdNamed(ctx context.Context, host, name string) int {
+	if strings.HasPrefix(host, "-") || strings.HasPrefix(name, "-") {
+		return a.fail(fmt.Errorf("usage: relay HOST NAME"))
+	}
+	sourceID, sourceHost, sourcePersist, sourceRepo := sourceFromEnvironment(a.Reg)
+	opts := core.CreateOpts{
+		HostID:            host,
+		Name:              name,
+		Labels:            map[string]string{"role": "interactive", "agent": "human"},
+		SourceSessionID:   sourceID,
+		SourceHostID:      sourceHost,
+		SourcePersistName: sourcePersist,
+	}
+	if sourceRepo != "" {
+		opts.RepoRef = sourceRepo
+	} else if root, err := findGitRoot(""); err == nil {
+		opts.RepoRef = root
+	} else {
+		opts.RemoteCWD = "~"
+	}
+	sess, created, err := a.Sessions.OpenNamed(ctx, opts)
+	if err != nil {
+		if errors.Is(err, core.ErrMissingProfile) {
+			return a.failNext(err, map[string]any{
+				"reason": "missing_host_profile", "host_id": host,
+				"next": "host init", "argv": []string{"relay", "host", "init", "-H", host, "--apply"},
+			})
+		}
+		return a.fail(err)
+	}
+	if sourceID != "" && sourceID != sess.ID && !created {
+		_ = core.AppendRelayEdge(sourceID, sess.ID)
+	}
+	if sess.Labels["adopted"] == "existing" {
+		ui.Warn("existing tmux adopted without relay bridge identity; use a new NAME for remote-to-remote relay commands")
+	}
+	launch := core.ResumeLaunchCmd(sess.Persist.Name)
+	if os.Getenv(bridge.LocalInvokeEnv) == "1" {
+		if a.Viz == nil || !a.Viz.Available(ctx) {
+			return a.fail(fmt.Errorf("cmux unavailable on desktop bridge"))
+		}
+		workspace, pane := a.locationForSource(sourceID)
+		ref, err := a.Viz.Present(ctx, sess.ID, launch, ports.Layout{
+			Mode: "remote", Workspace: workspace, Pane: pane, SourceSessionID: sourceID,
+		})
+		if err != nil {
+			return a.fail(err)
+		}
+		sess.VizSurfaceRef = ref
+		_ = a.Reg.PutSession(sess)
+		core.RememberResume(sess)
+		core.RememberPane(ref, sess, true)
+		_ = a.applySessionChrome(ctx, sess)
+		_ = a.brandAll(ctx)
+		a.JSON = true
+		return a.errOut(a.out(map[string]any{
+			"ok": true, "created": created, "session": sess, "surface": ref,
+			"source_session_id": sourceID,
+		}))
+	}
+	if binder, ok := a.Viz.(interface {
+		BindCurrent(context.Context, string, string) (string, error)
+	}); ok && a.Viz.Available(ctx) {
+		if ref, bindErr := binder.BindCurrent(ctx, sess.ID, launch); bindErr == nil {
+			sess.VizSurfaceRef = ref
+			_ = a.Reg.PutSession(sess)
+			core.RememberPane(ref, sess, true)
+		} else if bindErr != nil {
+			ui.Warn("cmux current-pane binding failed: " + bindErr.Error())
+		}
+	}
+	_ = a.applySessionChrome(ctx, sess)
+	_ = a.brandAll(ctx)
+	return a.cmdResume(ctx, []string{"--session", sess.Persist.Name})
+}
+
+func (a *App) cmdHistory(args []string) int {
+	if err := requireNoExtra(args); err != nil {
+		return a.fail(err)
+	}
+	graph, err := core.LoadHistory()
+	if err != nil {
+		return a.fail(err)
+	}
+	if a.JSON {
+		return a.errOut(a.out(map[string]any{"ok": true, "history": graph}))
+	}
+	fmt.Print(core.FormatHistory(graph))
+	return 0
+}
+
 func (a *App) cmdSession(ctx context.Context, args []string) int {
 	if len(args) == 0 {
 		return a.fail(fmt.Errorf("session subcommand required"))
@@ -1010,6 +1235,13 @@ func (a *App) cmdHandoff(ctx context.Context, args []string) int {
 			i++
 			if i < len(rest) {
 				opts.Workspace = rest[i]
+				opts.ExplicitPlace = true
+			}
+		case "--pane":
+			i++
+			if i < len(rest) {
+				opts.Pane = rest[i]
+				opts.ExplicitPlace = true
 			}
 		case "--no-pane":
 			opts.NoPane = true
@@ -1022,8 +1254,11 @@ func (a *App) cmdHandoff(ctx context.Context, args []string) int {
 			return a.fail(rejectUnknownFlag(rest[i]))
 		}
 	}
+	sourceRepo := a.applyHandoffSource(&opts)
 	if opts.RepoRef == "" && opts.RemoteCWD == "" {
-		if root, err := findGitRoot(""); err == nil {
+		if sourceRepo != "" {
+			opts.RepoRef = sourceRepo
+		} else if root, err := findGitRoot(""); err == nil {
 			opts.RepoRef = root
 		}
 	}
@@ -1391,6 +1626,13 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 				i++
 				if i < len(rest) {
 					opts.Workspace = rest[i]
+					opts.ExplicitPlace = true
+				}
+			case "--pane":
+				i++
+				if i < len(rest) {
+					opts.Pane = rest[i]
+					opts.ExplicitPlace = true
 				}
 			case "--container":
 				i++
@@ -1408,8 +1650,11 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 				return a.fail(rejectUnknownFlag(rest[i]))
 			}
 		}
+		sourceRepo := a.applyHandoffSource(&opts)
 		if opts.RepoRef == "" && opts.RemoteCWD == "" {
-			if root, err := findGitRoot(""); err == nil {
+			if sourceRepo != "" {
+				opts.RepoRef = sourceRepo
+			} else if root, err := findGitRoot(""); err == nil {
 				opts.RepoRef = root
 			}
 		}
@@ -1586,13 +1831,31 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 }
 
 func (a *App) cmdViz(ctx context.Context, args []string) int {
-	if a.Viz == nil || !a.Viz.Available(ctx) {
-		return a.fail(fmt.Errorf("viz adapter unavailable (is cmux running?)"))
-	}
 	if len(args) == 0 {
 		return a.fail(fmt.Errorf("viz subcommand required"))
 	}
+	if a.Viz == nil {
+		return a.fail(fmt.Errorf("viz adapter unavailable"))
+	}
+	// Pane inventory remains useful when cmux is stopped: persisted bindings
+	// are reported as disconnected instead of hidden.
+	if args[0] != "list" && !a.Viz.Available(ctx) {
+		return a.fail(fmt.Errorf("viz adapter unavailable (is cmux running?)"))
+	}
 	switch args[0] {
+	case "list":
+		manager, ok := a.Viz.(interface {
+			ManagedPanes(context.Context) ([]cmux.ManagedPane, error)
+		})
+		if !ok {
+			return a.fail(fmt.Errorf("viz adapter does not expose managed panes"))
+		}
+		panes, err := manager.ManagedPanes(ctx)
+		if err != nil {
+			return a.fail(err)
+		}
+		a.JSON = true
+		return a.errOut(a.out(map[string]any{"ok": true, "panes": panes}))
 	case "layout":
 		out, err := a.Viz.Layout(ctx)
 		if err != nil {
@@ -1813,6 +2076,39 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 		}
 		ui.Note(fmt.Sprintf("pane %s → %s", surface, session))
 	}
+	if opts.Surface == "" {
+		opts.Surface, _ = core.CurrentSurface()
+	}
+	if opts.Surface != "" {
+		if sess, findErr := a.Reg.FindByPersistName(session, cwd); findErr == nil {
+			if binder, ok := a.Viz.(interface {
+				BindSurface(context.Context, string, string, string) (string, error)
+			}); ok && a.Viz.Available(ctx) {
+				if ref, bindErr := binder.BindSurface(ctx, sess.ID, core.ResumeLaunchCmd(sess.Persist.Name), opts.Surface); bindErr == nil {
+					opts.Surface = ref
+				} else {
+					ui.Warn("cmux pane rebind failed: " + bindErr.Error())
+				}
+			}
+			sess.VizSurfaceRef = opts.Surface
+			_ = a.Reg.PutSession(sess)
+			core.RememberPane(opts.Surface, sess, true)
+		}
+	}
+	bridgeSessionID := ""
+	if sess, findErr := a.Reg.FindByPersistName(session, cwd); findErr == nil {
+		bridgeSessionID = sess.ID
+	} else if entry, lookupErr := core.LookupResume(session); lookupErr == nil {
+		bridgeSessionID = entry.SessionID
+	}
+	if bridgeSessionID != "" {
+		localSocket, bridgeErr := ensureDesktopBridge(ctx)
+		if bridgeErr != nil {
+			return a.fail(bridgeErr)
+		}
+		opts.BridgeLocalSocket = localSocket
+		opts.BridgeRemoteSocket = core.BridgeRemoteSocket(bridgeSessionID)
+	}
 	if err := a.Sessions.ResumeOpts(ctx, session, cwd, opts); err != nil {
 		msg := core.FormatResumeError(err)
 		ui.Warn(msg)
@@ -1886,6 +2182,13 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 		detail = "available"
 	}
 	checks = append(checks, check{"cmux_viz", cmuxOK, detail})
+	bridgeDetail := "on demand"
+	bridgeOK := true
+	if err := (bridge.Client{SockPath: core.DesktopBridgeSocketPath()}).Ping(ctx); err == nil {
+		bridgeOK = true
+		bridgeDetail = "running"
+	}
+	checks = append(checks, check{"desktop_bridge", bridgeOK, bridgeDetail})
 	checks = append(checks, check{"state_dir", true, core.StateRoot()})
 	if host == "" {
 		checks = append(checks, check{"coord", false, "pass -H HOST to probe remote relayd"})

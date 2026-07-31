@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -16,17 +15,18 @@ import (
 
 // BootstrapResult summarizes a quiet single-host relayd install.
 type BootstrapResult struct {
-	HostID   string `json:"host_id"`
-	Arch     string `json:"arch"`
-	Binary   string `json:"binary"`
-	Unit     string `json:"unit,omitempty"`
-	Started  bool   `json:"started"`
-	PingOK   bool   `json:"ping_ok"`
-	Version  string `json:"version,omitempty"`
-	Detail   string `json:"detail,omitempty"`
+	HostID      string `json:"host_id"`
+	Arch        string `json:"arch"`
+	Binary      string `json:"binary"`
+	RelayBinary string `json:"relay_binary,omitempty"`
+	Unit        string `json:"unit,omitempty"`
+	Started     bool   `json:"started"`
+	PingOK      bool   `json:"ping_ok"`
+	Version     string `json:"version,omitempty"`
+	Detail      string `json:"detail,omitempty"`
 }
 
-// BootstrapService installs always-on relayd on one host (IT-safe: single SSH upload).
+// BootstrapService installs relay + always-on relayd on one host.
 type BootstrapService struct {
 	NewTransport TransportFactory
 	// LocalRelayRepo is the checkout containing cmd/relayd (defaults to sibling of cwd or RELAY_REPO).
@@ -55,7 +55,9 @@ func (b *BootstrapService) Bootstrap(ctx context.Context, hostID string) (*Boots
 		return nil, fmt.Errorf("unsupported remote arch %q", remoteArch)
 	}
 
-	// 2) build matching linux binary locally
+	// 2) build matching Linux binaries locally. relayd owns host-local events;
+	// relay is also installed so a named remote pane can ask the desktop bridge
+	// to start the next host in a handoff chain.
 	repo := b.LocalRelayRepo
 	if repo == "" {
 		repo = os.Getenv("RELAY_REPO")
@@ -75,30 +77,47 @@ func (b *BootstrapService) Bootstrap(ctx context.Context, hostID string) (*Boots
 	if repo == "" {
 		return nil, fmt.Errorf("cannot find relay repo (set RELAY_REPO)")
 	}
-	tmp := filepath.Join(os.TempDir(), fmt.Sprintf("relayd-%s-%d", goarch, time.Now().UnixNano()))
-	cmd := exec.CommandContext(ctx, "go", "build", "-o", tmp, "./cmd/relayd")
-	cmd.Dir = repo
-	cmd.Env = append(os.Environ(),
-		"CGO_ENABLED=0",
-		"GOOS=linux",
-		"GOARCH="+goarch,
-	)
-	if runtime.GOOS == "linux" && runtime.GOARCH == goarch {
-		// native build ok
+	tmpBase := filepath.Join(os.TempDir(), fmt.Sprintf("relay-bootstrap-%s-%d", goarch, time.Now().UnixNano()))
+	tmpRelayd := tmpBase + "-relayd"
+	tmpRelay := tmpBase + "-relay"
+	build := func(output, pkg string) error {
+		cmd := exec.CommandContext(ctx, "go", "build", "-o", output, pkg)
+		cmd.Dir = repo
+		cmd.Env = append(os.Environ(),
+			"CGO_ENABLED=0",
+			"GOOS=linux",
+			"GOARCH="+goarch,
+		)
+		if bOut, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("build %s: %w (%s)", pkg, err, string(bOut))
+		}
+		return nil
 	}
-	if bOut, err := cmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("build relayd: %w (%s)", err, string(bOut))
+	if err := build(tmpRelayd, "./cmd/relayd"); err != nil {
+		return nil, err
 	}
-	defer os.Remove(tmp)
+	if err := build(tmpRelay, "./cmd/relay"); err != nil {
+		return nil, err
+	}
+	defer os.Remove(tmpRelayd)
+	defer os.Remove(tmpRelay)
 	out.Binary = "~/.local/bin/relayd"
+	out.RelayBinary = "~/.local/bin/relay"
 
-	// 3) one upload via ssh cat to a temp name (avoids ETXTBSY on running binary)
-	data, err := os.ReadFile(tmp)
+	// 3) upload via SSH cat to temporary names (avoids ETXTBSY on relayd).
+	data, err := os.ReadFile(tmpRelayd)
 	if err != nil {
 		return nil, err
 	}
 	if err := t.WriteFile(ctx, "~/.local/bin/relayd.new", data, "755"); err != nil {
 		return nil, fmt.Errorf("upload: %w", err)
+	}
+	relayData, err := os.ReadFile(tmpRelay)
+	if err != nil {
+		return nil, err
+	}
+	if err := t.WriteFile(ctx, "~/.local/bin/relay.new", relayData, "755"); err != nil {
+		return nil, fmt.Errorf("upload relay: %w", err)
 	}
 
 	// 4) unit + atomic replace + start/restart (still one SSH script)
@@ -126,6 +145,8 @@ RELAYD="$HOME/.local/bin/relayd"
 mkdir -p "$HOME/.local/state/relay/events" "$HOME/.config/systemd/user" "$HOME/.local/bin"
 mv -f "$HOME/.local/bin/relayd.new" "$RELAYD"
 chmod 755 "$RELAYD"
+mv -f "$HOME/.local/bin/relay.new" "$HOME/.local/bin/relay"
+chmod 755 "$HOME/.local/bin/relay"
 if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
   systemctl --user daemon-reload
   systemctl --user enable relayd.service

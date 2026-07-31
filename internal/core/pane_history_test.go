@@ -104,6 +104,19 @@ func TestCurrentSurfaceFromEnv(t *testing.T) {
 	}
 }
 
+func TestSurfaceFromEnvironmentDoesNotIdentify(t *testing.T) {
+	t.Setenv("CMUX_SURFACE_REF", "")
+	t.Setenv("CMUX_SURFACE", "")
+	identifySurface = func() (string, error) {
+		t.Fatal("environment-only lookup must not inspect focused cmux state")
+		return "", nil
+	}
+	t.Cleanup(func() { identifySurface = defaultIdentifySurface })
+	if surface, ok := SurfaceFromEnvironment(); ok || surface != "" {
+		t.Fatalf("surface=%q ok=%v", surface, ok)
+	}
+}
+
 func TestExtractSessionFlag(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{`'/Users/x/relay' resume --session opaquebench-oqb`, "opaquebench-oqb"},

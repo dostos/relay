@@ -19,7 +19,9 @@ type Transport struct {
 	Host string
 	// Stderr overrides the interactive session's stderr (nil → os.Stderr).
 	// Used by resume reconnect to filter ssh disconnect chatter.
-	Stderr io.Writer
+	Stderr              io.Writer
+	reverseRemoteSocket string
+	reverseLocalSocket  string
 }
 
 const maxStreamStderrBytes = 8 * 1024
@@ -30,6 +32,11 @@ func New(host string) *Transport {
 
 // SetStderr implements an optional stderr override for Interactive.
 func (t *Transport) SetStderr(w io.Writer) { t.Stderr = w }
+
+func (t *Transport) SetReverseUnixForward(remoteSocket, localSocket string) {
+	t.reverseRemoteSocket = remoteSocket
+	t.reverseLocalSocket = localSocket
+}
 
 func (t *Transport) ID() string { return t.Host }
 
@@ -207,12 +214,10 @@ func (t *Transport) WriteFile(ctx context.Context, path string, data []byte, mod
 }
 
 func (t *Transport) Interactive(ctx context.Context, command string) error {
-	ctrl, err := controlOpts()
+	args, err := t.interactiveArgs(command)
 	if err != nil {
 		return err
 	}
-	args := append([]string{}, ctrl...)
-	args = append(args, "-t", t.Host, command)
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -222,6 +227,33 @@ func (t *Transport) Interactive(ctx context.Context, command string) error {
 	}
 	cmd.Stderr = stderr
 	return cmd.Run()
+}
+
+func (t *Transport) interactiveArgs(command string) ([]string, error) {
+	var args []string
+	if t.reverseRemoteSocket != "" && t.reverseLocalSocket != "" {
+		// A dedicated connection owns the reverse stream-local forwarding. Using
+		// a shared ControlMaster here would make forward lifetime depend on an
+		// unrelated SSH client and can leave a stale remote socket on reconnect.
+		args = []string{
+			"-o", "ControlMaster=no",
+			"-o", "ControlPath=none",
+			"-o", "ServerAliveInterval=30",
+			"-o", "ServerAliveCountMax=4",
+			"-o", "ExitOnForwardFailure=yes",
+			"-o", "StreamLocalBindUnlink=yes",
+			"-o", "StreamLocalBindMask=0177",
+			"-R", t.reverseRemoteSocket + ":" + t.reverseLocalSocket,
+		}
+	} else {
+		ctrl, err := controlOpts()
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, ctrl...)
+	}
+	args = append(args, "-t", t.Host, command)
+	return args, nil
 }
 
 func (t *Transport) InteractiveCommand(remoteCmd string) string {

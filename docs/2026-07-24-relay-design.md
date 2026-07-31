@@ -45,8 +45,44 @@ Local cache: `~/.local/state/relay/hosts/<host>.json` (read-through; remote wins
 | remote `~/.local/state/relay/events/<tmux-name>.jsonl` | event log (owned by relayd) |
 | remote `~/.local/state/relay/relayd.sock` | relayd Unix socket (0600; no TCP) |
 | remote `~/.config/relay/host.yaml` | host profile |
+| local `~/.local/state/relay/desktop-bridge.sock` | remote relay → desktop control/ cmux bridge (0600) |
+| local `~/.local/state/relay/viz/*.json` | authoritative session → surface/workspace/pane/parent binding |
+| local handoff ledger | session nodes and source → target lineage edges |
 
-Bootstrap: `relay host bootstrap -H HOST` installs `~/.local/bin/relayd` + user systemd unit (or nohup).
+Bootstrap: `relay host bootstrap -H HOST` installs `~/.local/bin/relay`,
+`~/.local/bin/relayd`, and the relayd user systemd unit (or nohup).
+
+## Named pane bridge
+
+`relay HOST NAME` creates or adopts `NAME`, binds the current cmux surface,
+and attaches through a dedicated reconnecting SSH connection. That connection
+reverse-forwards the remote session socket to the local desktop bridge. Remote
+relay invocations carry the current session identity and are serialized by the
+desktop bridge before they touch the local registry or cmux. No component
+listens on TCP and remotes never call cmux directly.
+
+Every created session writes a `session_start` ledger record. Cross-host
+requests add `source_session_id`; handoffs also add `created_by_handoff_id`.
+`relay history` reconstructs the durable source → target graph from that
+append-only data.
+
+## Pane ownership and placement
+
+The desktop bridge owns one versioned cmux binding per relay session. A binding
+records the exact surface, pane, workspace, attach command, placement mode, and
+source session. Session IDs are authoritative; titles/checkpoints are only a
+legacy recovery aid.
+
+For an automatic child handoff, the source session's recorded pane is the
+anchor even if cmux focus moved elsewhere. Its first child uses `new-split
+right`, creating a right-hand column. Later live children with the same source
+use `new-split down` from the newest sibling. Explicit `--workspace` or
+`--pane` values opt out of this default placement.
+
+`relay resume` rebinds a restored surface before attaching, replacing obsolete
+surface references. `relay viz save` reconciles bindings across all cmux
+workspaces, and `relay pane list` reports live/disconnected ownership without
+requiring cmux to be running.
 
 ## New-machine onboarding
 

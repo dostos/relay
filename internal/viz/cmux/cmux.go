@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dostos/relay/internal/core"
 	"github.com/dostos/relay/internal/ports"
@@ -27,9 +28,36 @@ type Viz struct {
 }
 
 type binding struct {
-	Surface string `json:"surface"`
-	Pane    string `json:"pane,omitempty"`
-	Attach  string `json:"attach_cmd,omitempty"`
+	V               int       `json:"v"`
+	SessionID       string    `json:"session_id"`
+	SourceSessionID string    `json:"source_session_id,omitempty"`
+	Surface         string    `json:"surface"`
+	Pane            string    `json:"pane,omitempty"`
+	Workspace       string    `json:"workspace,omitempty"`
+	Attach          string    `json:"attach_cmd,omitempty"`
+	Mode            string    `json:"mode,omitempty"` // current | split | tab
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+// ManagedPane is the inspectable desktop-owned pane record returned by
+// `relay pane list`.
+type ManagedPane struct {
+	SessionID       string    `json:"session_id"`
+	SourceSessionID string    `json:"source_session_id,omitempty"`
+	PersistName     string    `json:"persist_name,omitempty"`
+	Surface         string    `json:"surface"`
+	Pane            string    `json:"pane,omitempty"`
+	Workspace       string    `json:"workspace,omitempty"`
+	Mode            string    `json:"mode,omitempty"`
+	State           string    `json:"state"` // live | disconnected
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+type surfaceLocation struct {
+	Workspace string
+	Pane      string
 }
 
 func New() *Viz {
@@ -73,12 +101,20 @@ func (v *Viz) Present(ctx context.Context, sessionID, attachCmd string, layout p
 	// `viz present` repeatedly (e.g. to keep a handoff visible) without piling
 	// up panes.
 	if b, err := v.lookup(sessionID); err == nil && b.Surface != "" {
-		if v.workspaceOfSurface(ctx, b.Surface) != "" {
+		if loc := v.locationOfSurface(ctx, b.Surface); loc.Workspace != "" {
+			b.SessionID = sessionID
+			b.Workspace = loc.Workspace
+			b.Pane = loc.Pane
+			b.Attach = attachCmd
+			if b.SourceSessionID == "" {
+				b.SourceSessionID = layout.SourceSessionID
+			}
+			b.UpdatedAt = time.Now().UTC()
+			_ = v.persistBinding(sessionID, b)
 			_ = v.focusSurface(ctx, b)
 			_ = v.brandSurface(ctx, b.Surface, sessName)
 			if sessName != "" {
-				cwd, _ := os.Getwd()
-				core.RememberPanePersist(b.Surface, sessName, "", "", cwd, true)
+				v.rememberPane(sessionID, b.Surface, sessName)
 			}
 			return b.Surface, nil
 		}
@@ -95,6 +131,9 @@ func (v *Viz) Present(ctx context.Context, sessionID, attachCmd string, layout p
 	// caller first discovers the active workspace ref itself.
 	if layout.Workspace == "" {
 		layout.Workspace = v.activeWorkspace(ctx)
+	}
+	if layout.SourceSessionID != "" {
+		layout = childLayout(layout, v.latestLiveChild(ctx, layout.SourceSessionID))
 	}
 
 	before, _ := v.listSurfaces(ctx)
@@ -127,15 +166,106 @@ func (v *Viz) Present(ctx context.Context, sessionID, attachCmd string, layout p
 			"--", attachCmd,
 		)
 		_ = v.brandSurface(ctx, surface, sessName)
-		cwd, _ := os.Getwd()
-		core.RememberPanePersist(surface, sessName, "", "", cwd, true)
+		v.rememberPane(sessionID, surface, sessName)
 	}
-	b := binding{Surface: surface, Pane: pane, Attach: attachCmd}
+	loc := v.locationOfSurface(ctx, surface)
+	if loc.Pane != "" {
+		pane = loc.Pane
+	}
+	b := binding{
+		V:               2,
+		SessionID:       sessionID,
+		SourceSessionID: layout.SourceSessionID,
+		Surface:         surface,
+		Pane:            pane,
+		Workspace:       firstNonEmpty(loc.Workspace, layout.Workspace),
+		Attach:          attachCmd,
+		Mode:            bindingMode(layout),
+		CreatedAt:       time.Now().UTC(),
+		UpdatedAt:       time.Now().UTC(),
+	}
 	v.mu.Lock()
 	v.bindings[sessionID] = b
 	v.mu.Unlock()
 	_ = v.persistBinding(sessionID, b)
 	return surface, nil
+}
+
+// BindCurrent turns the caller's existing cmux surface into the visual home
+// for a relay session. Unlike Present it does not create a split.
+func (v *Viz) BindCurrent(ctx context.Context, sessionID, attachCmd string) (string, error) {
+	surface, err := core.CurrentSurface()
+	if err != nil {
+		return "", err
+	}
+	return v.BindSurface(ctx, sessionID, attachCmd, surface)
+}
+
+// BindSurface makes an existing cmux surface authoritative for a relay
+// session. It is used both when a named session claims the caller's pane and
+// when cmux restores a pane under a new surface reference.
+func (v *Viz) BindSurface(ctx context.Context, sessionID, attachCmd, surface string) (string, error) {
+	surface = strings.TrimSpace(surface)
+	if surface == "" {
+		return "", fmt.Errorf("surface required")
+	}
+	sessName := extractSessionFlag(attachCmd)
+	if sessName == "" {
+		return "", fmt.Errorf("attach command has no --session")
+	}
+	title := brandTitle(sessName)
+	if _, err := v.run(ctx, "surface", "resume", "set",
+		"--surface", surface,
+		"--kind", "relay",
+		"--name", title,
+		"--checkpoint", sessName,
+		"--", attachCmd,
+	); err != nil {
+		return "", err
+	}
+	_ = v.brandSurface(ctx, surface, sessName)
+	loc := v.locationOfSurface(ctx, surface)
+	b := binding{
+		V:         2,
+		SessionID: sessionID,
+		Surface:   surface,
+		Pane:      loc.Pane,
+		Workspace: loc.Workspace,
+		Attach:    attachCmd,
+		Mode:      "current",
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	if old, err := v.lookup(sessionID); err == nil {
+		b.SourceSessionID = old.SourceSessionID
+		if !old.CreatedAt.IsZero() {
+			b.CreatedAt = old.CreatedAt
+		}
+		if old.Mode != "" {
+			b.Mode = old.Mode
+		}
+	}
+	v.mu.Lock()
+	v.bindings[sessionID] = b
+	v.mu.Unlock()
+	if err := v.persistBinding(sessionID, b); err != nil {
+		return "", err
+	}
+	v.rememberPane(sessionID, surface, sessName)
+	return surface, nil
+}
+
+// WorkspaceForSurface resolves the cmux workspace that owns a recorded relay
+// surface. It lets desktop-bridge requests route beside their true origin
+// rather than whichever workspace the long-lived daemon last inherited.
+func (v *Viz) WorkspaceForSurface(ctx context.Context, surface string) string {
+	return v.workspaceOfSurface(ctx, surface)
+}
+
+// LocationForSurface resolves the workspace and pane owning a surface.
+func (v *Viz) LocationForSurface(ctx context.Context, surface string) (string, string) {
+	loc := v.locationOfSurface(ctx, surface)
+	return loc.Workspace, loc.Pane
 }
 
 func (v *Viz) openSurface(ctx context.Context, layout ports.Layout) (surface, pane string, err error) {
@@ -152,7 +282,10 @@ func (v *Viz) openSurface(ctx context.Context, layout ports.Layout) (surface, pa
 		surface, pane = parseNewSurfaceRefs(out, layout.Pane)
 		return surface, pane, nil
 	}
-	dir := "right"
+	dir := layout.SplitDirection
+	if dir == "" {
+		dir = "right"
+	}
 	args := []string{"new-split", dir, "--focus", "true"}
 	if layout.Workspace != "" {
 		args = append(args, "--workspace", layout.Workspace)
@@ -289,7 +422,7 @@ func (v *Viz) BrandLabels(ctx context.Context, labels map[string]string) error {
 }
 
 func (v *Viz) relayProjectsInWorkspace(ctx context.Context, workspace string) []string {
-	out, err := v.run(ctx, "tree", "--json")
+	out, err := v.run(ctx, "tree", "--all", "--json")
 	if err != nil {
 		return nil
 	}
@@ -330,17 +463,35 @@ func (v *Viz) relayProjectsInWorkspace(ctx context.Context, workspace string) []
 }
 
 func (v *Viz) workspaceOfSurface(ctx context.Context, surface string) string {
+	return v.locationOfSurface(ctx, surface).Workspace
+}
+
+func (v *Viz) locationOfSurface(ctx context.Context, surface string) surfaceLocation {
+	return v.surfaceLocations(ctx)[surface]
+}
+
+func (v *Viz) surfaceLocations(ctx context.Context) map[string]surfaceLocation {
 	// --all so a surface is resolvable regardless of which window is focused;
 	// plain `tree --json` only reports the current window.
 	out, err := v.run(ctx, "tree", "--all", "--json")
 	if err != nil {
-		return ""
+		return map[string]surfaceLocation{}
 	}
+	return parseSurfaceLocations([]byte(out))
+}
+
+func parseSurfaceLocation(out []byte, surface string) surfaceLocation {
+	return parseSurfaceLocations(out)[surface]
+}
+
+func parseSurfaceLocations(out []byte) map[string]surfaceLocation {
+	locations := map[string]surfaceLocation{}
 	var root struct {
 		Windows []struct {
 			Workspaces []struct {
 				Ref   string `json:"ref"`
 				Panes []struct {
+					Ref      string `json:"ref"`
 					Surfaces []struct {
 						Ref string `json:"ref"`
 					} `json:"surfaces"`
@@ -348,21 +499,110 @@ func (v *Viz) workspaceOfSurface(ctx context.Context, surface string) string {
 			} `json:"workspaces"`
 		} `json:"windows"`
 	}
-	if json.Unmarshal([]byte(out), &root) != nil {
-		return ""
+	if json.Unmarshal(out, &root) != nil {
+		return locations
 	}
 	for _, w := range root.Windows {
 		for _, ws := range w.Workspaces {
 			for _, p := range ws.Panes {
 				for _, s := range p.Surfaces {
-					if s.Ref == surface {
-						return ws.Ref
+					if s.Ref != "" {
+						locations[s.Ref] = surfaceLocation{Workspace: ws.Ref, Pane: p.Ref}
 					}
 				}
 			}
 		}
 	}
+	return locations
+}
+
+func bindingMode(layout ports.Layout) string {
+	if layout.Tab {
+		return "tab"
+	}
+	return "split"
+}
+
+func childLayout(layout ports.Layout, sibling binding) ports.Layout {
+	if layout.SourceSessionID == "" || layout.ExplicitPlace || layout.Tab {
+		return layout
+	}
+	layout.SplitDirection = "right"
+	if sibling.Pane != "" {
+		layout.Workspace = sibling.Workspace
+		layout.Pane = sibling.Pane
+		layout.SplitDirection = "down"
+	}
+	return layout
+}
+
+// latestLiveChild returns the newest live sibling in a parent's child stack.
+// The first child splits right from the parent; each later child splits down
+// from this anchor, producing a stable right-hand column.
+func (v *Viz) latestLiveChild(ctx context.Context, sourceSessionID string) binding {
+	dir := filepath.Join(core.StateRoot(), "viz")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return binding{}
+	}
+	locations := v.surfaceLocations(ctx)
+	var latest binding
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		raw, readErr := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if readErr != nil {
+			continue
+		}
+		var candidate binding
+		if json.Unmarshal(raw, &candidate) != nil || candidate.SourceSessionID != sourceSessionID {
+			continue
+		}
+		if info, infoErr := entry.Info(); infoErr == nil {
+			if candidate.CreatedAt.IsZero() {
+				candidate.CreatedAt = info.ModTime().UTC()
+			}
+			if candidate.UpdatedAt.IsZero() {
+				candidate.UpdatedAt = candidate.CreatedAt
+			}
+		}
+		loc := locations[candidate.Surface]
+		if loc.Pane == "" {
+			continue
+		}
+		candidate.Workspace, candidate.Pane = loc.Workspace, loc.Pane
+		candidateTime := candidate.CreatedAt
+		if candidateTime.IsZero() {
+			candidateTime = candidate.UpdatedAt
+		}
+		latestTime := latest.CreatedAt
+		if latestTime.IsZero() {
+			latestTime = latest.UpdatedAt
+		}
+		if latest.Pane == "" || candidateTime.After(latestTime) {
+			latest = candidate
+		}
+	}
+	return latest
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
 	return ""
+}
+
+func (v *Viz) rememberPane(sessionID, surface, persistName string) {
+	if sess, err := (&core.Registry{}).GetSession(sessionID); err == nil {
+		core.RememberPane(surface, sess, true)
+		return
+	}
+	cwd, _ := os.Getwd()
+	core.RememberPanePersist(surface, persistName, "", "", cwd, true)
 }
 
 func extractSessionFlag(cmd string) string {
@@ -428,6 +668,40 @@ func (v *Viz) Close(ctx context.Context, sessionID string) error {
 		core.RemovePaneBindingsForPersist(persist)
 	}
 	return nil
+}
+
+// ClosePersist retires every session binding whose attach command names the
+// cleaned tmux session. It works even when cmux is stopped, so local ownership
+// state cannot resurrect an intentionally removed remote later.
+func (v *Viz) ClosePersist(ctx context.Context, persistName string) int {
+	if persistName == "" {
+		return 0
+	}
+	dir := filepath.Join(core.StateRoot(), "viz")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	removed := 0
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		raw, readErr := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if readErr != nil {
+			continue
+		}
+		var b binding
+		if json.Unmarshal(raw, &b) != nil || extractSessionFlag(b.Attach) != persistName {
+			continue
+		}
+		if b.SessionID == "" {
+			b.SessionID = strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
+		}
+		_ = v.Close(ctx, b.SessionID)
+		removed++
+	}
+	return removed
 }
 
 // closeSurface closes one surface scoped to its own workspace (cmux short refs
@@ -527,7 +801,27 @@ func (v *Viz) SaveRestorable(ctx context.Context) (int, error) {
 			if cwd == "" {
 				cwd, _ = os.Getwd()
 			}
-			core.RememberPanePersist(ref, name, "", "", cwd, true)
+			if sess, findErr := (&core.Registry{}).FindByPersistName(name, cwd); findErr == nil {
+				core.RememberPane(ref, sess, true)
+				loc := v.locationOfSurface(ctx, ref)
+				b := binding{
+					V: 2, SessionID: sess.ID, Surface: ref, Pane: loc.Pane,
+					Workspace: loc.Workspace, Attach: cmd, Mode: "current",
+					CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+				}
+				if old, lookupErr := v.lookup(sess.ID); lookupErr == nil {
+					b.SourceSessionID = old.SourceSessionID
+					if !old.CreatedAt.IsZero() {
+						b.CreatedAt = old.CreatedAt
+					}
+					if old.Mode != "" {
+						b.Mode = old.Mode
+					}
+				}
+				_ = v.persistBinding(sess.ID, b)
+			} else {
+				core.RememberPanePersist(ref, name, "", "", cwd, true)
+			}
 			saved++
 		}
 	}
@@ -586,39 +880,33 @@ func (v *Viz) RestoreSaved(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	live := liveRelaySurfaces(tsv)
-	out, err := v.run(ctx, "list-panes", "--json")
+	surfaces, err := v.listSurfaces(ctx)
 	if err != nil {
 		return 0, err
 	}
-	var pj panesJSON
-	_ = json.Unmarshal([]byte(out), &pj)
 	restored := 0
-	seen := map[string]bool{}
-	for _, p := range pj.Panes {
-		for _, ref := range p.SurfaceRefs {
-			if seen[ref] || live[ref] {
-				continue
-			}
-			seen[ref] = true
-			raw, err := v.run(ctx, "surface", "resume", "get", "--surface", ref, "--json")
-			if err != nil {
-				continue
-			}
-			var wrap struct {
-				ResumeBinding struct {
-					Kind    string `json:"kind"`
-					Command string `json:"command"`
-				} `json:"resume_binding"`
-			}
-			if json.Unmarshal([]byte(raw), &wrap) != nil {
-				continue
-			}
-			if wrap.ResumeBinding.Kind != "relay" || wrap.ResumeBinding.Command == "" {
-				continue
-			}
-			if _, err := v.run(ctx, "send", "--surface", ref, "--", wrap.ResumeBinding.Command+"\n"); err == nil {
-				restored++
-			}
+	for ref := range surfaces {
+		if live[ref] {
+			continue
+		}
+		raw, err := v.run(ctx, "surface", "resume", "get", "--surface", ref, "--json")
+		if err != nil {
+			continue
+		}
+		var wrap struct {
+			ResumeBinding struct {
+				Kind    string `json:"kind"`
+				Command string `json:"command"`
+			} `json:"resume_binding"`
+		}
+		if json.Unmarshal([]byte(raw), &wrap) != nil {
+			continue
+		}
+		if wrap.ResumeBinding.Kind != "relay" || wrap.ResumeBinding.Command == "" {
+			continue
+		}
+		if _, err := v.run(ctx, "send", "--surface", ref, "--", wrap.ResumeBinding.Command+"\n"); err == nil {
+			restored++
 		}
 	}
 	return restored, nil
@@ -697,7 +985,7 @@ type panesJSON struct {
 func (v *Viz) listSurfaces(ctx context.Context) (map[string]string, error) {
 	// Prefer tree: list-panes often returns only the focused workspace's
 	// selected pane, so before/after diffs miss newly split surfaces.
-	out, err := v.run(ctx, "tree", "--json")
+	out, err := v.run(ctx, "tree", "--all", "--json")
 	if err != nil {
 		return v.listSurfacesFromPanes(ctx)
 	}
@@ -790,12 +1078,7 @@ func (v *Viz) focused(ctx context.Context) (surface, pane string, err error) {
 }
 
 func bindPath(sessionID string) string {
-	xdg := os.Getenv("XDG_STATE_HOME")
-	if xdg == "" {
-		home, _ := os.UserHomeDir()
-		xdg = filepath.Join(home, ".local", "state")
-	}
-	dir := filepath.Join(xdg, "relay", "viz")
+	dir := filepath.Join(core.StateRoot(), "viz")
 	_ = os.MkdirAll(dir, 0o755)
 	safe := strings.Map(func(r rune) rune {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
@@ -807,8 +1090,16 @@ func bindPath(sessionID string) string {
 }
 
 func (v *Viz) persistBinding(sessionID string, b binding) error {
+	b.V = 2
+	b.SessionID = sessionID
+	if b.UpdatedAt.IsZero() {
+		b.UpdatedAt = time.Now().UTC()
+	}
+	if b.CreatedAt.IsZero() {
+		b.CreatedAt = b.UpdatedAt
+	}
 	raw, _ := json.MarshalIndent(b, "", "  ")
-	return os.WriteFile(bindPath(sessionID), raw, 0o644)
+	return os.WriteFile(bindPath(sessionID), raw, 0o600)
 }
 
 func (v *Viz) loadBinding(sessionID string) (binding, error) {
@@ -820,5 +1111,79 @@ func (v *Viz) loadBinding(sessionID string) (binding, error) {
 	if err := json.Unmarshal(raw, &b); err != nil {
 		return binding{}, err
 	}
+	if b.SessionID == "" {
+		b.SessionID = sessionID
+	}
 	return b, nil
+}
+
+// ManagedPanes reports every desktop-owned session binding and whether its
+// exact surface still exists. This is intentionally session-keyed; titles are
+// only used by legacy recovery in SaveRestorable.
+func (v *Viz) ManagedPanes(ctx context.Context) ([]ManagedPane, error) {
+	dir := filepath.Join(core.StateRoot(), "viz")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []ManagedPane{}, nil
+		}
+		return nil, err
+	}
+	locations := v.surfaceLocations(ctx)
+	panes := make([]ManagedPane, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		raw, readErr := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if readErr != nil {
+			continue
+		}
+		var b binding
+		if json.Unmarshal(raw, &b) != nil || b.Surface == "" {
+			continue
+		}
+		legacySessionID := b.SessionID == ""
+		if legacySessionID {
+			b.SessionID = strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
+		}
+		migrated := legacySessionID
+		if info, infoErr := entry.Info(); infoErr == nil {
+			if b.CreatedAt.IsZero() {
+				b.CreatedAt = info.ModTime().UTC()
+				migrated = true
+			}
+			if b.UpdatedAt.IsZero() {
+				b.UpdatedAt = b.CreatedAt
+				migrated = true
+			}
+		}
+		state := "disconnected"
+		if loc := locations[b.Surface]; loc.Workspace != "" {
+			state = "live"
+			if b.Workspace != loc.Workspace || b.Pane != loc.Pane {
+				b.Workspace, b.Pane, b.UpdatedAt = loc.Workspace, loc.Pane, time.Now().UTC()
+				migrated = true
+			}
+		}
+		if migrated {
+			_ = v.persistBinding(b.SessionID, b)
+		}
+		panes = append(panes, ManagedPane{
+			SessionID: b.SessionID, SourceSessionID: b.SourceSessionID,
+			PersistName: extractSessionFlag(b.Attach), Surface: b.Surface,
+			Pane: b.Pane, Workspace: b.Workspace, Mode: b.Mode,
+			State: state, CreatedAt: b.CreatedAt, UpdatedAt: b.UpdatedAt,
+		})
+	}
+	sort.Slice(panes, func(i, j int) bool {
+		if panes[i].Workspace != panes[j].Workspace {
+			return panes[i].Workspace < panes[j].Workspace
+		}
+		if panes[i].Pane != panes[j].Pane {
+			return panes[i].Pane < panes[j].Pane
+		}
+		return panes[i].SessionID < panes[j].SessionID
+	})
+	return panes, nil
 }

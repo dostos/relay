@@ -28,6 +28,13 @@ type DiagnosticSource interface {
 	LastDiagnostic() string
 }
 
+// ReverseUnixForwarder is an optional transport capability used by interactive
+// relay panes. It maps a remote Unix socket back to the desktop bridge for the
+// lifetime of the persistent attach connection.
+type ReverseUnixForwarder interface {
+	SetReverseUnixForward(remoteSocket, localSocket string)
+}
+
 // PersistHandle identifies a durable session on a Persistence backend.
 type PersistHandle struct {
 	Kind string `json:"kind"`
@@ -53,10 +60,13 @@ type Persistence interface {
 
 // Layout describes how to present a session in a visual surface.
 type Layout struct {
-	Mode      string // "pair" | "remote" | "none"
-	Workspace string // optional cmux workspace ref (e.g. workspace:2)
-	Pane      string // optional cmux pane ref — split relative to this pane
-	Tab       bool   // if true with Pane set, stack as a tab; default is side-by-side split
+	Mode            string // "pair" | "remote" | "none"
+	Workspace       string // optional cmux workspace ref (e.g. workspace:2)
+	Pane            string // optional cmux pane ref — split relative to this pane
+	Tab             bool   // if true with Pane set, stack as a tab; default is side-by-side split
+	SourceSessionID string // lineage owner whose pane anchors this placement
+	SplitDirection  string // right for the first child; down for later siblings
+	ExplicitPlace   bool   // explicit workspace/pane flags disable sibling stacking
 }
 
 // Viz presents sessions to a human. cmux is the default; may be a no-op.

@@ -39,7 +39,8 @@ relay agent wait --handoff ho-… [--timeout 120]
 
 ### 2) Project workspace with several durable remotes
 
-One cmux workspace, side-by-side panes for related remotes (train + eval, app + benchmark). Sidebar pill:
+One cmux workspace with a parent pane on the left and its relay children stacked
+on the right (train + eval, app + benchmark). Sidebar pill:
 
 `◆ RELAY · train, eval`
 
@@ -50,6 +51,37 @@ relay viz present sess-… --workspace workspace:N   # split by default
 relay viz brand                                    # refresh ◆ RELAY titles + pills
 ```
 
+For the common interactive path, use the host/name shorthand. It creates (or
+reuses) the named remote tmux session and binds it to the **current** cmux pane:
+
+```bash
+relay c3 research
+```
+
+That pane carries a persistent reverse Unix-socket bridge to the desktop. A
+`relay` command run inside it is executed by the desktop control plane, so it
+can open the next host in cmux without giving a remote machine direct access to
+cmux:
+
+```bash
+# inside c3/research
+relay c1 followup
+
+# anywhere in the relay control plane
+relay history
+# c3/research (human)
+# └─[relay]→ c1/followup (human)
+
+# an agent handoff records the agent and ho-… edge as well
+relay agent start -H c1 --agent codex --name analysis --goal "continue the analysis"
+```
+
+Child placement follows the recorded session binding, not whichever pane is
+currently focused. The first child splits `right` from its parent; later
+children of that parent split `down` from the newest live sibling. Explicit
+`--workspace` / `--pane` placement overrides the default. Inspect the
+session-keyed records with `relay pane list`.
+
 ### 3) Bring a new machine online
 
 Discover SSH aliases, probe agent CLIs, propose `host.yaml`, bootstrap `relayd`:
@@ -57,7 +89,7 @@ Discover SSH aliases, probe agent CLIs, propose `host.yaml`, bootstrap `relayd`:
 ```bash
 relay targets --json
 relay host discover -H host-a --json
-relay host init -H host-a --apply
+relay host init -H host-a --apply   # installs relay + relayd on the host
 ```
 
 ### 4) Orchestrator / skill loop (no poll loops)
@@ -85,6 +117,7 @@ Skills are versioned under [`skills/`](skills/) and symlinked into `~/.claude/sk
 relay host init -H HOST --apply
 
 # run work
+relay HOST NAME                     # current pane → named remote tmux
 relay agent start -H HOST --agent claude --goal "…"
 # or attach an existing tmux session
 relay session adopt -H HOST --name my-tmux
@@ -113,17 +146,34 @@ relay viz restore                 # optional manual path
 |-------|------|
 | **cmux** | Workspaces, splits, tabs, Vault resume UI |
 | **relay CLI** | Session/handoff IDs, `viz present`, branding, agent JSON API |
+| **desktop bridge** | Local Unix-socket daemon; serializes remote requests and owns cmux operations |
 | **tmux** (remote) | Durable process surface |
 | **relayd** (remote) | Always-on event bus over a **Unix socket only** (no TCP listen) |
 
 Host profiles (`~/.config/relay/host.yaml` on each remote) list agent CLIs and `path_map`. Connection coords stay in your SSH config — relay only uses Host aliases.
 
+The desktop bridge is started on demand by `relay resume`. Its socket is
+`~/.local/state/relay/desktop-bridge.sock` (0600). Each attached pane uses SSH
+stream-local reverse forwarding to expose a per-session socket under `/tmp` on
+the remote host. Requests carry a per-session token, and the bridge allowlist
+is limited to named-session and handoff operations. There is no TCP listener or
+inbound connection to the laptop; the forward lives and reconnects with the
+pane's dedicated SSH connection.
+
+Remote-to-remote commands require a session created by this bridge-aware relay
+version. The shorthand can still adopt an older tmux session for attachment,
+but it warns that the legacy shell has no bridge identity; choose a new `NAME`
+to enable chaining.
+
 ## CLI map
 
 ```text
 relay targets / host discover / host init   # new machine
+relay HOST NAME                             # named tmux in current cmux pane
 relay session … / session adopt             # durable tmux
 relay agent start|wait|send|capture|done    # orchestrator API
+relay history                               # source → destination lineage
+relay pane list                             # owned surface/workspace/pane + parent + liveness
 relay viz present|brand|save|restore        # cmux surface
 relay resume --session NAME                 # Vault target
 ```

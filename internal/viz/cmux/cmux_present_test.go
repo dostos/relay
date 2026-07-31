@@ -2,7 +2,11 @@ package cmux
 
 import (
 	"context"
+	"os"
 	"testing"
+	"time"
+
+	"github.com/dostos/relay/internal/ports"
 )
 
 func TestParseWorkspaceRef(t *testing.T) {
@@ -31,5 +35,78 @@ func TestActiveWorkspacePrefersCallingCmuxWorkspace(t *testing.T) {
 	v := New()
 	if got := v.activeWorkspace(context.Background()); got != "workspace:beholder-pdf" {
 		t.Fatalf("activeWorkspace() = %q, want caller workspace", got)
+	}
+}
+
+func TestParseSurfaceLocation(t *testing.T) {
+	raw := []byte(`{"windows":[{"workspaces":[{"ref":"workspace:7","panes":[{"ref":"pane:9","surfaces":[{"ref":"surface:11"}]}]}]}]}`)
+	got := parseSurfaceLocation(raw, "surface:11")
+	if got.Workspace != "workspace:7" || got.Pane != "pane:9" {
+		t.Fatalf("location = %+v", got)
+	}
+	if missing := parseSurfaceLocation(raw, "surface:404"); missing != (surfaceLocation{}) {
+		t.Fatalf("missing location = %+v", missing)
+	}
+}
+
+func TestChildLayoutBuildsRightHandStack(t *testing.T) {
+	parent := ports.Layout{
+		Workspace: "workspace:1", Pane: "pane:parent", SourceSessionID: "sess-parent",
+	}
+	first := childLayout(parent, binding{})
+	if first.Workspace != "workspace:1" || first.Pane != "pane:parent" || first.SplitDirection != "right" {
+		t.Fatalf("first child layout = %+v", first)
+	}
+	second := childLayout(parent, binding{Workspace: "workspace:1", Pane: "pane:first-child"})
+	if second.Workspace != "workspace:1" || second.Pane != "pane:first-child" || second.SplitDirection != "down" {
+		t.Fatalf("second child layout = %+v", second)
+	}
+}
+
+func TestChildLayoutPreservesExplicitPlacement(t *testing.T) {
+	explicit := ports.Layout{
+		Workspace: "workspace:custom", Pane: "pane:custom", SourceSessionID: "sess-parent", ExplicitPlace: true,
+	}
+	got := childLayout(explicit, binding{Workspace: "workspace:1", Pane: "pane:sibling"})
+	if got.Workspace != explicit.Workspace || got.Pane != explicit.Pane || got.SplitDirection != "" {
+		t.Fatalf("explicit layout changed: %+v", got)
+	}
+}
+
+func TestBindingRoundTripKeepsParentAndLocation(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	v := New()
+	created := time.Now().UTC().Truncate(time.Second)
+	want := binding{
+		SessionID: "sess-child", SourceSessionID: "sess-parent",
+		Surface: "surface:3", Pane: "pane:2", Workspace: "workspace:1",
+		Attach: "relay resume --session demo", Mode: "split", CreatedAt: created,
+	}
+	if err := v.persistBinding(want.SessionID, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := v.loadBinding(want.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.V != 2 || got.SourceSessionID != want.SourceSessionID || got.Pane != want.Pane || got.Workspace != want.Workspace || !got.CreatedAt.Equal(created) {
+		t.Fatalf("binding = %+v", got)
+	}
+}
+
+func TestClosePersistRemovesBindingWithoutCmux(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	v := &Viz{Bin: "/definitely/missing/cmux", bindings: map[string]binding{}}
+	if err := v.persistBinding("sess-cleaned", binding{
+		SessionID: "sess-cleaned", Surface: "surface:99",
+		Attach: "relay resume --session cleaned-demo",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if removed := v.ClosePersist(context.Background(), "cleaned-demo"); removed != 1 {
+		t.Fatalf("removed = %d", removed)
+	}
+	if _, err := os.Stat(bindPath("sess-cleaned")); !os.IsNotExist(err) {
+		t.Fatalf("binding still exists: %v", err)
 	}
 }

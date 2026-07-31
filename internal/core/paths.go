@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	AppName        = "relay"
+	AppName         = "relay"
 	RemoteConfigRel = ".config/relay/host.yaml"
 	RemoteStateRel  = ".local/state/relay"
 )
@@ -24,9 +24,11 @@ func StateRoot() string {
 	return filepath.Join(xdg, AppName)
 }
 
-func SessionsPath() string  { return filepath.Join(StateRoot(), "sessions.json") }
-func HandoffsDir() string   { return filepath.Join(StateRoot(), "handoffs") }
-func LedgerPath() string    { return filepath.Join(StateRoot(), "handoffs", "ledger.jsonl") }
+func SessionsPath() string            { return filepath.Join(StateRoot(), "sessions.json") }
+func HandoffsDir() string             { return filepath.Join(StateRoot(), "handoffs") }
+func LedgerPath() string              { return filepath.Join(StateRoot(), "handoffs", "ledger.jsonl") }
+func DesktopBridgeSocketPath() string { return filepath.Join(StateRoot(), "desktop-bridge.sock") }
+func BridgeTokensDir() string         { return filepath.Join(StateRoot(), "bridge-tokens") }
 func ProfileCacheDir() string {
 	return filepath.Join(StateRoot(), "hosts")
 }
@@ -52,7 +54,7 @@ func sanitizeID(s string) string {
 
 // EnsureStateDirs creates local state directories.
 func EnsureStateDirs() error {
-	for _, d := range []string{StateRoot(), HandoffsDir(), ProfileCacheDir(), PanesDir()} {
+	for _, d := range []string{StateRoot(), HandoffsDir(), ProfileCacheDir(), PanesDir(), BridgeTokensDir()} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return err
 		}
