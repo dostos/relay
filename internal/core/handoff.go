@@ -25,6 +25,12 @@ type HandoffService struct {
 	ParentRouter ParentEventRouter
 }
 
+const relayChildPreamble = "[relay long-term child] Blocking decision: relay signal ask --text 'QUESTION'. Hooks report permission/result/exit."
+
+func agentGoalPrompt(goal string) string {
+	return relayChildPreamble + "\n\n" + goal
+}
+
 // HandoffOpts configures a launch.
 type HandoffOpts struct {
 	HostID            string
@@ -232,7 +238,7 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 	// Inject goal for agent mode after a short readiness wait.
 	if kind == KindAgent && opts.Goal != "" {
 		_ = waitReady(ctx, h.Persist, t, sess.Persist, 20*time.Second)
-		_ = h.Persist.Send(ctx, t, sess.Persist, opts.Goal, true)
+		_ = h.Persist.Send(ctx, t, sess.Persist, agentGoalPrompt(opts.Goal), true)
 	}
 
 	pane := false
