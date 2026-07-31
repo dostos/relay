@@ -29,6 +29,19 @@ func TestParseWorkspaceRef(t *testing.T) {
 	}
 }
 
+func TestExtractSessionFlagStripsShellQuotes(t *testing.T) {
+	cases := map[string]string{
+		`relay resume --session demo`:                       "demo",
+		`'/opt/relay resume --session demo'`:                "demo",
+		`''\''/opt/relay resume --session nested-demo'\'''`: "nested-demo",
+	}
+	for command, want := range cases {
+		if got := extractSessionFlag(command); got != want {
+			t.Fatalf("extractSessionFlag(%q) = %q, want %q", command, got, want)
+		}
+	}
+}
+
 func TestActiveWorkspacePrefersCallingCmuxWorkspace(t *testing.T) {
 	t.Setenv("CMUX_WORKSPACE_ID", "workspace:beholder-pdf")
 

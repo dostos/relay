@@ -366,7 +366,11 @@ func (v *Viz) brandSurface(ctx context.Context, surface, persistName string) err
 	}
 	title := brandTitle(persistName)
 	// Title only — do not pin; pinning is a user choice.
-	_, err := v.run(ctx, "rename-tab", "--surface", surface, "--title", title)
+	args := []string{"rename-tab", "--surface", surface, "--title", title}
+	if workspace := v.workspaceOfSurface(ctx, surface); workspace != "" {
+		args = append(args, "--workspace", workspace)
+	}
+	_, err := v.run(ctx, args...)
 	return err
 }
 
@@ -609,7 +613,7 @@ func extractSessionFlag(cmd string) string {
 	fields := strings.Fields(cmd)
 	for i := 0; i < len(fields)-1; i++ {
 		if fields[i] == "--session" || fields[i] == "-s" {
-			return fields[i+1]
+			return strings.Trim(fields[i+1], "'\"\\")
 		}
 	}
 	return ""
@@ -783,13 +787,14 @@ func (v *Viz) SaveRestorable(ctx context.Context) (int, error) {
 	}
 	saved := 0
 	for ref := range live {
-		name, cmd, cwd := v.relayCheckpoint(ctx, ref)
+		name, _, cwd := v.relayCheckpoint(ctx, ref)
 		if name == "" {
 			continue
 		}
-		if cmd == "" {
-			cmd = core.ResumeLaunchCmd(name)
-		}
+		// cmux returns a shell-rendered command from resume get. Reusing that
+		// value compounds quoting on every save, so always regenerate the
+		// canonical Relay argv from the checkpoint identity.
+		cmd := core.ResumeLaunchCmd(name)
 		if _, err := v.run(ctx, "surface", "resume", "set",
 			"--surface", ref,
 			"--kind", "relay",
