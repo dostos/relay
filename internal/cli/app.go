@@ -480,6 +480,7 @@ Agent surface (token-efficient; always JSON; NO poll loops):
 
 Long-lived goal orchestration (durable compact inbox + guarded local-pane cleanup):
   relay parent register [--surface REF] [--name NAME] [--repo DIR ...] [--wake inject|notify]
+  relay parent bind PARENT [--surface REF]     # preserve identity after cmux restart
   relay parent link PARENT HANDOFF             # adopt an already-running goal
   relay parent move PARENT HANDOFF             # explicitly repair a wrong parent edge
   relay parent list
@@ -1682,6 +1683,27 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 			return a.fail(err)
 		}
 		return a.errOut(a.out(map[string]any{"ok": true, "created": created, "session": sess}))
+	case "bind":
+		if len(args) < 2 || strings.HasPrefix(args[1], "-") {
+			return a.fail(fmt.Errorf("usage: relay parent bind PARENT [--surface REF]"))
+		}
+		parentID, surface := args[1], ""
+		for i := 2; i < len(args); i++ {
+			switch args[i] {
+			case "--surface":
+				i++
+				if i < len(args) {
+					surface = args[i]
+				}
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
+			}
+		}
+		sess, err := a.Parents.BindLocal(ctx, parentID, surface)
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "parent_session_id": sess.ID, "surface": sess.VizSurfaceRef, "state": sess.Labels["parent_state"]}))
 	case "link":
 		if len(args) != 3 {
 			return a.fail(fmt.Errorf("usage: relay parent link PARENT HANDOFF"))

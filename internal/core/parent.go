@@ -241,6 +241,48 @@ func (p *ParentService) RegisterLocal(ctx context.Context, opts RegisterParentOp
 	return sess, true, nil
 }
 
+// BindLocal moves an existing local parent's cmux binding to a restarted
+// surface while preserving its durable identity, inbox, children, and history.
+func (p *ParentService) BindLocal(ctx context.Context, parentID, surface string) (*Session, error) {
+	if p.Reg == nil || p.Notifier == nil {
+		return nil, fmt.Errorf("parent registry and notifier required")
+	}
+	sess, err := p.Reg.GetSession(parentID)
+	if err != nil {
+		return nil, err
+	}
+	if !isLocalParent(sess) {
+		return nil, fmt.Errorf("session %s is not a local parent", parentID)
+	}
+	surface = strings.TrimSpace(surface)
+	if surface == "" {
+		surface, err = CurrentSurface()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !strings.HasPrefix(surface, "surface:") {
+		surface = "surface:" + surface
+	}
+	oldSurface := sess.VizSurfaceRef
+	if _, err := p.Notifier.BindLocalParent(ctx, sess.ID, surface); err != nil {
+		return nil, err
+	}
+	if sess.Labels == nil {
+		sess.Labels = map[string]string{}
+	}
+	sess.Labels["parent_state"] = "active"
+	sess.VizSurfaceRef, sess.UpdatedAt = surface, time.Now().UTC()
+	if err := p.Reg.PutSession(sess); err != nil {
+		return nil, err
+	}
+	_ = AppendLedger(map[string]any{
+		"v": 1, "type": "parent_bind", "ts": sess.UpdatedAt.Format(time.RFC3339),
+		"session_id": sess.ID, "old_surface": oldSurface, "surface": surface,
+	})
+	return sess, nil
+}
+
 // LinkChild adopts an already-running handoff into a local parent's durable
 // goal tree. This is intentionally a one-time lineage operation: moving a
 // child between parents would make request routing and history ambiguous.

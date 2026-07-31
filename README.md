@@ -90,7 +90,9 @@ auto-registers the caller as its parent; an explicit migration is:
 
 ```bash
 relay parent register --name personal-db-main --repo ./projects/infrastructure/workspace-search
+relay parent bind sess-… --surface surface:…  # cmux restarted the root pane
 relay parent link sess-… ho-…        # adopt existing work
+relay parent move sess-… ho-…        # explicitly repair a wrong parent edge
 relay parent inbox sess-…            # compact, cursor-free durable inbox
 relay parent reply pm-… approve
 relay parent ack pm-…

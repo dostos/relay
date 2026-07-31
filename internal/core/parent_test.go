@@ -98,6 +98,29 @@ func TestRegisterLocalParentCreatesRealSessionAndBinding(t *testing.T) {
 	}
 }
 
+func TestBindLocalParentPreservesIdentityOnRestartedSurface(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "engram-main"}, Labels: map[string]string{"role": ParentRole, "parent_state": "complete"}, VizSurfaceRef: "surface:7", CreatedAt: now, UpdatedAt: now}
+	if err := reg.PutSession(parent); err != nil {
+		t.Fatal(err)
+	}
+	bound, err := service.BindLocal(context.Background(), parent.ID, "212")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound.ID != parent.ID || bound.VizSurfaceRef != "surface:212" || bound.Labels["parent_state"] != "active" {
+		t.Fatalf("bound parent=%+v", bound)
+	}
+	if len(notifier.bound) != 1 || notifier.bound[0] != "sess-parent@surface:212" {
+		t.Fatalf("bindings=%v", notifier.bound)
+	}
+	stored, err := reg.GetSession(parent.ID)
+	if err != nil || stored.VizSurfaceRef != "surface:212" {
+		t.Fatalf("stored=%+v err=%v", stored, err)
+	}
+}
+
 func TestLinkChildAdoptsExistingGoalExactlyOnce(t *testing.T) {
 	service, _, reg := newParentTestService(t)
 	now := time.Now().UTC()
