@@ -82,6 +82,42 @@ children of that parent split `down` from the newest live sibling. Explicit
 `--workspace` / `--pane` placement overrides the default. Inspect the
 session-keyed records with `relay pane list`.
 
+Local agent panes are also first-class sessions. Starting a handoff from cmux
+auto-registers the caller as its parent; an explicit migration is:
+
+```bash
+relay parent register --name personal-db-main --repo ./projects/infrastructure/workspace-search
+relay parent link --parent sess-… --handoff ho-…  # adopt existing work
+relay parent inbox --session sess-…       # compact, cursor-free durable inbox
+relay parent reply --message pm-… --text "approve"
+relay parent ack --message pm-…
+```
+
+This is a durable control plane for **long-lived, goal-based handoff and
+orchestration**, not a transcript or chat bus. Correlated control envelopes
+survive agent exits, SSH reconnects, nested relays, and cmux restarts until the
+goal is answered, acknowledged, and terminal.
+
+Each child has one detached blocking event watcher. Agent hooks publish
+`ask`, `permission_required`, `result`, and `exit`; Relay deduplicates by
+handoff/sequence, stores a bounded envelope, and wakes the exact parent pane.
+No transcript is forwarded. Codex and Claude hook adapters are injected by
+default, every agent gets a generic exit wrapper, and unsupported CLIs retain
+the tmux-idle fallback. Set `relay_hooks: off` on an agent only when its runtime
+cannot execute hooks.
+
+Closing a local parent is deliberately gated:
+
+```bash
+relay parent complete sess-…
+relay parent status sess-…                # dry-run reasons
+relay parent retire sess-…                # closes only when eligible
+```
+
+Retirement requires every child terminal, the inbox acknowledged/replied, all
+scoped Git roots clean with no commits ahead of upstream, and an explicit
+`idle` or `complete` parent state. `session destroy` cannot bypass this gate.
+
 ### 3) Bring a new machine online
 
 Discover SSH aliases, probe agent CLIs, propose `host.yaml`, bootstrap `relayd`:
@@ -172,6 +208,9 @@ relay targets / host discover / host init   # new machine
 relay HOST NAME                             # named tmux in current cmux pane
 relay session … / session adopt             # durable tmux
 relay agent start|wait|send|capture|done    # orchestrator API
+relay parent register|inbox|reply|ack       # durable parent communication
+relay parent status|retire                  # guarded local-pane cleanup
+relay signal / relay hook                   # agent-neutral event contract
 relay history                               # source → destination lineage
 relay pane list                             # owned surface/workspace/pane + parent + liveness
 relay pane rename SESSION_ID NAME           # durable display alias; leaves tmux identity intact

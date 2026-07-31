@@ -237,7 +237,7 @@ func serializeInvocation(argv []string) bool {
 		return false
 	}
 	switch filtered[0] + " " + filtered[1] {
-	case "agent start", "agent done", "handoff finalize", "handoff reconcile":
+	case "agent start", "agent done", "handoff finalize", "handoff reconcile", "parent reply", "parent ack", "parent state", "parent retire":
 		return true
 	}
 	// `relay handoff -H …` is the launch form; its second token is a flag.
@@ -285,7 +285,7 @@ func validateArgv(argv []string) error {
 	// lineage. Host bootstrap/auth and raw session mutation remain desktop-only.
 	reserved := map[string]bool{
 		"host": true, "auth": true, "targets": true, "session": true, "sess": true,
-		"handoff": true, "agent": true, "msg": true, "gc": true, "events": true,
+		"handoff": true, "agent": true, "parent": true, "msg": true, "gc": true, "events": true,
 		"viz": true, "pane": true, "resume": true, "doctor": true, "history": true,
 		"help": true, "version": true, "install-cmux-restore": true,
 	}
@@ -293,6 +293,17 @@ func validateArgv(argv []string) error {
 		return nil
 	}
 	switch filtered[0] {
+	case "parent":
+		if len(filtered) < 2 {
+			return fmt.Errorf("parent subcommand required")
+		}
+		// Remote children may inspect/respond to the durable goal channel, but
+		// cannot register, relink, retire, or otherwise mutate local panes.
+		allowed := map[string]bool{"inbox": true, "reply": true, "ack": true, "status": true}
+		if !allowed[filtered[1]] {
+			return fmt.Errorf("relay parent %q is not allowed through the desktop bridge", filtered[1])
+		}
+		return nil
 	case "agent", "handoff", "history", "help", "version", "targets":
 		return nil
 	default:

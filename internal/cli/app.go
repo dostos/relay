@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -37,6 +38,7 @@ type App struct {
 	Coord     ports.Coord
 	Msg       *core.MsgService
 	Maint     *core.MaintenanceService
+	Parents   *core.ParentService
 	Viz       ports.Viz
 	JSON      bool
 	tf        core.TransportFactory
@@ -70,6 +72,8 @@ func New() *App {
 		Viz:          viz,
 		NewTransport: tf,
 	}
+	parents := &core.ParentService{Reg: reg, Sessions: sessions, Coord: coord, Viz: viz, Notifier: viz, NewTransport: tf}
+	handoffs.ParentRouter = parents
 	boot := &core.BootstrapService{NewTransport: tf}
 	auth := &core.AuthService{
 		Profiles:     profiles,
@@ -88,12 +92,13 @@ func New() *App {
 			Coord:        coord,
 			Profiles:     profiles,
 		},
-		Reg:   reg,
-		Coord: coord,
-		Msg:   &core.MsgService{Coord: coord, NewTransport: tf},
-		Maint: &core.MaintenanceService{Sessions: sessions, Reg: reg, Viz: viz, NewTransport: tf},
-		Viz:   viz,
-		tf:    tf,
+		Reg:     reg,
+		Coord:   coord,
+		Msg:     &core.MsgService{Coord: coord, NewTransport: tf},
+		Maint:   &core.MaintenanceService{Sessions: sessions, Reg: reg, Viz: viz, NewTransport: tf},
+		Parents: parents,
+		Viz:     viz,
+		tf:      tf,
 	}
 }
 
@@ -144,6 +149,17 @@ func rejectUnknownFlag(arg string) error {
 }
 
 func (a *App) forwardThroughDesktopBridge(args []string) (int, bool) {
+	for _, arg := range args {
+		if arg == "--json" {
+			continue
+		}
+		// Signals are host-local hook events. Sending them through the desktop
+		// bridge would add latency and break if the pane's attach is reconnecting.
+		if arg == "signal" || arg == "hook" {
+			return 0, false
+		}
+		break
+	}
 	sock := strings.TrimSpace(os.Getenv(bridge.SocketEnv))
 	if sock == "" || os.Getenv(bridge.LocalInvokeEnv) == "1" {
 		return 0, false
@@ -228,11 +244,38 @@ func sourceFromEnvironment(reg *core.Registry) (sessionID, hostID, persistName, 
 	return
 }
 
-func (a *App) applyHandoffSource(opts *core.HandoffOpts) string {
+func (a *App) applyHandoffSource(ctx context.Context, opts *core.HandoffOpts) (string, error) {
 	if opts == nil {
-		return ""
+		return "", nil
 	}
 	sessionID, hostID, persistName, repoRef := sourceFromEnvironment(a.Reg)
+	if opts.SourceSessionID != "" {
+		sessionID = opts.SourceSessionID
+		if sess, err := a.Reg.GetSession(sessionID); err == nil {
+			hostID, persistName, repoRef = sess.HostID, sess.Persist.Name, sess.RepoRef
+		} else {
+			return "", err
+		}
+	}
+	if sessionID == "" && a.Parents != nil {
+		surface, ok := core.SurfaceFromEnvironment()
+		if !ok && strings.TrimSpace(os.Getenv("CMUX_SURFACE_ID")) != "" {
+			if resolved, err := core.CurrentSurface(); err == nil {
+				surface, ok = resolved, true
+			}
+		}
+		if ok {
+			repos := []string{}
+			if root, err := findGitRoot(""); err == nil {
+				repos = append(repos, root)
+			}
+			parent, _, err := a.Parents.RegisterLocal(ctx, core.RegisterParentOpts{Surface: surface, RepoRefs: repos, WakeMode: "inject"})
+			if err != nil {
+				return "", err
+			}
+			sessionID, hostID, persistName, repoRef = parent.ID, parent.HostID, parent.Persist.Name, parent.RepoRef
+		}
+	}
 	opts.SourceSessionID = sessionID
 	opts.SourceHostID = hostID
 	opts.SourcePersistName = persistName
@@ -245,7 +288,7 @@ func (a *App) applyHandoffSource(opts *core.HandoffOpts) string {
 			opts.Pane = pane
 		}
 	}
-	return repoRef
+	return repoRef, nil
 }
 
 func (a *App) locationForSource(sessionID string) (workspace, pane string) {
@@ -315,6 +358,10 @@ func (a *App) Run(args []string) int {
 		return a.cmdAgent(ctx, filtered[1:])
 	case "msg":
 		return a.cmdMsg(ctx, filtered[1:])
+	case "parent":
+		return a.cmdParent(ctx, filtered[1:])
+	case "signal", "hook":
+		return a.cmdSignal(ctx, filtered[0], filtered[1:])
 	case "gc":
 		return a.cmdGC(ctx, filtered[1:])
 	case "events":
@@ -384,7 +431,7 @@ Sessions (explicit id; no guesswork):
   relay session sensors ID [--silence SEC]   Reinstall quiet idle/exit hooks
 
 Handoffs (goal-based / long-running):
-  relay handoff -H HOST --agent NAME --goal TEXT [--repo DIR] [--workspace WS] [--pane PANE] [--no-pane]
+  relay handoff -H HOST --agent NAME --goal TEXT [--repo DIR] [--parent SESSION] [--workspace WS] [--pane PANE] [--no-pane]
   relay handoff -H HOST --cmd "make train" [--no-pane]
   relay handoff list
   relay handoff get ID
@@ -393,7 +440,7 @@ Handoffs (goal-based / long-running):
   relay history                      Show durable relay/handoff lineage
 
 Agent surface (token-efficient; always JSON; NO poll loops):
-  relay agent start -H HOST --agent NAME --goal TEXT | --cmd CMD [--workspace WS] [--pane PANE] [--no-pane]
+  relay agent start -H HOST --agent NAME --goal TEXT | --cmd CMD [--parent SESSION] [--workspace WS] [--pane PANE] [--no-pane]
   relay agent pick -H HOST                                     # suggest agent by weekly headroom (advisory)
   relay agent wait --handoff ID [--from SEQ] [--timeout SEC]   # blocks once
   relay agent send --handoff ID -- TEXT
@@ -403,6 +450,19 @@ Agent surface (token-efficient; always JSON; NO poll loops):
   # Follow response.next / response.argv. Never events tail -f in a loop.
   # Agents may also DECLARE state instead of going idle: emit kind
   # ask|note|progress|result (with meta.q/text) and 'agent wait' surfaces it.
+
+Long-lived goal orchestration (durable compact inbox + guarded local-pane cleanup):
+  relay parent register [--surface REF] [--name NAME] [--repo DIR ...] [--wake inject|notify]
+  relay parent link --parent ID --handoff ID   # adopt an already-running goal
+  relay parent list
+  relay parent inbox --session ID [--all]
+  relay parent reply --message ID --text TEXT
+  relay parent ack --message ID
+  relay parent state ID --state active|idle|complete
+  relay parent status ID
+  relay parent retire ID [--dry-run]
+  relay signal ask|permission_required|result|exit [--text TEXT] [--correlation ID]
+  relay hook --kind KIND                 # agent hook adapter; bounded JSON stdin
 
 Agent-to-agent messages (relayd channels; any channel name):
   relay msg send -H HOST -c CHANNEL [--kind K] [--from ID] [--text ... | -- ...] [--meta JSON]
@@ -1271,6 +1331,11 @@ func (a *App) cmdHandoff(ctx context.Context, args []string) int {
 				opts.Pane = rest[i]
 				opts.ExplicitPlace = true
 			}
+		case "--parent":
+			i++
+			if i < len(rest) {
+				opts.SourceSessionID = rest[i]
+			}
 		case "--no-pane":
 			opts.NoPane = true
 		case "--silence":
@@ -1282,7 +1347,10 @@ func (a *App) cmdHandoff(ctx context.Context, args []string) int {
 			return a.fail(rejectUnknownFlag(rest[i]))
 		}
 	}
-	sourceRepo := a.applyHandoffSource(&opts)
+	sourceRepo, sourceErr := a.applyHandoffSource(ctx, &opts)
+	if sourceErr != nil {
+		return a.fail(sourceErr)
+	}
 	if opts.RepoRef == "" && opts.RemoteCWD == "" {
 		if sourceRepo != "" {
 			opts.RepoRef = sourceRepo
@@ -1298,6 +1366,9 @@ func (a *App) cmdHandoff(ctx context.Context, args []string) int {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(b)
+	if b != nil && b.SourceSessionID != "" {
+		a.startParentWatcher(b.HandoffID)
+	}
 	return 0
 }
 
@@ -1527,6 +1598,389 @@ func (a *App) cmdMsg(ctx context.Context, args []string) int {
 	}
 }
 
+// cmdParent owns local-parent registration, the durable compact inbox, and
+// guarded retirement. It is JSON-first so hooks and agents never parse prose.
+func (a *App) cmdParent(ctx context.Context, args []string) int {
+	a.JSON = true
+	if a.Parents == nil || len(args) == 0 {
+		return a.fail(fmt.Errorf("usage: relay parent register|link|list|inbox|reply|ack|state|status|retire …"))
+	}
+	switch args[0] {
+	case "register":
+		var opts core.RegisterParentOpts
+		for i := 1; i < len(args); i++ {
+			switch args[i] {
+			case "--surface":
+				i++
+				if i < len(args) {
+					opts.Surface = args[i]
+				}
+			case "--name":
+				i++
+				if i < len(args) {
+					opts.Name = args[i]
+				}
+			case "--repo":
+				i++
+				if i < len(args) {
+					opts.RepoRefs = append(opts.RepoRefs, args[i])
+				}
+			case "--wake":
+				i++
+				if i < len(args) {
+					opts.WakeMode = args[i]
+				}
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
+			}
+		}
+		sess, created, err := a.Parents.RegisterLocal(ctx, opts)
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "created": created, "session": sess}))
+	case "link":
+		var parentID, handoffID string
+		for i := 1; i < len(args); i++ {
+			switch args[i] {
+			case "--session", "--parent":
+				i++
+				if i < len(args) {
+					parentID = args[i]
+				}
+			case "--handoff":
+				i++
+				if i < len(args) {
+					handoffID = args[i]
+				}
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
+			}
+		}
+		if parentID == "" || handoffID == "" {
+			return a.fail(fmt.Errorf("--parent and --handoff are required"))
+		}
+		ho, err := a.Parents.LinkChild(parentID, handoffID)
+		if err != nil {
+			return a.fail(err)
+		}
+		a.startParentWatcher(ho.ID)
+		return a.errOut(a.out(map[string]any{"ok": true, "parent_session_id": parentID, "handoff": ho}))
+	case "list":
+		list, err := a.Reg.ListSessions()
+		if err != nil {
+			return a.fail(err)
+		}
+		out := make([]*core.Session, 0)
+		for _, sess := range list {
+			if sess.HostID == core.LocalHostID && sess.Persist.Kind == core.LocalPersistKind && sess.Labels["role"] == core.ParentRole {
+				out = append(out, sess)
+			}
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "parents": out}))
+	case "inbox":
+		var parentID string
+		all := false
+		for i := 1; i < len(args); i++ {
+			switch args[i] {
+			case "--session", "--parent":
+				i++
+				if i < len(args) {
+					parentID = args[i]
+				}
+			case "--all":
+				all = true
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
+			}
+		}
+		if parentID == "" {
+			return a.fail(fmt.Errorf("--session parent id required"))
+		}
+		if err := authorizeParentCaller(parentID); err != nil {
+			return a.fail(err)
+		}
+		msgs, err := a.Parents.ListMessages(parentID, !all)
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "parent_session_id": parentID, "messages": msgs, "count": len(msgs)}))
+	case "reply":
+		messageID, text := parentMessageArgs(args[1:])
+		if messageID == "" || text == "" {
+			return a.fail(fmt.Errorf("usage: relay parent reply --message ID --text TEXT"))
+		}
+		candidate, err := a.Parents.FindMessage(messageID)
+		if err != nil {
+			return a.fail(err)
+		}
+		if err := authorizeParentCaller(candidate.ParentSessionID); err != nil {
+			return a.fail(err)
+		}
+		msg, err := a.Parents.Reply(ctx, messageID, text)
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "message_id": msg.ID, "state": msg.State, "correlation_id": msg.CorrelationID}))
+	case "ack":
+		messageID, _ := parentMessageArgs(args[1:])
+		if messageID == "" {
+			return a.fail(fmt.Errorf("usage: relay parent ack --message ID"))
+		}
+		candidate, err := a.Parents.FindMessage(messageID)
+		if err != nil {
+			return a.fail(err)
+		}
+		if err := authorizeParentCaller(candidate.ParentSessionID); err != nil {
+			return a.fail(err)
+		}
+		msg, err := a.Parents.Ack(messageID)
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "message_id": msg.ID, "state": msg.State}))
+	case "state", "active", "idle", "complete":
+		state := args[0]
+		start := 1
+		if state == "state" {
+			state = ""
+		}
+		var sessionID string
+		for i := start; i < len(args); i++ {
+			switch args[i] {
+			case "--session", "--parent":
+				i++
+				if i < len(args) {
+					sessionID = args[i]
+				}
+			case "--state":
+				i++
+				if i < len(args) {
+					state = args[i]
+				}
+			default:
+				if sessionID == "" && !strings.HasPrefix(args[i], "-") {
+					sessionID = args[i]
+				} else {
+					return a.fail(rejectUnknownFlag(args[i]))
+				}
+			}
+		}
+		if sessionID == "" || state == "" {
+			return a.fail(fmt.Errorf("parent session and state required"))
+		}
+		sess, err := a.Parents.SetState(sessionID, state)
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "session_id": sess.ID, "state": state}))
+	case "status", "retire":
+		var sessionID string
+		dryRun := args[0] == "status"
+		for i := 1; i < len(args); i++ {
+			switch args[i] {
+			case "--session", "--parent":
+				i++
+				if i < len(args) {
+					sessionID = args[i]
+				}
+			case "--dry-run":
+				dryRun = true
+			default:
+				if sessionID == "" && !strings.HasPrefix(args[i], "-") {
+					sessionID = args[i]
+				} else {
+					return a.fail(rejectUnknownFlag(args[i]))
+				}
+			}
+		}
+		if sessionID == "" {
+			return a.fail(fmt.Errorf("parent session required"))
+		}
+		if args[0] == "status" {
+			if err := authorizeParentCaller(sessionID); err != nil {
+				return a.fail(err)
+			}
+		}
+		gate, err := a.Parents.Retire(ctx, sessionID, dryRun)
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "retirement": gate}))
+	case "watch":
+		var handoffID string
+		for i := 1; i < len(args); i++ {
+			switch args[i] {
+			case "--handoff":
+				i++
+				if i < len(args) {
+					handoffID = args[i]
+				}
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
+			}
+		}
+		if handoffID == "" {
+			return a.fail(fmt.Errorf("--handoff id required"))
+		}
+		if err := a.Parents.Watch(ctx, handoffID); err != nil && ctx.Err() == nil {
+			return a.fail(err)
+		}
+		return 0
+	default:
+		return a.fail(fmt.Errorf("unknown parent subcommand %q", args[0]))
+	}
+}
+
+// A bridge caller may act only as its authenticated source session. This lets
+// a remote parent orchestrate its own long-lived goal tree without exposing a
+// different local parent's durable inbox by guessed identifiers.
+func authorizeParentCaller(parentID string) error {
+	caller := strings.TrimSpace(os.Getenv(bridge.SourceSessionEnv))
+	if caller != "" && caller != parentID {
+		return fmt.Errorf("parent session %s is outside authenticated caller scope", parentID)
+	}
+	return nil
+}
+
+func parentMessageArgs(args []string) (messageID, text string) {
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--message":
+			i++
+			if i < len(args) {
+				messageID = args[i]
+			}
+		case "--text":
+			i++
+			if i < len(args) {
+				text = args[i]
+			}
+		case "--":
+			text = strings.Join(args[i+1:], " ")
+			return
+		}
+	}
+	return
+}
+
+func (a *App) startParentWatcher(handoffID string) {
+	if handoffID == "" || os.Getenv("RELAY_NO_PARENT_WATCH") == "1" {
+		return
+	}
+	bin, err := os.Executable()
+	if err != nil {
+		return
+	}
+	if err := core.EnsureStateDirs(); err != nil {
+		return
+	}
+	logPath := filepath.Join(core.ParentWatchDir(), handoffID+".log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	cmd := exec.Command(bin, "--json", "parent", "watch", "--handoff", handoffID)
+	cmd.Stdout, cmd.Stderr = logFile, logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if cmd.Start() == nil {
+		_ = cmd.Process.Release()
+	}
+	_ = logFile.Close()
+}
+
+// cmdSignal is the agent-neutral hook surface. It intentionally executes on
+// the child host instead of crossing the desktop bridge.
+func (a *App) cmdSignal(ctx context.Context, mode string, args []string) int {
+	a.JSON = true
+	var kind, text, correlation string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--kind":
+			i++
+			if i < len(args) {
+				kind = args[i]
+			}
+		case "--text":
+			i++
+			if i < len(args) {
+				text = args[i]
+			}
+		case "--correlation", "--request":
+			i++
+			if i < len(args) {
+				correlation = args[i]
+			}
+		default:
+			if kind == "" && !strings.HasPrefix(args[i], "-") {
+				kind = args[i]
+			} else {
+				return a.fail(rejectUnknownFlag(args[i]))
+			}
+		}
+	}
+	meta := map[string]any{}
+	if mode == "hook" {
+		if stat, err := os.Stdin.Stat(); err == nil && stat.Mode()&os.ModeCharDevice == 0 {
+			raw, _ := io.ReadAll(io.LimitReader(os.Stdin, 64<<10))
+			var payload map[string]any
+			if json.Unmarshal(raw, &payload) == nil {
+				for _, key := range []string{"message", "reason", "tool_name", "permission_mode", "last_assistant_message"} {
+					if value, ok := payload[key]; ok {
+						meta[key] = value
+					}
+				}
+				if text == "" {
+					for _, key := range []string{"message", "reason", "last_assistant_message"} {
+						if value, ok := payload[key].(string); ok && value != "" {
+							text = value
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+	if kind == "" {
+		return a.fail(fmt.Errorf("signal kind required"))
+	}
+	session := strings.TrimSpace(os.Getenv("RELAY_SESSION_NAME"))
+	if session == "" {
+		return a.fail(fmt.Errorf("RELAY_SESSION_NAME is not set"))
+	}
+	if text != "" {
+		meta["text"] = text
+	}
+	if correlation != "" {
+		meta["correlation_id"] = correlation
+	}
+	metaRaw, _ := json.Marshal(meta)
+	relaydBin := filepath.Join(filepath.Dir(core.RelayBin()), "relayd")
+	if _, err := os.Stat(relaydBin); err != nil {
+		relaydBin, err = exec.LookPath("relayd")
+		if err != nil {
+			return a.fail(fmt.Errorf("relayd not installed"))
+		}
+	}
+	cmdArgs := []string{"emit", "-s", session, "--kind", kind}
+	if len(meta) > 0 {
+		cmdArgs = append(cmdArgs, "--meta", string(metaRaw))
+	}
+	out, err := exec.CommandContext(ctx, relaydBin, cmdArgs...).Output()
+	if err != nil {
+		return a.fail(err)
+	}
+	var response map[string]any
+	if json.Unmarshal(out, &response) != nil {
+		return a.fail(fmt.Errorf("invalid relayd response"))
+	}
+	if mode == "hook" {
+		return 0
+	}
+	response["kind"], response["session"] = kind, session
+	return a.errOut(a.out(response))
+}
+
 func (a *App) cmdEvents(ctx context.Context, args []string) int {
 	if len(args) == 0 {
 		return a.fail(fmt.Errorf("usage: relay events tail|emit …"))
@@ -1667,6 +2121,11 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 				if i < len(rest) {
 					opts.Container = rest[i]
 				}
+			case "--parent":
+				i++
+				if i < len(rest) {
+					opts.SourceSessionID = rest[i]
+				}
 			case "--no-pane":
 				opts.NoPane = true
 			case "--silence":
@@ -1678,7 +2137,10 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 				return a.fail(rejectUnknownFlag(rest[i]))
 			}
 		}
-		sourceRepo := a.applyHandoffSource(&opts)
+		sourceRepo, sourceErr := a.applyHandoffSource(ctx, &opts)
+		if sourceErr != nil {
+			return a.fail(sourceErr)
+		}
 		if opts.RepoRef == "" && opts.RemoteCWD == "" {
 			if sourceRepo != "" {
 				opts.RepoRef = sourceRepo
@@ -1692,6 +2154,9 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 		}
 		if err != nil {
 			return 1
+		}
+		if resp != nil && opts.SourceSessionID != "" {
+			a.startParentWatcher(resp.HandoffID)
 		}
 		return 0
 	case "wait":

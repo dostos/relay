@@ -13,7 +13,8 @@ type Session struct {
 	HostID        string              `json:"host_id"`
 	RemoteCWD     string              `json:"remote_cwd"`
 	Persist       ports.PersistHandle `json:"persist"`
-	RepoRef       string              `json:"repo_ref,omitempty"` // local git root if known
+	RepoRef       string              `json:"repo_ref,omitempty"`  // local git root if known
+	RepoRefs      []string            `json:"repo_refs,omitempty"` // cleanup scope for local parents
 	Labels        map[string]string   `json:"labels,omitempty"`
 	Container     *ContainerRef       `json:"container,omitempty"`
 	CreatedAt     time.Time           `json:"created_at"`
@@ -27,6 +28,12 @@ type Session struct {
 	SourcePersistName  string `json:"source_persist_name,omitempty"`
 	CreatedByHandoffID string `json:"created_by_handoff_id,omitempty"`
 }
+
+const (
+	LocalHostID      = "local"
+	LocalPersistKind = "cmux"
+	ParentRole       = "parent"
+)
 
 // HandoffKind is agent (interactive CLI) or job (long command).
 type HandoffKind string
@@ -48,7 +55,8 @@ const (
 	StatusAbandoned  HandoffStatus = "abandoned"
 )
 
-// Handoff is a goal-driven remote work unit bound to a session.
+// Handoff is a long-lived, goal-driven remote work unit bound to a session.
+// Its lineage and event cursors survive agent and transport lifetimes.
 type Handoff struct {
 	ID                string        `json:"id"`
 	SessionID         string        `json:"session_id"`
@@ -60,6 +68,7 @@ type Handoff struct {
 	Command           string        `json:"command,omitempty"`
 	EventsPath        string        `json:"events_path"`
 	LastSeq           int64         `json:"last_seq"`
+	ParentSeq         int64         `json:"parent_seq,omitempty"`
 	ExitCode          *int          `json:"exit_code,omitempty"`
 	Outcome           string        `json:"outcome,omitempty"`
 	CreatedAt         time.Time     `json:"created_at"`

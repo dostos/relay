@@ -57,6 +57,27 @@ func TestAgentLaunchCCS(t *testing.T) {
 	}
 }
 
+func TestAgentLaunchHooksAreGeneralAndProviderAware(t *testing.T) {
+	codex := (&AgentSpec{Name: "codex"}).LaunchCommand("goal")
+	for _, want := range []string{"PermissionRequest", "relay hook --kind result", "relay\" signal exit"} {
+		if !strings.Contains(codex, want) {
+			t.Fatalf("codex command missing %q: %s", want, codex)
+		}
+	}
+	claude := (&AgentSpec{Name: "claude"}).LaunchCommand("goal")
+	if !strings.Contains(claude, "--settings") || !strings.Contains(claude, "permission_required") {
+		t.Fatalf("claude hooks missing: %s", claude)
+	}
+	cursor := (&AgentSpec{Name: "cursor-agent"}).LaunchCommand("goal")
+	if !strings.Contains(cursor, "signal exit") {
+		t.Fatalf("generic exit wrapper missing: %s", cursor)
+	}
+	off := (&AgentSpec{Name: "codex", RelayHooks: "off"}).LaunchCommand("goal")
+	if strings.Contains(off, "PermissionRequest") || strings.Contains(off, "signal exit") {
+		t.Fatalf("hooks off ignored: %s", off)
+	}
+}
+
 func TestLoginCommandPerAgent(t *testing.T) {
 	cases := []struct {
 		name string

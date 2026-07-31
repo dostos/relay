@@ -111,7 +111,7 @@ func (m *MaintenanceService) registryHosts() []string {
 	seen := map[string]bool{}
 	var out []string
 	add := func(h string) {
-		if h != "" && !seen[h] {
+		if h != "" && h != LocalHostID && !seen[h] {
 			seen[h] = true
 			out = append(out, h)
 		}
@@ -133,6 +133,9 @@ func (m *MaintenanceService) registryHosts() []string {
 
 func (m *MaintenanceService) gcHost(ctx context.Context, host string, channelTTL time.Duration, skipChannels, dryRun bool) GCHostResult {
 	res := GCHostResult{Host: host}
+	if host == LocalHostID {
+		return res
+	}
 	t, err := m.NewTransport(host)
 	if err != nil {
 		return res

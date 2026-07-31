@@ -49,6 +49,20 @@ func TestSourceEnvironmentUsesAuthenticatedRegistryIdentity(t *testing.T) {
 	}
 }
 
+func TestParentCallerScope(t *testing.T) {
+	t.Setenv(bridge.SourceSessionEnv, "sess-parent")
+	if err := authorizeParentCaller("sess-parent"); err != nil {
+		t.Fatalf("own parent rejected: %v", err)
+	}
+	if err := authorizeParentCaller("sess-other"); err == nil {
+		t.Fatal("cross-parent access should be rejected")
+	}
+	t.Setenv(bridge.SourceSessionEnv, "")
+	if err := authorizeParentCaller("sess-local"); err != nil {
+		t.Fatalf("local desktop invocation rejected: %v", err)
+	}
+}
+
 func TestUnknownFlagRejected(t *testing.T) {
 	a := New()
 	if code := a.Run([]string{"session", "create", "--bogus", "x"}); code == 0 {

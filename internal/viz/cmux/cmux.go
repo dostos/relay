@@ -201,6 +201,73 @@ func (v *Viz) BindCurrent(ctx context.Context, sessionID, attachCmd string) (str
 	return v.BindSurface(ctx, sessionID, attachCmd, surface)
 }
 
+// BindLocalParent records an existing cmux surface as a Relay parent without
+// changing its title, command, or resume checkpoint. The local agent remains
+// the owner of its pane lifecycle until the guarded parent-retire path closes it.
+func (v *Viz) BindLocalParent(ctx context.Context, sessionID, surface string) (string, error) {
+	surface = strings.TrimSpace(surface)
+	if surface == "" {
+		return "", fmt.Errorf("surface required")
+	}
+	loc := v.locationOfSurface(ctx, surface)
+	if loc.Workspace == "" || loc.Pane == "" {
+		return "", fmt.Errorf("cmux surface %s is not live", surface)
+	}
+	now := time.Now().UTC()
+	b := binding{V: 2, SessionID: sessionID, Surface: surface, Pane: loc.Pane, Workspace: loc.Workspace, Mode: "current", CreatedAt: now, UpdatedAt: now}
+	if old, err := v.lookup(sessionID); err == nil && !old.CreatedAt.IsZero() {
+		b.CreatedAt = old.CreatedAt
+	}
+	v.mu.Lock()
+	v.bindings[sessionID] = b
+	v.mu.Unlock()
+	if err := v.persistBinding(sessionID, b); err != nil {
+		return "", err
+	}
+	return surface, nil
+}
+
+// NotifyParent emits a desktop notification/flash and, for agent parents,
+// injects one compact actionable envelope. The durable inbox deduplicates the
+// event before this method is called, so a replay cannot spam the pane.
+func (v *Viz) NotifyParent(ctx context.Context, sessionID string, notice core.ParentNotice) error {
+	b, err := v.lookup(sessionID)
+	if err != nil {
+		return err
+	}
+	if v.locationOfSurface(ctx, b.Surface).Workspace == "" {
+		return fmt.Errorf("parent surface %s is not live", b.Surface)
+	}
+	body := compactNotice(notice)
+	args := []string{"notify", "--title", "Relay: " + notice.Kind, "--body", body, "--surface", b.Surface}
+	if b.Workspace != "" {
+		args = append(args, "--workspace", b.Workspace)
+	}
+	_, _ = v.run(ctx, args...)
+	flash := []string{"trigger-flash", "--surface", b.Surface}
+	if b.Workspace != "" {
+		flash = append(flash, "--workspace", b.Workspace)
+	}
+	_, _ = v.run(ctx, flash...)
+	sess, _ := (&core.Registry{}).GetSession(sessionID)
+	if sess == nil || sess.Labels["wake_mode"] != "inject" {
+		return nil
+	}
+	if _, err := v.run(ctx, "send", "--surface", b.Surface, "--", body); err != nil {
+		return err
+	}
+	_, err = v.run(ctx, "send-key", "--surface", b.Surface, "ENTER")
+	return err
+}
+
+func compactNotice(n core.ParentNotice) string {
+	text := strings.Join(strings.Fields(n.Text), " ")
+	if len(text) > 320 {
+		text = text[:319] + "…"
+	}
+	return fmt.Sprintf("[relay %s %s child=%s] %s; %s: relay parent %s --message %s", n.Kind, n.MessageID, n.Child, text, n.Action, n.Action, n.MessageID)
+}
+
 // BindSurface makes an existing cmux surface authoritative for a relay
 // session. It is used both when a named session claims the caller's pane and
 // when cmux restores a pane under a new surface reference.

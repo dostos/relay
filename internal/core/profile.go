@@ -35,11 +35,12 @@ type HostProfile struct {
 
 // AgentSpec describes an agent CLI available on the host.
 type AgentSpec struct {
-	Name    string            `yaml:"name" json:"name"` // claude | cursor-agent | codex | ccs:personal | …
-	Command string            `yaml:"command,omitempty" json:"command,omitempty"`
-	Args    []string          `yaml:"args,omitempty" json:"args,omitempty"`
-	Env     map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
-	Notes   string            `yaml:"notes,omitempty" json:"notes,omitempty"`
+	Name       string            `yaml:"name" json:"name"` // claude | cursor-agent | codex | ccs:personal | …
+	Command    string            `yaml:"command,omitempty" json:"command,omitempty"`
+	Args       []string          `yaml:"args,omitempty" json:"args,omitempty"`
+	Env        map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
+	RelayHooks string            `yaml:"relay_hooks,omitempty" json:"relay_hooks,omitempty"` // auto (default) | off
+	Notes      string            `yaml:"notes,omitempty" json:"notes,omitempty"`
 }
 
 // PathMapEntry maps a local identity to a remote working directory.
@@ -206,7 +207,38 @@ func (a *AgentSpec) LaunchCommand(goal string) string {
 		inner = shellJoin(append([]string{inner}, a.Args...))
 	}
 	_ = goal
-	return wrapLoginShell(inner)
+	if strings.EqualFold(a.RelayHooks, "off") {
+		return wrapLoginShell(inner)
+	}
+	inner = withAgentRelayHooks(*a, inner)
+	// Every CLI, including agents without a hook API, gets a terminal signal.
+	// Provider hooks add permission/result events; tmux silence remains the
+	// bounded fallback for unsupported CLIs.
+	script := inner + `; relay_agent_rc=$?; "$HOME/.local/bin/relay" signal exit --text "agent exited" --correlation terminal >/dev/null 2>&1 || true; exit $relay_agent_rc`
+	return "bash -ilc " + shellQuote(script)
+}
+
+func withAgentRelayHooks(a AgentSpec, inner string) string {
+	base := strings.ToLower(path.Base(strings.Fields(a.InnerCommand())[0]))
+	permission := `$HOME/.local/bin/relay hook --kind permission_required`
+	result := `$HOME/.local/bin/relay hook --kind result`
+	switch {
+	case base == "codex" || a.Name == "codex":
+		permissionCfg := `hooks.PermissionRequest=[{hooks=[{type="command",command='''` + permission + `''',timeout=120000}]}]`
+		resultCfg := `hooks.Stop=[{hooks=[{type="command",command='''` + result + `''',timeout=120000}]}]`
+		return inner + " -c " + shellQuote(permissionCfg) + " -c " + shellQuote(resultCfg)
+	case base == "claude" || a.Name == "claude":
+		settings := map[string]any{
+			"hooks": map[string]any{
+				"PermissionRequest": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": permission, "timeout": 120}}}},
+				"Stop":              []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": result, "timeout": 120}}}},
+			},
+		}
+		raw, _ := json.Marshal(settings)
+		return inner + " --settings " + shellQuote(string(raw))
+	default:
+		return inner
+	}
 }
 
 // wrapLoginShell ensures remotes see a full user PATH (nvm, ~/.local/bin, …).
@@ -508,6 +540,7 @@ host_id: %s
 agents:
   - name: claude
     command: claude
+    relay_hooks: auto
     notes: interactive Claude Code CLI
   - name: cursor-agent
     command: cursor-agent

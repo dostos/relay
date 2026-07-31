@@ -58,6 +58,9 @@ relay viz present|close sess-…
 relay pane list                                # exact workspace/pane/parent bindings
 relay pane rename sess-… personal-db           # persistent UI alias; tmux identity stays stable
 relay history                                 # durable source → destination graph
+relay parent register                         # make current local pane a lineage parent
+relay parent link --parent sess-… --handoff ho-… # adopt existing goal orchestration
+relay parent status SESSION_ID                # token-efficient retirement gate
 ```
 
 After cmux quit/reopen: panes re-attach via Vault (`relay install-cmux-restore`) or manually `relay viz save` then `relay viz restore`.

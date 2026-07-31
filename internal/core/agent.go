@@ -37,7 +37,7 @@ func DecideNext(kind HandoffKind, evKind string, timedOut bool) (next string, hi
 	switch evKind {
 	case "exit":
 		return "done", "remote exited; finalize with done"
-	case "needs_input":
+	case "needs_input", "permission_required":
 		if kind == KindJob {
 			return "escalate", "job needs_input — do not inject; escalate to human"
 		}
@@ -186,7 +186,7 @@ func (h *HandoffService) AgentWait(ctx context.Context, handoffID string, fromSe
 	subErr := streamEvents(wctx, h.Coord, t, sess.Persist.Name, fromSeq, true, func(ev Event) bool {
 		ho.LastSeq = ev.Seq
 		switch ev.Kind {
-		case "needs_input", "ask":
+		case "needs_input", "permission_required", "ask":
 			ho.Status = StatusNeedsInput
 		case "idle":
 			if ho.Kind == KindAgent {
@@ -199,7 +199,7 @@ func (h *HandoffService) AgentWait(ctx context.Context, handoffID string, fromSe
 
 		// Explicit-signaling kinds are actionable regardless of handoff kind:
 		// the agent declared its state instead of us inferring it from silence.
-		actionable := ev.Kind == "exit" || ev.Kind == "needs_input" ||
+		actionable := ev.Kind == "exit" || ev.Kind == "needs_input" || ev.Kind == "permission_required" ||
 			ev.Kind == "ask" || ev.Kind == "note" || ev.Kind == "progress" || ev.Kind == "result" ||
 			(ev.Kind == "idle" && ho.Kind == KindAgent)
 		if !actionable {
@@ -207,6 +207,9 @@ func (h *HandoffService) AgentWait(ctx context.Context, handoffID string, fromSe
 		}
 		cp := ev
 		got = &cp
+		if h.ParentRouter != nil {
+			_, _ = h.ParentRouter.RouteChildEvent(wctx, ho, ev)
+		}
 		cancel() // stop subscribe
 		return false
 	})

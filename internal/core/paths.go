@@ -29,6 +29,8 @@ func HandoffsDir() string             { return filepath.Join(StateRoot(), "hando
 func LedgerPath() string              { return filepath.Join(StateRoot(), "handoffs", "ledger.jsonl") }
 func DesktopBridgeSocketPath() string { return filepath.Join(StateRoot(), "desktop-bridge.sock") }
 func BridgeTokensDir() string         { return filepath.Join(StateRoot(), "bridge-tokens") }
+func ParentInboxDir() string          { return filepath.Join(StateRoot(), "parent-inbox") }
+func ParentWatchDir() string          { return filepath.Join(StateRoot(), "parent-watch") }
 func ProfileCacheDir() string {
 	return filepath.Join(StateRoot(), "hosts")
 }
@@ -54,7 +56,7 @@ func sanitizeID(s string) string {
 
 // EnsureStateDirs creates local state directories.
 func EnsureStateDirs() error {
-	for _, d := range []string{StateRoot(), HandoffsDir(), ProfileCacheDir(), PanesDir(), BridgeTokensDir()} {
+	for _, d := range []string{StateRoot(), HandoffsDir(), ProfileCacheDir(), PanesDir(), BridgeTokensDir(), ParentInboxDir(), ParentWatchDir()} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			return err
 		}

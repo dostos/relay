@@ -46,7 +46,7 @@ func TestRejectInteractiveForward(t *testing.T) {
 
 func TestBridgeAllowlist(t *testing.T) {
 	for _, argv := range [][]string{
-		{"c1", "named"}, {"agent", "start", "-H", "c1", "--goal", "x"}, {"--json", "history"},
+		{"c1", "named"}, {"agent", "start", "-H", "c1", "--goal", "x"}, {"parent", "reply", "--message", "pm-1", "--text", "yes"}, {"--json", "history"},
 	} {
 		if err := validateArgv(argv); err != nil {
 			t.Fatalf("expected %v to be allowed: %v", argv, err)
@@ -54,6 +54,8 @@ func TestBridgeAllowlist(t *testing.T) {
 	}
 	for _, argv := range [][]string{
 		{"host", "bootstrap", "-H", "c1"}, {"auth", "copy"}, {"session", "destroy", "sess-x"},
+		{"parent", "register", "--surface", "surface:1"}, {"parent", "link", "--parent", "sess-p", "--handoff", "ho-1"},
+		{"parent", "retire", "sess-p"}, {"parent", "watch", "--handoff", "ho-1"},
 	} {
 		if err := validateArgv(argv); err == nil {
 			t.Fatalf("expected %v to be rejected", argv)
@@ -74,7 +76,7 @@ func TestDesktopInvokeEnvDropsStaleCmuxCaller(t *testing.T) {
 }
 
 func TestSerializeInvocationDoesNotBlockWaits(t *testing.T) {
-	for _, argv := range [][]string{{"c1", "named"}, {"agent", "start", "-H", "c1"}, {"agent", "done", "--handoff", "ho-1"}} {
+	for _, argv := range [][]string{{"c1", "named"}, {"agent", "start", "-H", "c1"}, {"agent", "done", "--handoff", "ho-1"}, {"parent", "reply", "--message", "pm-1", "--text", "yes"}} {
 		if !serializeInvocation(argv) {
 			t.Fatalf("expected %v to serialize", argv)
 		}

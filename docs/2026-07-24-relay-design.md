@@ -100,3 +100,44 @@ SSH config remains connection source of truth. Discover never writes; init dry-r
 `pending → running → needs_input ↔ running → done|failed|abandoned`
 
 Events: `started`, `idle`, `needs_input`, `note`, `inject`, `exit` with monotonic `seq`. Resume with `--from SEQ`.
+
+## Local parents and decision inbox
+
+This parent/child path is the durable orchestration contract for long-lived,
+goal-based handoffs. It deliberately carries correlated decisions and terminal
+receipts rather than conversation history or transcripts, and persists across
+agent processes, SSH reconnects, nested relays, and cmux restarts.
+
+A cmux main-agent surface is registered as a normal session with
+`host_id=local`, `persist.kind=cmux`, a stable session id, scoped Git roots,
+and an authoritative viz binding. Local registration never changes the pane's
+command or resume checkpoint. Handoffs launched there carry the parent session
+id exactly like remote-to-remote bridge launches.
+
+Existing goals can be migrated with `relay parent link --parent sess-…
+--handoff ho-…`; the link is one-time and starts the same blocking watcher.
+
+Each parented handoff starts one detached watcher using a single blocking
+relayd subscription. The watcher routes only actionable events into
+`parent-inbox/<parent>/<message>.json`: `ask`, `permission_required`, `result`,
+and `exit`; ambiguous agent `idle` becomes a short decision request with at
+most four captured lines. Envelopes are bounded and deduplicated by
+parent/handoff/kind/sequence, so replays do not notify twice.
+
+The cmux adapter sends a desktop notification and flash to the exact bound
+surface. Agent parents additionally receive one compact prompt containing the
+message id and the exact `parent reply` or `parent ack` verb. Replies inject
+only the decision text into the child and emit a correlated `inject` event.
+Request, reply, and acknowledgment records are appended to `relay history`.
+
+`relay signal` is the provider-neutral hook protocol. Relay injects native
+PermissionRequest/Stop adapters for Codex and Claude, wraps every agent for an
+exit signal, and keeps tmux silence as the fallback for CLIs without hooks.
+`relay hook` accepts bounded JSON stdin from any vendor hook and extracts only
+small useful fields.
+
+Local-parent retirement is fail-closed. It requires: explicit idle/complete
+state; no nonterminal child handoffs; no pending inbox messages; and every
+scoped Git root clean, reachable upstream, and zero commits ahead after a
+fresh fetch. Only then is the exact parent surface closed and its registry
+record removed. Generic session destruction and GC cannot reap local parents.

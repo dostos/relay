@@ -245,6 +245,9 @@ func (s *SessionService) Rename(ctx context.Context, id, name string) (*Session,
 	if err != nil {
 		return nil, err
 	}
+	if isLocalParent(sess) {
+		return nil, fmt.Errorf("local parent identity is pane-owned; re-register it with relay parent register")
+	}
 	safe, err := shellquote.SanitizeSessionName(name)
 	if err != nil {
 		return nil, err
@@ -382,6 +385,9 @@ func (s *SessionService) Destroy(ctx context.Context, id string, keepRemote bool
 	if err != nil {
 		return err
 	}
+	if isLocalParent(sess) {
+		return fmt.Errorf("refuse unguarded local parent destruction; use relay parent retire %s", id)
+	}
 	if !keepRemote {
 		t, err := s.transportFor(sess)
 		if err != nil {
@@ -453,7 +459,7 @@ type RemoteLiveness struct {
 func (s *SessionService) ProbeRemoteTmux(ctx context.Context, names []ResumeInfo) RemoteLiveness {
 	byHost := map[string][]string{}
 	for _, n := range names {
-		if n.HostID == "" || n.PersistName == "" {
+		if n.HostID == "" || n.HostID == LocalHostID || n.PersistName == "" {
 			continue
 		}
 		byHost[n.HostID] = append(byHost[n.HostID], n.PersistName)

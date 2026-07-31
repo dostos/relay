@@ -21,6 +21,10 @@ relay agent send --handoff ho-… -- "…"                # agent only; refused 
 relay agent capture --handoff ho-…                    # if unsure before send
 relay agent done --handoff ho-… --outcome done
 relay agent status --handoff ho-…                     # resume after compaction
+relay parent inbox --session sess-…                    # compact child requests/results
+relay parent link --parent sess-… --handoff ho-…       # adopt an existing long-lived goal
+relay parent reply --message pm-… --text "…"           # correlated decision → child
+relay parent ack --message pm-…                        # consume result/exit
 relay history                                          # who handed off to whom
 ```
 
@@ -36,6 +40,16 @@ Rules encoded in `next` (do not re-derive):
 - Agent `idle`/`needs_input` → send or escalate
 - `exit` → done
 - Timeout → wait again on a **new turn** (not a tight loop)
+
+When launched from a local cmux agent, Relay registers that surface as a real
+parent session and starts one detached blocking watcher. Hooks emit compact
+`ask|permission_required|result|exit` envelopes; the watcher deduplicates by
+handoff+sequence and wakes the exact parent pane. Do not forward transcripts.
+
+Before closing a local parent, use `relay parent state … --state complete` then
+`relay parent retire … --dry-run`. Retirement is refused while a child is
+active, an inbox item is pending, a scoped repo is dirty/unpushed/unverifiable,
+or the parent is not explicitly idle/complete.
 
 Requires once per host: `relay host bootstrap -H HOST` (installs both the
 remote `relay` client and `relayd`).

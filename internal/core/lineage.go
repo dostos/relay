@@ -103,13 +103,23 @@ func AppendSessionRename(sessionID, oldName, newName string) error {
 // AppendRelayEdge records a new transition into an already-existing named
 // session. Session creation already writes the initial edge itself.
 func AppendRelayEdge(sourceSessionID, targetSessionID string) error {
+	return AppendRelayHandoffEdge(sourceSessionID, targetSessionID, "")
+}
+
+// AppendRelayHandoffEdge records a migration edge with the goal handoff that
+// owns it. It is used when adopting work created before a parent was known.
+func AppendRelayHandoffEdge(sourceSessionID, targetSessionID, handoffID string) error {
 	if sourceSessionID == "" || targetSessionID == "" {
 		return nil
 	}
-	return AppendLedger(map[string]any{
+	record := map[string]any{
 		"v": 1, "type": "relay_edge", "ts": time.Now().UTC().Format(time.RFC3339),
 		"source_session_id": sourceSessionID, "target_session_id": targetSessionID,
-	})
+	}
+	if handoffID != "" {
+		record["handoff_id"] = handoffID
+	}
+	return AppendLedger(record)
 }
 
 // HistoryNode is a durable session snapshot.
@@ -130,9 +140,21 @@ type HistoryEdge struct {
 	CreatedAt       time.Time `json:"created_at"`
 }
 
+type HistoryCommunication struct {
+	MessageID       string    `json:"message_id"`
+	CorrelationID   string    `json:"correlation_id"`
+	ParentSessionID string    `json:"parent_session_id"`
+	ChildSessionID  string    `json:"child_session_id"`
+	HandoffID       string    `json:"handoff_id,omitempty"`
+	Kind            string    `json:"kind"`
+	Action          string    `json:"action"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
 type HistoryGraph struct {
-	Nodes []HistoryNode `json:"nodes"`
-	Edges []HistoryEdge `json:"edges"`
+	Nodes          []HistoryNode          `json:"nodes"`
+	Edges          []HistoryEdge          `json:"edges"`
+	Communications []HistoryCommunication `json:"communications,omitempty"`
 }
 
 // LoadHistory reconstructs lineage from the append-only ledger. Malformed
@@ -148,6 +170,7 @@ func LoadHistory() (*HistoryGraph, error) {
 	defer f.Close()
 	nodes := map[string]HistoryNode{}
 	var edges []HistoryEdge
+	var communications []HistoryCommunication
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 2<<20)
 	for sc.Scan() {
@@ -156,6 +179,15 @@ func LoadHistory() (*HistoryGraph, error) {
 			continue
 		}
 		typ, _ := raw["type"].(string)
+		if typ == "communication" {
+			ts, _ := time.Parse(time.RFC3339, textField(raw, "ts"))
+			communications = append(communications, HistoryCommunication{
+				MessageID: textField(raw, "message_id"), CorrelationID: textField(raw, "correlation_id"),
+				ParentSessionID: textField(raw, "parent_session_id"), ChildSessionID: textField(raw, "child_session_id"),
+				HandoffID: textField(raw, "handoff_id"), Kind: textField(raw, "kind"), Action: textField(raw, "action"), CreatedAt: ts,
+			})
+			continue
+		}
 		if typ == "session_rename" {
 			id := textField(raw, "session_id")
 			if node, ok := nodes[id]; ok {
@@ -168,7 +200,7 @@ func LoadHistory() (*HistoryGraph, error) {
 			ts, _ := time.Parse(time.RFC3339, textField(raw, "ts"))
 			edges = append(edges, HistoryEdge{
 				SourceSessionID: textField(raw, "source_session_id"),
-				TargetSessionID: textField(raw, "target_session_id"), CreatedAt: ts,
+				TargetSessionID: textField(raw, "target_session_id"), HandoffID: textField(raw, "handoff_id"), CreatedAt: ts,
 			})
 			continue
 		}
@@ -197,12 +229,15 @@ func LoadHistory() (*HistoryGraph, error) {
 	if err := sc.Err(); err != nil {
 		return nil, err
 	}
-	graph := &HistoryGraph{Edges: edges}
+	graph := &HistoryGraph{Edges: edges, Communications: communications}
 	for _, node := range nodes {
 		graph.Nodes = append(graph.Nodes, node)
 	}
 	sort.Slice(graph.Nodes, func(i, j int) bool { return graph.Nodes[i].CreatedAt.Before(graph.Nodes[j].CreatedAt) })
 	sort.Slice(graph.Edges, func(i, j int) bool { return graph.Edges[i].CreatedAt.Before(graph.Edges[j].CreatedAt) })
+	sort.Slice(graph.Communications, func(i, j int) bool {
+		return graph.Communications[i].CreatedAt.Before(graph.Communications[j].CreatedAt)
+	})
 	return graph, nil
 }
 
@@ -269,6 +304,12 @@ func FormatHistory(graph *HistoryGraph) string {
 	for _, root := range roots {
 		fmt.Fprintln(&out, sessionLabel(root))
 		walk(root.SessionID, "", map[string]bool{})
+	}
+	if len(graph.Communications) > 0 {
+		fmt.Fprintln(&out, "Communications:")
+		for _, message := range graph.Communications {
+			fmt.Fprintf(&out, "  %s %s %s (%s)\n", message.MessageID, message.Action, message.Kind, message.CorrelationID)
+		}
 	}
 	return out.String()
 }

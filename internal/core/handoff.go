@@ -22,6 +22,7 @@ type HandoffService struct {
 	Coord        ports.Coord // always-on relayd over SSH
 	Viz          ports.Viz   // optional; may be nil or Unavailable
 	NewTransport TransportFactory
+	ParentRouter ParentEventRouter
 }
 
 // HandoffOpts configures a launch.

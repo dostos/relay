@@ -35,9 +35,10 @@ relay msg wait -H hamburg -c teamX --from 1 --timeout 60
 
 Workflow: [`examples/msg-bus.sh`](examples/msg-bus.sh).
 
-## B — explicit agent signaling
+## B — explicit goal-handoff signaling
 
-An agent **declares** its state instead of falling silent. It emits a typed
+This is Relay's long-lived goal orchestration channel, not agent chat. An agent
+**declares** its state instead of falling silent. It emits a typed
 event into its own session stream; the orchestrator's existing `agent wait`
 surfaces it — no `idle` heuristic, no screen-scrape.
 
@@ -47,6 +48,26 @@ relayd emit -s "$RELAY_SESSION" --kind ask    --meta '{"q":"which env: prod or d
 relayd emit -s "$RELAY_SESSION" --kind note   --meta '{"text":"cloned repo, building"}'
 relayd emit -s "$RELAY_SESSION" --kind result --meta '{"text":"tests pass","meta":{"cov":0.91}}'
 ```
+
+The portable hook surface is shorter and uses Relay's injected session name:
+
+```bash
+relay signal ask --text "prod or dev?" --correlation env-choice
+relay signal permission_required --text "approve deploy" --correlation deploy-1
+relay signal result --text "tests pass"
+
+# From a vendor hook (JSON on stdin is bounded; only useful fields are kept):
+relay hook --kind permission_required
+```
+
+Codex and Claude handoffs receive native permission/result hook adapters by
+default. Other CLIs still get an exit wrapper and can invoke the same commands
+from their hook system; `relay_hooks: off` disables injection per agent.
+
+For a parented handoff these events are also written to the parent's durable
+inbox and wake its exact cmux pane. Use `relay parent reply`/`ack`; do not send
+transcripts through the channel bus. Correlation and durable acknowledgments
+keep the goal valid across nested handoffs, reconnects, and agent replacement.
 
 `agent wait` maps them: `ask → next=send` (with `text` = the question),
 `note`/`progress`/`result` → surfaced but `next=wait`. `exit` still finalizes.
