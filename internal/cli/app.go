@@ -913,6 +913,17 @@ func (a *App) cmdNamed(ctx context.Context, host, name string) int {
 	} else {
 		opts.RemoteCWD = "~"
 	}
+	// Remember the registered identity before OpenNamed probes tmux. If the
+	// remote session died, OpenNamed replaces that registry record; its old
+	// cmux binding must not remain as a duplicate of the replacement pane.
+	var previousIDs []string
+	if sessions, listErr := a.Reg.ListSessions(); listErr == nil {
+		for _, candidate := range sessions {
+			if candidate.HostID == host && candidate.Persist.Name == name {
+				previousIDs = append(previousIDs, candidate.ID)
+			}
+		}
+	}
 	sess, created, err := a.Sessions.OpenNamed(ctx, opts)
 	if err != nil {
 		if errors.Is(err, core.ErrMissingProfile) {
@@ -922,6 +933,13 @@ func (a *App) cmdNamed(ctx context.Context, host, name string) int {
 			})
 		}
 		return a.fail(err)
+	}
+	if forgetter, ok := a.Viz.(interface{ ForgetBinding(string) error }); ok {
+		for _, previousID := range previousIDs {
+			if previousID != sess.ID {
+				_ = forgetter.ForgetBinding(previousID)
+			}
+		}
 	}
 	if sourceID != "" && sourceID != sess.ID && !created {
 		_ = core.AppendRelayEdge(sourceID, sess.ID)

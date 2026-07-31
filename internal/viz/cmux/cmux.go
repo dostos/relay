@@ -242,6 +242,20 @@ func (v *Viz) ReparentBinding(childSessionID, parentSessionID string) error {
 	return v.persistBinding(childSessionID, b)
 }
 
+// ForgetBinding removes obsolete ownership metadata without closing its
+// surface. Named-session replacement uses this after a dead tmux is recreated
+// in the same current pane.
+func (v *Viz) ForgetBinding(sessionID string) error {
+	v.mu.Lock()
+	delete(v.bindings, sessionID)
+	v.mu.Unlock()
+	err := os.Remove(bindPath(sessionID))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
 // NotifyParent emits a desktop notification/flash and, for agent parents,
 // injects one compact actionable envelope. The durable inbox deduplicates the
 // event before this method is called, so a replay cannot spam the pane.

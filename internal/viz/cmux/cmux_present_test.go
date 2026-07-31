@@ -130,6 +130,25 @@ func TestReparentBindingUpdatesOnlyLineage(t *testing.T) {
 	}
 }
 
+func TestForgetBindingDoesNotTouchReplacement(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	v := New()
+	for _, id := range []string{"sess-dead", "sess-replacement"} {
+		if err := v.persistBinding(id, binding{SessionID: id, Surface: "surface:3", Attach: "relay resume --session engram"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := v.ForgetBinding("sess-dead"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.loadBinding("sess-dead"); err == nil {
+		t.Fatal("dead binding remains")
+	}
+	if _, err := v.loadBinding("sess-replacement"); err != nil {
+		t.Fatalf("replacement binding removed: %v", err)
+	}
+}
+
 func TestClosePersistRemovesBindingWithoutCmux(t *testing.T) {
 	t.Setenv("RELAY_STATE_DIR", t.TempDir())
 	v := &Viz{Bin: "/definitely/missing/cmux", bindings: map[string]binding{}}
