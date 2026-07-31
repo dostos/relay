@@ -104,12 +104,11 @@ a secret in its prompt. Repair a session adopted by an older Relay release in
 place with `relay session bridge sess-…`; no agent or tmux restart is needed.
 
 Each child has one detached blocking event watcher. Agent hooks publish
-`ask`, `permission_required`, `result`, and `exit`; Relay deduplicates by
+`permission_required`, `result`, and `exit`; the tmux-idle sensor supplies the
+`ask` fallback for agents without an input hook. Relay deduplicates by
 handoff/sequence, stores a bounded envelope, and wakes the exact parent pane.
-No transcript is forwarded. Codex and Claude hook adapters are injected by
-default, every agent gets a generic exit wrapper, and unsupported CLIs retain
-the tmux-idle fallback. Set `relay_hooks: off` on an agent only when its runtime
-cannot execute hooks.
+No transcript is forwarded and no Relay instruction is added to the child
+goal. Set `relay_hooks: off` only when an agent runtime cannot execute hooks.
 
 Closing a local parent is deliberately gated:
 
@@ -218,7 +217,6 @@ relay session … / session adopt             # durable tmux
 relay agent start|wait|send|capture|done    # orchestrator API
 relay parent register|inbox|reply|ack       # durable parent communication
 relay parent status|retire                  # guarded local-pane cleanup
-relay signal / relay hook                   # agent-neutral event contract
 relay history                               # source → destination lineage
 relay pane list                             # owned surface/workspace/pane + parent + liveness
 relay pane rename SESSION_ID NAME           # durable display alias; leaves tmux identity intact

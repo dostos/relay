@@ -477,8 +477,6 @@ Long-lived goal orchestration (durable compact inbox + guarded local-pane cleanu
   relay parent state PARENT active|idle|complete
   relay parent status ID
   relay parent retire ID [--dry-run]
-  relay signal ask|permission_required|result|exit [--text TEXT] [--correlation ID]
-  relay hook --kind KIND                 # agent hook adapter; bounded JSON stdin
 
 Agent-to-agent messages (relayd channels; any channel name):
   relay msg send -H HOST -c CHANNEL [--kind K] [--from ID] [--text ... | -- ...] [--meta JSON]
@@ -2038,7 +2036,7 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 				"execute response.argv once",
 				"after a wait timeout stop the turn; never poll or attach",
 				"use parent inbox for decisions and receipts; never send transcripts",
-				"child state uses relay signal ask|permission_required|result|exit; hooks may call it",
+				"agent hooks ping the parent on input, result, and exit",
 			},
 		}))
 	case "pick":
