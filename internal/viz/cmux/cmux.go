@@ -227,6 +227,21 @@ func (v *Viz) BindLocalParent(ctx context.Context, sessionID, surface string) (s
 	return surface, nil
 }
 
+// ReparentBinding keeps persisted pane lineage aligned with an explicit
+// parent-edge repair. It does not move the pane; layout remains stable.
+func (v *Viz) ReparentBinding(childSessionID, parentSessionID string) error {
+	b, err := v.lookup(childSessionID)
+	if err != nil {
+		return err
+	}
+	b.SourceSessionID = parentSessionID
+	b.UpdatedAt = time.Now().UTC()
+	v.mu.Lock()
+	v.bindings[childSessionID] = b
+	v.mu.Unlock()
+	return v.persistBinding(childSessionID, b)
+}
+
 // NotifyParent emits a desktop notification/flash and, for agent parents,
 // injects one compact actionable envelope. The durable inbox deduplicates the
 // event before this method is called, so a replay cannot spam the pane.

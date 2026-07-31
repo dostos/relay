@@ -485,6 +485,7 @@ Long-lived goal orchestration (durable compact inbox + guarded local-pane cleanu
   relay parent move PARENT HANDOFF             # explicitly repair a wrong parent edge
   relay parent list
   relay parent inbox PARENT [--all]
+  relay parent sweep PARENT                  # ack stale notices from terminal children
   relay parent reply MESSAGE [--] TEXT
   relay parent ack MESSAGE
   relay parent state PARENT active|idle|complete
@@ -1647,7 +1648,7 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 	a.JSON = true
 	a.CompactJSON = true
 	if a.Parents == nil || len(args) == 0 {
-		return a.fail(fmt.Errorf("usage: relay parent register|link|list|inbox|reply|ack|state|status|retire …"))
+		return a.fail(fmt.Errorf("usage: relay parent register|link|list|inbox|sweep|reply|ack|state|status|retire …"))
 	}
 	switch args[0] {
 	case "register":
@@ -1727,7 +1728,7 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		if err != nil {
 			return a.fail(err)
 		}
-		a.restartParentWatcher(ho.ID)
+		a.ensureParentWatcher(ho.ID)
 		return a.errOut(a.out(map[string]any{"ok": true, "handoff_id": ho.ID, "child_session_id": ho.SessionID, "old_parent_session_id": oldParentID, "parent_session_id": parentID}))
 	case "list":
 		list, err := a.Reg.ListSessions()
@@ -1767,6 +1768,19 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 			items = append(items, core.CompactParentMessage(msg, all))
 		}
 		return a.errOut(a.out(map[string]any{"ok": true, "parent_session_id": parentID, "messages": items, "count": len(items)}))
+	case "sweep":
+		if len(args) != 2 || strings.HasPrefix(args[1], "-") {
+			return a.fail(fmt.Errorf("usage: relay parent sweep PARENT"))
+		}
+		parentID := args[1]
+		if err := authorizeParentCaller(parentID); err != nil {
+			return a.fail(err)
+		}
+		acked, byHandoff, err := a.Parents.SweepTerminal(parentID)
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "parent_session_id": parentID, "acked": acked, "by_handoff": byHandoff}))
 	case "reply":
 		messageID, text := parentMessageArgs(args[1:])
 		if messageID == "" || text == "" {
@@ -2051,22 +2065,16 @@ func (a *App) startParentWatcher(handoffID string) {
 	_ = logFile.Close()
 }
 
-func (a *App) restartParentWatcher(handoffID string) {
+func (a *App) ensureParentWatcher(handoffID string) {
 	raw, err := os.ReadFile(core.ParentWatchLockPath(handoffID))
 	pid, parseErr := strconv.Atoi(strings.TrimSpace(string(raw)))
 	if err == nil && parseErr == nil && pid > 1 && pid != os.Getpid() {
 		command, _ := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
 		cmdline := string(command)
 		if strings.Contains(cmdline, "relay") && strings.Contains(cmdline, "parent watch") && strings.Contains(cmdline, handoffID) {
-			if proc, findErr := os.FindProcess(pid); findErr == nil {
-				_ = proc.Signal(syscall.SIGTERM)
-				for i := 0; i < 20; i++ {
-					if syscall.Kill(pid, 0) != nil {
-						break
-					}
-					time.Sleep(50 * time.Millisecond)
-				}
-			}
+			// Watchers reload the handoff record before routing each event, so
+			// an existing watcher automatically observes a repaired parent edge.
+			return
 		}
 	}
 	a.startParentWatcher(handoffID)

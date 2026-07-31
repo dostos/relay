@@ -114,6 +114,13 @@ type ParentEventRouter interface {
 	RouteChildEvent(context.Context, *Handoff, coord.Event) (*ParentMessage, error)
 }
 
+// ChildParentBinder is an optional visualization capability used when an
+// operator repairs lineage for an already-presented child. The durable cmux
+// binding must follow the same parent edge or pane listings become misleading.
+type ChildParentBinder interface {
+	ReparentBinding(childSessionID, parentSessionID string) error
+}
+
 type ParentService struct {
 	Reg          *Registry
 	Sessions     *SessionService
@@ -349,9 +356,13 @@ func (p *ParentService) ReparentChild(parentID, handoffID string) (*Handoff, str
 	oldParentID := ho.SourceSessionID
 	if oldParentID == "" {
 		linked, linkErr := p.LinkChild(parentID, handoffID)
+		if linkErr == nil {
+			p.reparentPaneBinding(linked.SessionID, parentID)
+		}
 		return linked, "", linkErr
 	}
 	if oldParentID == parentID {
+		p.reparentPaneBinding(ho.SessionID, parentID)
 		return ho, oldParentID, nil
 	}
 	child, err := p.Reg.GetSession(ho.SessionID)
@@ -366,6 +377,7 @@ func (p *ParentService) ReparentChild(parentID, handoffID string) (*Handoff, str
 	if err := p.Reg.PutHandoff(ho); err != nil {
 		return nil, oldParentID, err
 	}
+	p.reparentPaneBinding(child.ID, parentID)
 	if messages, listErr := p.ListMessages(oldParentID, true); listErr == nil {
 		for _, msg := range messages {
 			if msg.HandoffID != handoffID {
@@ -388,6 +400,43 @@ func (p *ParentService) ReparentChild(parentID, handoffID string) (*Handoff, str
 		"child_session_id": child.ID, "handoff_id": ho.ID,
 	})
 	return ho, oldParentID, nil
+}
+
+func (p *ParentService) reparentPaneBinding(childSessionID, parentSessionID string) {
+	if binder, ok := p.Viz.(ChildParentBinder); ok {
+		_ = binder.ReparentBinding(childSessionID, parentSessionID)
+	}
+}
+
+func handoffTerminal(ho *Handoff) bool {
+	return ho != nil && (ho.Outcome != "" || ho.Status == StatusDone || ho.Status == StatusFailed || ho.Status == StatusAbandoned)
+}
+
+// SweepTerminal acknowledges stale pending messages for children whose
+// handoffs are already terminal. It never guesses about live or missing
+// handoffs; those remain visible for a manager decision.
+func (p *ParentService) SweepTerminal(parentID string) (int, map[string]int, error) {
+	if _, err := p.Reg.GetSession(parentID); err != nil {
+		return 0, nil, err
+	}
+	messages, err := p.ListMessages(parentID, true)
+	if err != nil {
+		return 0, nil, err
+	}
+	byHandoff := map[string]int{}
+	acked := 0
+	for _, msg := range messages {
+		ho, getErr := p.Reg.GetHandoff(msg.HandoffID)
+		if getErr != nil || !handoffTerminal(ho) {
+			continue
+		}
+		if _, err := p.Ack(msg.ID); err != nil {
+			return acked, byHandoff, err
+		}
+		acked++
+		byHandoff[msg.HandoffID]++
+	}
+	return acked, byHandoff, nil
 }
 
 func gitRoot(dir string) (string, error) {
@@ -598,7 +647,7 @@ func decisionExcerpt(capture string) string {
 }
 
 func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coord.Event) (*ParentMessage, error) {
-	if ho == nil || ho.SourceSessionID == "" {
+	if ho == nil || ho.SourceSessionID == "" || handoffTerminal(ho) {
 		return nil, nil
 	}
 	kind := attentionKind(ev)
@@ -735,6 +784,9 @@ func (p *ParentService) Watch(ctx context.Context, handoffID string) error {
 	if ho.SourceSessionID == "" {
 		return fmt.Errorf("handoff %s has no parent session", handoffID)
 	}
+	if handoffTerminal(ho) {
+		return nil
+	}
 	sess, err := p.Reg.GetSession(ho.SessionID)
 	if err != nil {
 		return err
@@ -755,6 +807,10 @@ func (p *ParentService) Watch(ctx context.Context, handoffID string) error {
 			latest, getErr := p.Reg.GetHandoff(handoffID)
 			if getErr == nil {
 				ho = latest
+			}
+			if handoffTerminal(ho) {
+				ended = true
+				return false
 			}
 			_, _ = p.RouteChildEvent(ctx, ho, ev)
 			if ev.Seq > ho.ParentSeq {

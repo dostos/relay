@@ -20,7 +20,8 @@ type fakeParentNotifier struct {
 }
 
 type fakeRetirementViz struct {
-	closed []string
+	closed    []string
+	reparents map[string]string
 }
 
 type recordingPersistence struct {
@@ -51,6 +52,13 @@ func (f *fakeRetirementViz) RestoreSaved(context.Context) (int, error) {
 	return 0, nil
 }
 func (f *fakeRetirementViz) BrandLabels(context.Context, map[string]string) error { return nil }
+func (f *fakeRetirementViz) ReparentBinding(childSessionID, parentSessionID string) error {
+	if f.reparents == nil {
+		f.reparents = map[string]string{}
+	}
+	f.reparents[childSessionID] = parentSessionID
+	return nil
+}
 
 func (f *fakeParentNotifier) BindLocalParent(_ context.Context, sessionID, surface string) (string, error) {
 	f.bound = append(f.bound, sessionID+"@"+surface)
@@ -268,6 +276,8 @@ func TestFormatParentNoticeQualifiesRemoteHandoff(t *testing.T) {
 
 func TestReparentChildMovesPendingInboxAndHistoryEdge(t *testing.T) {
 	service, _, reg := newParentTestService(t)
+	viz := &fakeRetirementViz{}
+	service.Viz = viz
 	now := time.Now().UTC()
 	oldParent := &Session{ID: "sess-old-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "beholder"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
 	newParent := &Session{ID: "sess-new-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "beholder-pdf"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
@@ -296,6 +306,9 @@ func TestReparentChildMovesPendingInboxAndHistoryEdge(t *testing.T) {
 	if err != nil || storedChild.SourceSessionID != newParent.ID {
 		t.Fatalf("child=%+v err=%v", storedChild, err)
 	}
+	if viz.reparents[child.ID] != newParent.ID {
+		t.Fatalf("pane parent=%q", viz.reparents[child.ID])
+	}
 	oldInbox, _ := service.ListMessages(oldParent.ID, true)
 	newInbox, _ := service.ListMessages(newParent.ID, true)
 	if len(oldInbox) != 0 || len(newInbox) != 1 || newInbox[0].ParentSessionID != newParent.ID {
@@ -304,6 +317,73 @@ func TestReparentChildMovesPendingInboxAndHistoryEdge(t *testing.T) {
 	graph, err := LoadHistory()
 	if err != nil || len(graph.Edges) != 1 || graph.Edges[0].SourceSessionID != newParent.ID || graph.Edges[0].HandoffID != ho.ID {
 		t.Fatalf("history=%+v err=%v", graph, err)
+	}
+}
+
+func TestReparentChildRefreshesPaneBindingWhenLineageAlreadyCorrect(t *testing.T) {
+	service, _, reg := newParentTestService(t)
+	viz := &fakeRetirementViz{}
+	service.Viz = viz
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "root"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c3", Persist: ports.PersistHandle{Kind: "tmux", Name: "worker"}, SourceSessionID: parent.ID, CreatedAt: now}
+	ho := &Handoff{ID: "ho-child", SessionID: child.ID, HostID: child.HostID, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
+	_ = reg.PutSession(parent)
+	_ = reg.PutSession(child)
+	_ = reg.PutHandoff(ho)
+	if _, _, err := service.ReparentChild(parent.ID, ho.ID); err != nil {
+		t.Fatal(err)
+	}
+	if viz.reparents[child.ID] != parent.ID {
+		t.Fatalf("pane binding not refreshed: %v", viz.reparents)
+	}
+}
+
+func TestSweepTerminalOnlyAcknowledgesFinishedChildren(t *testing.T) {
+	service, _, reg := newParentTestService(t)
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "root"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	_ = reg.PutSession(parent)
+	terminal := &Handoff{ID: "ho-done", SessionID: "sess-done", Status: StatusDone, SourceSessionID: parent.ID, CreatedAt: now}
+	live := &Handoff{ID: "ho-live", SessionID: "sess-live", Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
+	_ = reg.PutHandoff(terminal)
+	_ = reg.PutHandoff(live)
+	for _, msg := range []*ParentMessage{
+		{V: 1, ID: "pm-done-1", ParentSessionID: parent.ID, ChildSessionID: terminal.SessionID, HandoffID: terminal.ID, Kind: "idle", State: ParentMessagePending, CreatedAt: now},
+		{V: 1, ID: "pm-done-2", ParentSessionID: parent.ID, ChildSessionID: terminal.SessionID, HandoffID: terminal.ID, Kind: "result", State: ParentMessagePending, CreatedAt: now.Add(time.Second)},
+		{V: 1, ID: "pm-live", ParentSessionID: parent.ID, ChildSessionID: live.SessionID, HandoffID: live.ID, Kind: "ask", State: ParentMessagePending, CreatedAt: now.Add(2 * time.Second)},
+		{V: 1, ID: "pm-unknown", ParentSessionID: parent.ID, ChildSessionID: "sess-missing", HandoffID: "ho-missing", Kind: "idle", State: ParentMessagePending, CreatedAt: now.Add(3 * time.Second)},
+	} {
+		if err := writeParentMessage(msg, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	acked, byHandoff, err := service.SweepTerminal(parent.ID)
+	if err != nil || acked != 2 || byHandoff[terminal.ID] != 2 {
+		t.Fatalf("acked=%d by_handoff=%v err=%v", acked, byHandoff, err)
+	}
+	pending, _ := service.ListMessages(parent.ID, true)
+	if len(pending) != 2 || pending[0].ID != "pm-live" || pending[1].ID != "pm-unknown" {
+		t.Fatalf("pending=%+v", pending)
+	}
+}
+
+func TestTerminalHandoffEventsNeverReachParent(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "root"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	_ = reg.PutSession(parent)
+	for _, ho := range []*Handoff{
+		{ID: "ho-done", SessionID: "sess-done", Status: StatusDone, SourceSessionID: parent.ID},
+		{ID: "ho-outcome", SessionID: "sess-outcome", Status: StatusRunning, Outcome: "done", SourceSessionID: parent.ID},
+	} {
+		msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 99, Kind: "idle"})
+		if err != nil || msg != nil {
+			t.Fatalf("terminal event routed: msg=%+v err=%v", msg, err)
+		}
+	}
+	if len(notifier.notices) != 0 {
+		t.Fatalf("terminal notices=%d", len(notifier.notices))
 	}
 }
 

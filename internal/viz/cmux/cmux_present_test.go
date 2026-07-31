@@ -107,6 +107,29 @@ func TestBindingRoundTripKeepsParentAndLocation(t *testing.T) {
 	}
 }
 
+func TestReparentBindingUpdatesOnlyLineage(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	v := New()
+	want := binding{
+		SessionID: "sess-child", SourceSessionID: "sess-wrong",
+		Surface: "surface:3", Pane: "pane:2", Workspace: "workspace:1",
+		Attach: "relay resume --session demo", Mode: "split",
+	}
+	if err := v.persistBinding(want.SessionID, want); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.ReparentBinding(want.SessionID, "sess-correct"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := v.loadBinding(want.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SourceSessionID != "sess-correct" || got.Surface != want.Surface || got.Pane != want.Pane || got.Workspace != want.Workspace {
+		t.Fatalf("binding=%+v", got)
+	}
+}
+
 func TestClosePersistRemovesBindingWithoutCmux(t *testing.T) {
 	t.Setenv("RELAY_STATE_DIR", t.TempDir())
 	v := &Viz{Bin: "/definitely/missing/cmux", bindings: map[string]binding{}}
