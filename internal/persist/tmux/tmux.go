@@ -58,6 +58,33 @@ func (p *Persist) Create(ctx context.Context, t ports.Transport, name, cwd, comm
 	return h, nil
 }
 
+// Rename changes the durable tmux identity without disturbing the processes
+// running inside the session.
+func (p *Persist) Rename(ctx context.Context, t ports.Transport, from, to ports.PersistHandle) error {
+	if err := shellquote.ValidateSessionName(from.Name); err != nil {
+		return err
+	}
+	if err := shellquote.ValidateSessionName(to.Name); err != nil {
+		return err
+	}
+	if from.Name == to.Name {
+		return nil
+	}
+	if exists, err := p.Exists(ctx, t, to); err != nil {
+		return err
+	} else if exists {
+		return fmt.Errorf("tmux session %q already exists", to.Name)
+	}
+	_, stderr, err := t.Run(ctx, "", fmt.Sprintf(
+		"tmux rename-session -t %s %s",
+		shellquote.Quote(from.Name), shellquote.Quote(to.Name),
+	))
+	if err != nil {
+		return fmt.Errorf("tmux rename %q to %q: %w (%s)", from.Name, to.Name, err, strings.TrimSpace(stderr))
+	}
+	return nil
+}
+
 func (p *Persist) Exists(ctx context.Context, t ports.Transport, h ports.PersistHandle) (bool, error) {
 	_, _, err := t.Run(ctx, "", fmt.Sprintf("tmux has-session -t %s", shellquote.Quote(h.Name)))
 	if err != nil {

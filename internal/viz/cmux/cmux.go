@@ -255,6 +255,41 @@ func (v *Viz) BindSurface(ctx context.Context, sessionID, attachCmd, surface str
 	return surface, nil
 }
 
+// RebindRenamedSession updates the existing surface checkpoint and restarts
+// only its attach process. The remote tmux session itself remains alive.
+func (v *Viz) RebindRenamedSession(ctx context.Context, sess *core.Session, attachCmd string) error {
+	if sess == nil {
+		return fmt.Errorf("session required")
+	}
+	b, err := v.lookup(sess.ID)
+	if err != nil {
+		return err
+	}
+	if b.Surface == "" || v.locationOfSurface(ctx, b.Surface).Workspace == "" {
+		return fmt.Errorf("bound cmux surface for session %s is not live", sess.ID)
+	}
+	displayName := core.SessionDisplayName(sess)
+	if _, err := v.run(ctx, "surface", "resume", "set",
+		"--surface", b.Surface,
+		"--kind", "relay",
+		"--name", brandTitle(displayName),
+		"--checkpoint", sess.Persist.Name,
+		"--", attachCmd,
+	); err != nil {
+		return err
+	}
+	b.Attach = attachCmd
+	b.UpdatedAt = time.Now().UTC()
+	if err := v.persistBinding(sess.ID, b); err != nil {
+		return err
+	}
+	core.RememberPane(b.Surface, sess, true)
+	if _, err := v.run(ctx, "respawn-pane", "--surface", b.Surface, "--command", attachCmd); err != nil {
+		return err
+	}
+	return v.brandSurface(ctx, b.Surface, displayName)
+}
+
 // WorkspaceForSurface resolves the cmux workspace that owns a recorded relay
 // surface. It lets desktop-bridge requests route beside their true origin
 // rather than whichever workspace the long-lived daemon last inherited.

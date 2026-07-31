@@ -45,6 +45,7 @@ type PersistHandle struct {
 type Persistence interface {
 	Kind() string
 	Create(ctx context.Context, t Transport, name, cwd, command string) (PersistHandle, error)
+	Rename(ctx context.Context, t Transport, from, to PersistHandle) error
 	Exists(ctx context.Context, t Transport, h PersistHandle) (bool, error)
 	Destroy(ctx context.Context, t Transport, h PersistHandle) error
 	Capture(ctx context.Context, t Transport, h PersistHandle, lines int) (string, error)

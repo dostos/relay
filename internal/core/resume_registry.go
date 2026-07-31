@@ -96,6 +96,30 @@ func RememberResume(sess *Session) {
 	upsertResume(sess, ResumeStateResumable, "active_or_disconnect")
 }
 
+// RenameResumePersist moves the durable resume key after a persistence rename.
+func RenameResumePersist(oldName string, sess *Session) error {
+	if sess == nil {
+		return fmt.Errorf("session required")
+	}
+	if err := shellquote.ValidateSessionName(oldName); err != nil {
+		return err
+	}
+	if err := shellquote.ValidateSessionName(sess.Persist.Name); err != nil {
+		return err
+	}
+	f, err := loadResumeRegistry()
+	if err != nil {
+		return err
+	}
+	delete(f.Entries, oldName)
+	f.Entries[sess.Persist.Name] = ResumeEntry{
+		HostID: sess.HostID, SessionID: sess.ID, RemoteCWD: sess.RemoteCWD,
+		RepoRef: sess.RepoRef, State: ResumeStateResumable,
+		Reason: "renamed", UpdatedAt: time.Now().UTC(),
+	}
+	return saveResumeRegistry(f)
+}
+
 // MarkResumeCleaned records intentional teardown — resume must refuse.
 func MarkResumeCleaned(persistName, reason string) {
 	if err := shellquote.ValidateSessionName(persistName); err != nil {

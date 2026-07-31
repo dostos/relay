@@ -371,6 +371,7 @@ Sessions (explicit id; no guesswork):
   relay session create -H HOST [--repo DIR] [--cwd REMOTE] [--name NAME]
   relay session adopt -H HOST --name TMUX [--cwd REMOTE] [--repo DIR]
                                       Register an already-running remote tmux
+  relay session rename ID NAME        Rename tmux + reconnect/checkpoint identity in place
   relay session list
   relay session get ID
   relay session capture ID [-n LINES]
@@ -910,6 +911,32 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 			return a.fail(err)
 		}
 		return a.errOut(a.out(s))
+	case "rename":
+		if len(args) != 3 {
+			return a.fail(fmt.Errorf("usage: relay session rename ID NAME"))
+		}
+		sess, err := a.Sessions.Rename(ctx, args[1], args[2])
+		if err != nil {
+			return a.fail(err)
+		}
+		rebound := false
+		if a.Viz != nil && a.Viz.Available(ctx) && sess.VizSurfaceRef != "" {
+			if rebinder, ok := a.Viz.(interface {
+				RebindRenamedSession(context.Context, *core.Session, string) error
+			}); ok {
+				if err := rebinder.RebindRenamedSession(ctx, sess, core.ResumeLaunchCmd(sess.Persist.Name)); err != nil {
+					return a.fail(fmt.Errorf("tmux renamed to %q, but cmux rebind failed: %w", sess.Persist.Name, err))
+				}
+				rebound = true
+			}
+		}
+		if err := a.brandAll(ctx); err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{
+			"ok": true, "session_id": sess.ID, "persist_name": sess.Persist.Name,
+			"display_name": core.SessionDisplayName(sess), "cmux_rebound": rebound,
+		}))
 	case "create":
 		host, rest := flagHost(args[1:])
 		opts := core.CreateOpts{HostID: host}

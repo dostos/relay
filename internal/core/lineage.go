@@ -88,6 +88,18 @@ func AppendSessionStart(sess *Session) error {
 	return AppendLedger(record)
 }
 
+// AppendSessionRename preserves the stable session node while allowing
+// history displays to use its current durable name.
+func AppendSessionRename(sessionID, oldName, newName string) error {
+	if sessionID == "" || oldName == "" || newName == "" || oldName == newName {
+		return nil
+	}
+	return AppendLedger(map[string]any{
+		"v": 1, "type": "session_rename", "ts": time.Now().UTC().Format(time.RFC3339),
+		"session_id": sessionID, "old_persist_name": oldName, "persist_name": newName,
+	})
+}
+
 // AppendRelayEdge records a new transition into an already-existing named
 // session. Session creation already writes the initial edge itself.
 func AppendRelayEdge(sourceSessionID, targetSessionID string) error {
@@ -144,6 +156,14 @@ func LoadHistory() (*HistoryGraph, error) {
 			continue
 		}
 		typ, _ := raw["type"].(string)
+		if typ == "session_rename" {
+			id := textField(raw, "session_id")
+			if node, ok := nodes[id]; ok {
+				node.PersistName = textField(raw, "persist_name")
+				nodes[id] = node
+			}
+			continue
+		}
 		if typ == "relay_edge" {
 			ts, _ := time.Parse(time.RFC3339, textField(raw, "ts"))
 			edges = append(edges, HistoryEdge{

@@ -53,6 +53,7 @@ relay session list --json
 relay session capture sess-… -n 100
 relay session send sess-… -- "…"
 relay session exec sess-… -- "…"
+relay session rename sess-… beholder          # true tmux/checkpoint rename; keeps session id + lineage
 relay viz present|close sess-…
 relay pane list                                # exact workspace/pane/parent bindings
 relay pane rename sess-… personal-db           # persistent UI alias; tmux identity stays stable

@@ -237,6 +237,56 @@ func (s *SessionService) List() ([]*Session, error) {
 	return s.Reg.ListSessions()
 }
 
+// Rename changes a session's durable persistence identity in place. The
+// session id remains stable so handoffs, bridge authentication, and lineage
+// edges continue to point at the same work.
+func (s *SessionService) Rename(ctx context.Context, id, name string) (*Session, error) {
+	sess, err := s.Reg.GetSession(id)
+	if err != nil {
+		return nil, err
+	}
+	safe, err := shellquote.SanitizeSessionName(name)
+	if err != nil {
+		return nil, err
+	}
+	old := sess.Persist
+	if old.Name == safe {
+		return sess, nil
+	}
+	list, err := s.Reg.ListSessions()
+	if err != nil {
+		return nil, err
+	}
+	for _, other := range list {
+		if other.ID != sess.ID && other.HostID == sess.HostID && other.Persist.Name == safe {
+			return nil, fmt.Errorf("session name %q is already registered on %s", safe, sess.HostID)
+		}
+	}
+	t, err := s.transportFor(sess)
+	if err != nil {
+		return nil, err
+	}
+	next := ports.PersistHandle{Kind: old.Kind, Name: safe}
+	if err := s.Persist.Rename(ctx, t, old, next); err != nil {
+		return nil, err
+	}
+	sess.Persist = next
+	if err := s.Reg.PutSession(sess); err != nil {
+		_ = s.Persist.Rename(ctx, t, next, old)
+		return nil, fmt.Errorf("save renamed session: %w", err)
+	}
+	if err := RenameResumePersist(old.Name, sess); err != nil {
+		return sess, fmt.Errorf("session renamed, but resume registry update failed: %w", err)
+	}
+	if _, err := RenamePaneBindingsForPersist(old.Name, sess); err != nil {
+		return sess, fmt.Errorf("session renamed, but pane history update failed: %w", err)
+	}
+	if err := AppendSessionRename(sess.ID, old.Name, safe); err != nil {
+		return sess, fmt.Errorf("session renamed, but lineage update failed: %w", err)
+	}
+	return sess, nil
+}
+
 func (s *SessionService) Capture(ctx context.Context, id string, lines int) (string, error) {
 	sess, err := s.Reg.GetSession(id)
 	if err != nil {

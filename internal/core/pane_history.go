@@ -137,6 +137,46 @@ func RemovePaneBindingsForPersist(persistName string) int {
 	return removed
 }
 
+// RenamePaneBindingsForPersist retargets every surface that was pinned to the
+// old persistence name. This prevents a later reconnect from creating a blank
+// tmux session under the retired name.
+func RenamePaneBindingsForPersist(oldName string, sess *Session) (int, error) {
+	if strings.TrimSpace(oldName) == "" || sess == nil || strings.TrimSpace(sess.Persist.Name) == "" {
+		return 0, fmt.Errorf("old name and session required")
+	}
+	entries, err := os.ReadDir(PanesDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	updated := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(PanesDir(), e.Name())
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return updated, err
+		}
+		var b PaneBinding
+		if err := json.Unmarshal(raw, &b); err != nil || b.PersistName != oldName {
+			continue
+		}
+		b.PersistName = sess.Persist.Name
+		b.HostID = sess.HostID
+		b.RemoteCWD = sess.RemoteCWD
+		b.UpdatedAt = time.Now().UTC()
+		if err := WritePaneBinding(b); err != nil {
+			return updated, err
+		}
+		updated++
+	}
+	return updated, nil
+}
+
 // ReadPaneBinding loads history for a surface.
 func ReadPaneBinding(surface string) (*PaneBinding, error) {
 	surface = normalizeSurface(surface)
