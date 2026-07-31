@@ -466,6 +466,7 @@ Handoffs (goal-based / long-running):
 Agent surface (token-efficient; always JSON; NO poll loops):
   relay agent [protocol]                                    # print compact orchestration contract
   relay agent start HOST AGENT [options] -- GOAL
+  relay agent restart HANDOFF [--repo DIR] [--cwd REMOTE] [--name NAME] [--no-pane]
   relay agent start HOST --cmd CMD [options]
   relay agent pick HOST                                        # suggest agent by weekly headroom (advisory)
   relay agent wait ID [--from SEQ] [--timeout SEC]              # blocks once
@@ -2209,12 +2210,13 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 			"v":       1,
 			"purpose": "long-lived goal handoff and orchestration",
 			"start":   []string{"relay", "agent", "start", "HOST", "AGENT", "--", "GOAL"},
+			"restart": []string{"relay", "agent", "restart", "HANDOFF"},
 			"resume":  []string{"relay", "agent", "status", "HANDOFF"},
 			"inbox":   []string{"relay", "parent", "inbox", "PARENT"},
 			"rules": []string{
 				"execute response.argv once",
-				"after a wait timeout stop the turn; never poll or attach",
-				"each child talks only to its immediate manager; only the local root asks a human",
+				"on wait timeout stop; never poll or attach",
+				"child talks only to manager; only local root asks human",
 				"use parent inbox for decisions and receipts; never send transcripts",
 				"hooks signal input/result/exit; policies handle guarded/redundant events, else escalate",
 			},
@@ -2316,6 +2318,51 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 			} else if root, err := findGitRoot(""); err == nil {
 				opts.RepoRef = root
 			}
+		}
+		resp, err := a.Handoffs.AgentStart(ctx, opts)
+		if resp != nil {
+			_ = a.out(resp)
+		}
+		if err != nil {
+			return 1
+		}
+		if resp != nil && opts.SourceSessionID != "" {
+			a.startParentWatcher(resp.HandoffID)
+		}
+		return 0
+	case "restart":
+		if len(args) < 2 || strings.HasPrefix(args[1], "-") {
+			return a.fail(fmt.Errorf("usage: relay agent restart HANDOFF [--repo DIR] [--cwd REMOTE] [--name NAME] [--no-pane]"))
+		}
+		opts, err := a.Handoffs.AgentRestartOptions(args[1])
+		if err != nil {
+			return a.fail(err)
+		}
+		for i := 2; i < len(args); i++ {
+			switch args[i] {
+			case "--repo":
+				i++
+				if i < len(args) {
+					opts.RepoRef, opts.RemoteCWD = args[i], ""
+				}
+			case "--cwd", "-R":
+				i++
+				if i < len(args) {
+					opts.RemoteCWD, opts.RepoRef = args[i], ""
+				}
+			case "--name", "-s":
+				i++
+				if i < len(args) {
+					opts.Name = args[i]
+				}
+			case "--no-pane":
+				opts.NoPane = true
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
+			}
+		}
+		if _, err := a.applyHandoffSource(ctx, &opts); err != nil {
+			return a.fail(err)
 		}
 		resp, err := a.Handoffs.AgentStart(ctx, opts)
 		if resp != nil {

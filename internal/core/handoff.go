@@ -43,6 +43,7 @@ type HandoffOpts struct {
 	SourceSessionID   string
 	SourceHostID      string
 	SourcePersistName string
+	RestartedFromID   string
 }
 
 func handoffLayout(opts HandoffOpts) ports.Layout {
@@ -199,6 +200,13 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 		Goal:              opts.Goal,
 		Agent:             agentName,
 		Command:           launchCmd,
+		Name:              sess.Persist.Name,
+		RepoRef:           opts.RepoRef,
+		RemoteCWD:         sess.RemoteCWD,
+		Container:         opts.Container,
+		NoPane:            opts.NoPane,
+		Silence:           silence,
+		RestartedFromID:   opts.RestartedFromID,
 		EventsPath:        eventsPath,
 		CreatedAt:         now,
 		UpdatedAt:         now,
@@ -209,13 +217,17 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 	if err := h.Reg.PutHandoff(ho); err != nil {
 		return nil, nil, err
 	}
-	_ = AppendLedger(map[string]any{
+	startRecord := map[string]any{
 		"v": 1, "type": "start", "ts": now.Format(time.RFC3339),
 		"handoff_id": hid, "session_id": sess.ID, "host_id": opts.HostID,
 		"kind": string(kind), "goal": opts.Goal, "agent": agentName, "command": launchCmd,
 		"source_session_id": opts.SourceSessionID, "source_host_id": opts.SourceHostID,
 		"source_persist_name": opts.SourcePersistName,
-	})
+	}
+	if opts.RestartedFromID != "" {
+		startRecord["restarted_from_id"] = opts.RestartedFromID
+	}
+	_ = AppendLedger(startRecord)
 
 	// Start work: send launch command into the holding shell.
 	if err := h.Persist.Send(ctx, t, sess.Persist, launchCmd, true); err != nil {

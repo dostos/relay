@@ -35,6 +35,9 @@ Hand a goal to Claude / Codex / cursor-agent on a lab box. Close cmux. Reopen la
 relay agent start host-a cursor-agent -- "fix the flaky eval; keep tests green"
 # → {"next":"wait","argv":["relay","agent","wait",…]}
 relay agent wait ho-… [--timeout 120]
+
+# Resume a saved terminal goal without copying its prompt or lineage:
+relay agent restart ho-…
 ```
 
 ### 2) Project workspace with several durable remotes

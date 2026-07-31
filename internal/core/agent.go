@@ -3,6 +3,8 @@ package core
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -151,7 +153,62 @@ func (h *HandoffService) AgentStart(ctx context.Context, opts HandoffOpts) (*Age
 	if b != nil {
 		resp.Extra = map[string]any{"pane": b.Pane}
 	}
+	if ho.RestartedFromID != "" {
+		if resp.Extra == nil {
+			resp.Extra = map[string]any{}
+		}
+		resp.Extra["restarted_from"] = ho.RestartedFromID
+	}
 	return &resp, nil
+}
+
+// AgentRestartOptions reconstructs an agent launch from its durable handoff.
+// New handoffs persist the complete launch spec. Legacy handoffs fall back to
+// the retained target session and event-log name, with CLI overrides available
+// for a deleted session's repository mapping.
+func (h *HandoffService) AgentRestartOptions(handoffID string) (HandoffOpts, error) {
+	if h == nil || h.Reg == nil {
+		return HandoffOpts{}, fmt.Errorf("handoff registry unavailable")
+	}
+	old, err := h.Reg.GetHandoff(handoffID)
+	if err != nil {
+		return HandoffOpts{}, err
+	}
+	if old.Kind != KindAgent || strings.TrimSpace(old.Goal) == "" || strings.TrimSpace(old.Agent) == "" {
+		return HandoffOpts{}, fmt.Errorf("handoff %s is not a restartable agent goal", handoffID)
+	}
+	if old.Status != StatusDone && old.Status != StatusFailed && old.Status != StatusAbandoned && old.Outcome == "" {
+		return HandoffOpts{}, fmt.Errorf("handoff %s is still %s; finalize it before restart", handoffID, old.Status)
+	}
+	opts := HandoffOpts{
+		HostID: old.HostID, RepoRef: old.RepoRef, RemoteCWD: old.RemoteCWD,
+		Agent: old.Agent, Goal: old.Goal, Container: old.Container,
+		NoPane: old.NoPane, Silence: old.Silence, Name: old.Name,
+		SourceSessionID: old.SourceSessionID, SourceHostID: old.SourceHostID,
+		SourcePersistName: old.SourcePersistName, RestartedFromID: old.ID,
+	}
+	retainedName := false
+	if target, getErr := h.Reg.GetSession(old.SessionID); getErr == nil {
+		if opts.RepoRef == "" {
+			opts.RepoRef = target.RepoRef
+		}
+		if opts.RemoteCWD == "" {
+			opts.RemoteCWD = target.RemoteCWD
+		}
+		// A retained target session still owns its tmux name. Let Create choose
+		// a fresh collision-free name while preserving the old display lineage.
+		if opts.Name == "" || opts.Name == target.Persist.Name {
+			opts.Name = ""
+			retainedName = true
+		}
+	}
+	if opts.Name == "" && !retainedName {
+		base := strings.TrimSuffix(filepath.Base(old.EventsPath), filepath.Ext(old.EventsPath))
+		if base != "" && base != "." && base != "events" {
+			opts.Name = base
+		}
+	}
+	return opts, nil
 }
 
 // AgentStatus is a one-shot snapshot with a suggested next verb.

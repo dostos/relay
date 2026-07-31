@@ -158,6 +158,23 @@ func TestAgentStartRejectsRemovedAgentAndGoalFlags(t *testing.T) {
 	}
 }
 
+func TestAgentRestartRejectsUnknownFlagsBeforeLaunch(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	now := time.Now().UTC()
+	a := New()
+	if err := a.Reg.PutHandoff(&core.Handoff{ID: "ho-old", HostID: "c3", Kind: core.KindAgent, Status: core.StatusDone, Outcome: "done", Goal: "goal", Agent: "codex", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	out := captureStdout(t, func() {
+		if code := a.Run([]string{"agent", "restart", "ho-old", "--bogus"}); code == 0 {
+			t.Fatal("unknown restart flag accepted")
+		}
+	})
+	if !bytes.Contains([]byte(out), []byte("unknown flag")) {
+		t.Fatalf("restart error=%q", out)
+	}
+}
+
 func TestParentMessageArgsArePositional(t *testing.T) {
 	id, text := parentMessageArgs([]string{"pm-1", "--", "approve", "once"})
 	if id != "pm-1" || text != "approve once" {

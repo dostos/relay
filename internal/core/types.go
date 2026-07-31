@@ -66,6 +66,13 @@ type Handoff struct {
 	Goal              string        `json:"goal,omitempty"`
 	Agent             string        `json:"agent,omitempty"`
 	Command           string        `json:"command,omitempty"`
+	Name              string        `json:"name,omitempty"`
+	RepoRef           string        `json:"repo_ref,omitempty"`
+	RemoteCWD         string        `json:"remote_cwd,omitempty"`
+	Container         string        `json:"container,omitempty"`
+	NoPane            bool          `json:"no_pane,omitempty"`
+	Silence           int           `json:"silence,omitempty"`
+	RestartedFromID   string        `json:"restarted_from_id,omitempty"`
 	EventsPath        string        `json:"events_path"`
 	LastSeq           int64         `json:"last_seq"`
 	ParentSeq         int64         `json:"parent_seq,omitempty"`

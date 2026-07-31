@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/dostos/relay/internal/ports"
 )
 
 func TestDecideNextMatrix(t *testing.T) {
@@ -73,5 +76,62 @@ func TestArgvForWaitAndDone(t *testing.T) {
 	}
 	if argvFor("null", "ho-1") != nil {
 		t.Fatal("null should have no argv")
+	}
+}
+
+func TestAgentRestartOptionsPreserveDurableGoalSpec(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	reg := &Registry{}
+	now := time.Now().UTC()
+	old := &Handoff{
+		ID: "ho-old", SessionID: "sess-gone", HostID: "cancun", Kind: KindAgent,
+		Status: StatusDone, Outcome: "done", Goal: "continue bounded work", Agent: "cursor-agent",
+		Name: "folio-cycle", RepoRef: "/local/folio", RemoteCWD: "~/dev/folio",
+		Container: "tools", NoPane: true, Silence: 75, EventsPath: "~/.local/state/relay/events/folio-cycle.jsonl",
+		SourceSessionID: "sess-parent", SourceHostID: LocalHostID, SourcePersistName: "beholder-pdf-main",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := reg.PutHandoff(old); err != nil {
+		t.Fatal(err)
+	}
+	opts, err := (&HandoffService{Reg: reg}).AgentRestartOptions(old.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Goal != old.Goal || opts.Agent != old.Agent || opts.HostID != old.HostID || opts.Name != old.Name || opts.RepoRef != old.RepoRef || opts.RemoteCWD != old.RemoteCWD || opts.Container != old.Container || !opts.NoPane || opts.Silence != old.Silence || opts.RestartedFromID != old.ID || opts.SourceSessionID != old.SourceSessionID {
+		t.Fatalf("restart options lost durable state: %+v", opts)
+	}
+}
+
+func TestAgentRestartOptionsUseLegacySessionAndAvoidNameCollision(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	reg := &Registry{}
+	now := time.Now().UTC()
+	sess := &Session{ID: "sess-old", HostID: "paris", RemoteCWD: "/data/engram", RepoRef: "/local/engram", Persist: ports.PersistHandle{Kind: "tmux", Name: "engram"}, CreatedAt: now, UpdatedAt: now}
+	old := &Handoff{ID: "ho-old", SessionID: sess.ID, HostID: "paris", Kind: KindAgent, Status: StatusDone, Outcome: "done", Goal: "goal", Agent: "codex", EventsPath: "~/.local/state/relay/events/engram.jsonl", CreatedAt: now, UpdatedAt: now}
+	if err := reg.PutSession(sess); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.PutHandoff(old); err != nil {
+		t.Fatal(err)
+	}
+	opts, err := (&HandoffService{Reg: reg}).AgentRestartOptions(old.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.RepoRef != sess.RepoRef || opts.RemoteCWD != sess.RemoteCWD || opts.Name != "" {
+		t.Fatalf("legacy restart options=%+v", opts)
+	}
+}
+
+func TestAgentRestartRejectsNonterminalGoal(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	reg := &Registry{}
+	now := time.Now().UTC()
+	if err := reg.PutHandoff(&Handoff{ID: "ho-live", HostID: "c3", Kind: KindAgent, Status: StatusRunning, Goal: "goal", Agent: "codex", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&HandoffService{Reg: reg}).AgentRestartOptions("ho-live"); err == nil || !strings.Contains(err.Error(), "finalize it before restart") {
+		t.Fatalf("nonterminal restart error=%v", err)
 	}
 }
