@@ -261,6 +261,19 @@ func LoadHistory() (*HistoryGraph, error) {
 			continue
 		}
 		typ, _ := raw["type"].(string)
+		if typ == "parent_reparent" {
+			handoffID := textField(raw, "handoff_id")
+			kept := edges[:0]
+			for _, edge := range edges {
+				if edge.HandoffID != handoffID {
+					kept = append(kept, edge)
+				}
+			}
+			edges = kept
+			ts, _ := time.Parse(time.RFC3339, textField(raw, "ts"))
+			edges = append(edges, HistoryEdge{SourceSessionID: textField(raw, "parent_session_id"), TargetSessionID: textField(raw, "child_session_id"), HandoffID: handoffID, CreatedAt: ts})
+			continue
+		}
 		if typ == "communication" {
 			ts, _ := time.Parse(time.RFC3339, textField(raw, "ts"))
 			communications = append(communications, HistoryCommunication{

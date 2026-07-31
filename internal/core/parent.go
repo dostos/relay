@@ -97,6 +97,7 @@ func CompactParentMessage(msg *ParentMessage, includeState bool) ParentInboxItem
 
 type ParentNotice struct {
 	MessageID string
+	HandoffID string
 	Kind      string
 	Child     string
 	Text      string
@@ -287,6 +288,66 @@ func (p *ParentService) LinkChild(parentID, handoffID string) (*Handoff, error) 
 	return ho, nil
 }
 
+// ReparentChild explicitly repairs an incorrect local management edge. Unlike
+// LinkChild, this operation is intentionally named and audited: pending inbox
+// items move with the child, while answered history remains with the manager
+// that actually handled it.
+func (p *ParentService) ReparentChild(parentID, handoffID string) (*Handoff, string, error) {
+	parent, err := p.Reg.GetSession(parentID)
+	if err != nil {
+		return nil, "", err
+	}
+	if !isLocalParent(parent) {
+		return nil, "", fmt.Errorf("session %s is not a local parent", parentID)
+	}
+	ho, err := p.Reg.GetHandoff(handoffID)
+	if err != nil {
+		return nil, "", err
+	}
+	oldParentID := ho.SourceSessionID
+	if oldParentID == "" {
+		linked, linkErr := p.LinkChild(parentID, handoffID)
+		return linked, "", linkErr
+	}
+	if oldParentID == parentID {
+		return ho, oldParentID, nil
+	}
+	child, err := p.Reg.GetSession(ho.SessionID)
+	if err != nil {
+		return nil, oldParentID, err
+	}
+	ho.SourceSessionID, ho.SourceHostID, ho.SourcePersistName = parent.ID, parent.HostID, parent.Persist.Name
+	child.SourceSessionID, child.SourceHostID, child.SourcePersistName = parent.ID, parent.HostID, parent.Persist.Name
+	if err := p.Reg.PutSession(child); err != nil {
+		return nil, oldParentID, err
+	}
+	if err := p.Reg.PutHandoff(ho); err != nil {
+		return nil, oldParentID, err
+	}
+	if messages, listErr := p.ListMessages(oldParentID, true); listErr == nil {
+		for _, msg := range messages {
+			if msg.HandoffID != handoffID {
+				continue
+			}
+			oldPath := parentMessagePath(oldParentID, msg.ID)
+			msg.ParentSessionID = parentID
+			if err := writeParentMessage(msg, false); err != nil {
+				return ho, oldParentID, err
+			}
+			if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
+				return ho, oldParentID, err
+			}
+		}
+	}
+	now := time.Now().UTC()
+	_ = AppendLedger(map[string]any{
+		"v": 1, "type": "parent_reparent", "ts": now.Format(time.RFC3339),
+		"old_parent_session_id": oldParentID, "parent_session_id": parent.ID,
+		"child_session_id": child.ID, "handoff_id": ho.ID,
+	})
+	return ho, oldParentID, nil
+}
+
 func gitRoot(dir string) (string, error) {
 	if dir == "" {
 		var err error
@@ -438,22 +499,40 @@ func attentionKind(ev coord.Event) string {
 	}
 }
 
-func (p *ParentService) childEventText(ctx context.Context, ho *Handoff, ev coord.Event, kind string) string {
+func (p *ParentService) childEventText(ctx context.Context, ho *Handoff, ev coord.Event, kind string) (string, bool) {
 	if text := eventString(ev.Meta, "text", "q", "question", "msg", "note"); text != "" {
-		return compactText(text)
+		return compactText(text), true
 	}
 	if ev.Kind != "idle" && ev.Kind != "needs_input" {
-		return compactText(kind + " from child")
+		return compactText(kind + " from child on " + ho.HostID), true
 	}
 	if p.Sessions != nil {
 		if capture, err := p.Sessions.Capture(ctx, ho.SessionID, 80); err == nil {
+			if paneStillActive(capture) {
+				return "", false
+			}
 			excerpt := decisionExcerpt(capture)
 			if excerpt != "" {
-				return "child idle; manager decide blocked/completed: " + excerpt
+				return "remote child idle on " + ho.HostID + "; inspect handoff, not local paths; manager decide blocked/completed: " + excerpt, true
 			}
 		}
 	}
-	return "child idle; manager decide whether it is blocked, complete, or should continue"
+	return "remote child idle on " + ho.HostID + "; inspect handoff, not local paths; manager decide blocked/completed/continue", true
+}
+
+func paneStillActive(capture string) bool {
+	lines := strings.Split(capture, "\n")
+	if len(lines) > 14 {
+		lines = lines[len(lines)-14:]
+	}
+	tail := strings.ToLower(strings.Join(lines, "\n"))
+	for _, prompt := range []string{"run this command?", "not in allowlist", "what should", "permission", "approve", "confirm or esc", "timed out waiting for input"} {
+		if strings.Contains(tail, prompt) {
+			return false
+		}
+	}
+	return (strings.Contains(tail, " running ") && strings.Contains(tail, "tokens")) ||
+		strings.Contains(tail, "cerebrating") || strings.Contains(tail, "· thinking")
 }
 
 func decisionExcerpt(capture string) string {
@@ -473,7 +552,7 @@ func decisionExcerpt(capture string) string {
 	if len(useful) > 6 {
 		useful = useful[len(useful)-6:]
 	}
-	return compactText(strings.Join(useful, " | "))
+	return compactText(strings.Join(useful, " "))
 }
 
 func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coord.Event) (*ParentMessage, error) {
@@ -493,10 +572,14 @@ func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coo
 	if correlationID == "" {
 		correlationID = id
 	}
+	text, actionable := p.childEventText(ctx, ho, ev, kind)
+	if !actionable {
+		return nil, nil
+	}
 	msg := &ParentMessage{
 		V: 1, ID: id, CorrelationID: compactText(correlationID),
 		ParentSessionID: parent.ID, ChildSessionID: ho.SessionID, HandoffID: ho.ID,
-		EventSeq: ev.Seq, Kind: kind, Text: p.childEventText(ctx, ho, ev, kind),
+		EventSeq: ev.Seq, Kind: kind, Text: text,
 		State: ParentMessagePending, CreatedAt: time.Now().UTC(),
 	}
 	if err := writeParentMessage(msg, true); err != nil {
@@ -517,7 +600,7 @@ func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coo
 	if kind == "ask" || kind == "permission_required" {
 		action = "reply"
 	}
-	notice := ParentNotice{MessageID: msg.ID, Kind: kind, Child: childName, Text: msg.Text, Action: action}
+	notice := ParentNotice{MessageID: msg.ID, HandoffID: ho.ID, Kind: kind, Child: childName, Text: msg.Text, Action: action}
 	var notifyErr error
 	// Delivery is strictly one edge up the tree. Only a local root owns a
 	// human-facing cmux surface; every other parent is an agent manager and
@@ -594,7 +677,7 @@ func FormatParentNotice(n ParentNotice) string {
 	if n.Action == "reply" {
 		suffix = " <decision>"
 	}
-	return fmt.Sprintf("[relay %s %s child=%s] %s | relay parent %s %s%s", n.Kind, n.MessageID, n.Child, text, n.Action, n.MessageID, suffix)
+	return fmt.Sprintf("[relay %s %s child=%s handoff=%s] %s | relay parent %s %s%s", n.Kind, n.MessageID, n.Child, n.HandoffID, text, n.Action, n.MessageID, suffix)
 }
 
 func (p *ParentService) Watch(ctx context.Context, handoffID string) error {
@@ -673,7 +756,7 @@ func acquireParentWatchLock(handoffID string) (*os.File, error) {
 	if err := EnsureStateDirs(); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(ParentWatchDir(), sanitizeID(handoffID)+".lock")
+	path := ParentWatchLockPath(handoffID)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err

@@ -481,6 +481,7 @@ Agent surface (token-efficient; always JSON; NO poll loops):
 Long-lived goal orchestration (durable compact inbox + guarded local-pane cleanup):
   relay parent register [--surface REF] [--name NAME] [--repo DIR ...] [--wake inject|notify]
   relay parent link PARENT HANDOFF             # adopt an already-running goal
+  relay parent move PARENT HANDOFF             # explicitly repair a wrong parent edge
   relay parent list
   relay parent inbox PARENT [--all]
   relay parent reply MESSAGE [--] TEXT
@@ -1695,6 +1696,17 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 			"ok": true, "parent_session_id": parentID,
 			"handoff_id": ho.ID, "child_session_id": ho.SessionID,
 		}))
+	case "move", "reparent":
+		if len(args) != 3 {
+			return a.fail(fmt.Errorf("usage: relay parent move PARENT HANDOFF"))
+		}
+		parentID, handoffID := args[1], args[2]
+		ho, oldParentID, err := a.Parents.ReparentChild(parentID, handoffID)
+		if err != nil {
+			return a.fail(err)
+		}
+		a.restartParentWatcher(ho.ID)
+		return a.errOut(a.out(map[string]any{"ok": true, "handoff_id": ho.ID, "child_session_id": ho.SessionID, "old_parent_session_id": oldParentID, "parent_session_id": parentID}))
 	case "list":
 		list, err := a.Reg.ListSessions()
 		if err != nil {
@@ -2015,6 +2027,27 @@ func (a *App) startParentWatcher(handoffID string) {
 		_ = cmd.Process.Release()
 	}
 	_ = logFile.Close()
+}
+
+func (a *App) restartParentWatcher(handoffID string) {
+	raw, err := os.ReadFile(core.ParentWatchLockPath(handoffID))
+	pid, parseErr := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err == nil && parseErr == nil && pid > 1 && pid != os.Getpid() {
+		command, _ := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+		cmdline := string(command)
+		if strings.Contains(cmdline, "relay") && strings.Contains(cmdline, "parent watch") && strings.Contains(cmdline, handoffID) {
+			if proc, findErr := os.FindProcess(pid); findErr == nil {
+				_ = proc.Signal(syscall.SIGTERM)
+				for i := 0; i < 20; i++ {
+					if syscall.Kill(pid, 0) != nil {
+						break
+					}
+					time.Sleep(50 * time.Millisecond)
+				}
+			}
+		}
+	}
+	a.startParentWatcher(handoffID)
 }
 
 // cmdSignal is the agent-neutral hook surface. It intentionally executes on

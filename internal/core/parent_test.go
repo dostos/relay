@@ -222,6 +222,68 @@ func TestDecisionExcerptDropsChromeAndKeepsPermissionPrompt(t *testing.T) {
 	}
 }
 
+func TestPaneStillActiveSuppressesOnlyNonActionableIdle(t *testing.T) {
+	active := "⠠⠜ Running  24.03k tokens\nTip: Type ?\n→ Add a follow-up\n"
+	if !paneStillActive(active) {
+		t.Fatal("active agent was treated as idle")
+	}
+	permission := active + "Run this command?\nNot in allowlist: git -C, head\n"
+	if paneStillActive(permission) {
+		t.Fatal("permission prompt was suppressed as active")
+	}
+	if paneStillActive("Completed checkpoint\n› Add a follow-up\n") {
+		t.Fatal("completed pane was treated as active")
+	}
+}
+
+func TestFormatParentNoticeQualifiesRemoteHandoff(t *testing.T) {
+	got := FormatParentNotice(ParentNotice{MessageID: "pm-1", HandoffID: "ho-1", Kind: "ask", Child: "worker@cancun", Text: "inspect remote", Action: "reply"})
+	if !strings.Contains(got, "child=worker@cancun handoff=ho-1") || !strings.Contains(got, "relay parent reply pm-1") {
+		t.Fatalf("notice lacks remote routing context: %q", got)
+	}
+}
+
+func TestReparentChildMovesPendingInboxAndHistoryEdge(t *testing.T) {
+	service, _, reg := newParentTestService(t)
+	now := time.Now().UTC()
+	oldParent := &Session{ID: "sess-old-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "beholder"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	newParent := &Session{ID: "sess-new-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "beholder-pdf"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "cancun", Persist: ports.PersistHandle{Kind: "tmux", Name: "folio-cycle"}, SourceSessionID: oldParent.ID, CreatedAt: now}
+	for _, sess := range []*Session{oldParent, newParent, child} {
+		if err := reg.PutSession(sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ho := &Handoff{ID: "ho-cycle", SessionID: child.ID, HostID: child.HostID, Kind: KindAgent, Status: StatusRunning, SourceSessionID: oldParent.ID, CreatedAt: now}
+	if err := reg.PutHandoff(ho); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendRelayHandoffEdge(oldParent.ID, child.ID, ho.ID); err != nil {
+		t.Fatal(err)
+	}
+	msg := &ParentMessage{V: 1, ID: "pm-pending", ParentSessionID: oldParent.ID, ChildSessionID: child.ID, HandoffID: ho.ID, Kind: "ask", State: ParentMessagePending, CreatedAt: now}
+	if err := writeParentMessage(msg, true); err != nil {
+		t.Fatal(err)
+	}
+	moved, oldID, err := service.ReparentChild(newParent.ID, ho.ID)
+	if err != nil || oldID != oldParent.ID || moved.SourceSessionID != newParent.ID {
+		t.Fatalf("moved=%+v old=%q err=%v", moved, oldID, err)
+	}
+	storedChild, err := reg.GetSession(child.ID)
+	if err != nil || storedChild.SourceSessionID != newParent.ID {
+		t.Fatalf("child=%+v err=%v", storedChild, err)
+	}
+	oldInbox, _ := service.ListMessages(oldParent.ID, true)
+	newInbox, _ := service.ListMessages(newParent.ID, true)
+	if len(oldInbox) != 0 || len(newInbox) != 1 || newInbox[0].ParentSessionID != newParent.ID {
+		t.Fatalf("old inbox=%+v new inbox=%+v", oldInbox, newInbox)
+	}
+	graph, err := LoadHistory()
+	if err != nil || len(graph.Edges) != 1 || graph.Edges[0].SourceSessionID != newParent.ID || graph.Edges[0].HandoffID != ho.ID {
+		t.Fatalf("history=%+v err=%v", graph, err)
+	}
+}
+
 func TestPolicyCoalescesPermissionIdleWithoutSecondNotification(t *testing.T) {
 	service, notifier, reg := newParentTestService(t)
 	service.Policies = &PolicyService{Path: filepath.Join(t.TempDir(), "missing-policy.yaml")}

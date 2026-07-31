@@ -47,6 +47,9 @@ func BridgeTokensDir() string         { return filepath.Join(StateRoot(), "bridg
 func BridgeIdentitiesDir() string     { return filepath.Join(StateRoot(), "bridge-identities") }
 func ParentInboxDir() string          { return filepath.Join(StateRoot(), "parent-inbox") }
 func ParentWatchDir() string          { return filepath.Join(StateRoot(), "parent-watch") }
+func ParentWatchLockPath(handoffID string) string {
+	return filepath.Join(ParentWatchDir(), sanitizeID(handoffID)+".lock")
+}
 func ProfileCacheDir() string {
 	return filepath.Join(StateRoot(), "hosts")
 }
