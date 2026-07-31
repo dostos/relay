@@ -393,17 +393,27 @@ func (h *HandoffService) TailEvents(ctx context.Context, handoffID string, fromS
 		delay += time.Duration(time.Now().UnixNano()%500) * time.Millisecond
 		st := ui.NewStatus()
 		ok := st.Wait(delay, func(left time.Duration) string {
-			return ui.JoinStatus(
-				"subscribe "+ho.HostID,
-				fmt.Sprintf("%d/6", attempts),
-				"retry in "+ui.FormatDuration(left),
-			)
+			return subscribeRetryStatus(ho.HostID, attempts, left, subErr)
 		}, ctx.Done())
 		st.Clear()
 		if !ok {
 			return ctx.Err()
 		}
 	}
+}
+
+// subscribeRetryStatus keeps transient SSH diagnostics inside the single-line
+// reconnect UI rather than letting each retry write a separate terminal line.
+func subscribeRetryStatus(host string, attempt int, left time.Duration, err error) string {
+	detail := "last error unavailable"
+	if err != nil {
+		detail = "last error: " + ui.Truncate(err.Error(), 72)
+	}
+	return ui.JoinStatus(
+		"waiting "+host,
+		detail,
+		fmt.Sprintf("retry %d/6 in %s", attempt, ui.FormatDuration(left)),
+	)
 }
 
 // ReinstallSensors refreshes tmux idle/exit hooks for a session (quiet emit).

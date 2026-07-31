@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dostos/relay/internal/ports"
 	"github.com/dostos/relay/internal/shellquote"
 	"github.com/dostos/relay/internal/ui"
 )
@@ -181,14 +182,20 @@ func (s *SessionService) ResumeOpts(ctx context.Context, persistName, cwd string
 			status.Clear()
 			return ctx.Err()
 		}
+		lastError := latestDiagnostic(err, filter)
+		if source, ok := t.(ports.DiagnosticSource); ok {
+			// The transport reports its current network state directly; use that
+			// ahead of any buffered stderr diagnostic from an adapter.
+			lastError = latestDiagnostic(err, source, filter)
+		}
 		if !announced {
 			announced = true
 			started = time.Now()
 			status.Clear()
-			ui.Warn(fmt.Sprintf("disconnected  %s  (exit %d)", target, code))
+			ui.Warn(resumeDisconnectMessage(target, code, lastError))
 		}
 		ok := status.Wait(delay, func(left time.Duration) string {
-			return ui.JoinStatus(target, fmt.Sprintf("attempt %d", attempt), "retry in "+ui.FormatDuration(left), "Ctrl+C")
+			return resumeRetryStatus(target, attempt, left, lastError)
 		}, ctx.Done())
 		status.Clear()
 		if !ok {
@@ -196,6 +203,44 @@ func (s *SessionService) ResumeOpts(ctx context.Context, persistName, cwd string
 		}
 		// Reconnect uses frozen connPersist/connHost — never re-resolve.
 	}
+}
+
+// latestDiagnostic accepts optional adapters from any transport. An adapter's
+// detail wins over a generic process error such as "exit status 255".
+func latestDiagnostic(fallback error, sources ...ports.DiagnosticSource) string {
+	for _, source := range sources {
+		if source == nil {
+			continue
+		}
+		if detail := strings.TrimSpace(source.LastDiagnostic()); detail != "" {
+			return detail
+		}
+	}
+	if fallback == nil {
+		return ""
+	}
+	return fallback.Error()
+}
+
+func resumeDisconnectMessage(target string, code int, lastError string) string {
+	message := fmt.Sprintf("disconnected  %s  (exit %d)", target, code)
+	if lastError != "" {
+		message += "  ·  " + lastError
+	}
+	return message
+}
+
+func resumeRetryStatus(target string, attempt int, left time.Duration, lastError string) string {
+	detail := "last error unavailable"
+	if lastError != "" {
+		detail = "last error: " + ui.Truncate(lastError, 72)
+	}
+	return ui.JoinStatus(
+		"waiting "+target,
+		detail,
+		fmt.Sprintf("retry %d in %s", attempt, ui.FormatDuration(left)),
+		"Ctrl+C",
+	)
 }
 
 func autoReconnectEnabled(noReconnect bool) bool {

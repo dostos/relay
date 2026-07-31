@@ -43,6 +43,7 @@ func TestSSHNoiseFilterDropsDisconnectChatter(t *testing.T) {
 	_, _ = f.Write([]byte("Shared connection to example.com closed.\n"))
 	_, _ = f.Write([]byte("client_loop: send disconnect: Broken pipe\n"))
 	_, _ = f.Write([]byte("Read from remote host example.com: Connection reset by peer\n"))
+	_, _ = f.Write([]byte("ssh: connect to host 203.0.113.7 port 2222: Operation timed out\n"))
 	_, _ = f.Write([]byte("Permission denied (publickey).\n"))
 	_ = f.Flush()
 	got := buf.String()
@@ -52,6 +53,9 @@ func TestSSHNoiseFilterDropsDisconnectChatter(t *testing.T) {
 	}
 	if !strings.Contains(got, "Permission denied") {
 		t.Fatalf("real error filtered: %q", got)
+	}
+	if got := f.LastDiagnostic(); got != "ssh: connect to host 203.0.113.7 port 2222: Operation timed out" {
+		t.Fatalf("last error = %q", got)
 	}
 }
 

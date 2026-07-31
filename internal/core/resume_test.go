@@ -1,6 +1,7 @@
 package core
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,26 @@ import (
 
 	"github.com/dostos/relay/internal/ports"
 )
+
+type testDiagnostic string
+
+func (d testDiagnostic) LastDiagnostic() string { return string(d) }
+
+func TestLatestDiagnosticPrefersCurrentTransportDetail(t *testing.T) {
+	got := latestDiagnostic(errors.New("exit status 255"), testDiagnostic("network unreachable"), testDiagnostic("stale stderr detail"))
+	if got != "network unreachable" {
+		t.Fatalf("latestDiagnostic() = %q", got)
+	}
+}
+
+func TestResumeRetryStatusIncludesLastError(t *testing.T) {
+	status := resumeRetryStatus("test-host/demo", 2, 3*time.Second, "ssh: connect to host 203.0.113.7 port 2222: Operation timed out")
+	for _, want := range []string{"waiting test-host/demo", "last error: ssh: connect to host", "retry 2 in 3s"} {
+		if !strings.Contains(status, want) {
+			t.Fatalf("status %q missing %q", status, want)
+		}
+	}
+}
 
 func TestFindByPersistNamePrefersRepo(t *testing.T) {
 	dir := t.TempDir()

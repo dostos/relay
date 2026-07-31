@@ -1,6 +1,11 @@
 package core
 
-import "testing"
+import (
+	"errors"
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestHandoffLayoutPreservesExplicitWorkspace(t *testing.T) {
 	layout := handoffLayout(HandoffOpts{Workspace: "workspace:9"})
@@ -10,5 +15,14 @@ func TestHandoffLayoutPreservesExplicitWorkspace(t *testing.T) {
 	}
 	if layout.Workspace != "workspace:9" {
 		t.Fatalf("workspace = %q, want workspace:9", layout.Workspace)
+	}
+}
+
+func TestSubscribeRetryStatusShowsStructuredLastError(t *testing.T) {
+	status := subscribeRetryStatus("test-host", 2, 3*time.Second, errors.New("ssh stream to test-host: ssh: connect timed out"))
+	for _, want := range []string{"waiting test-host", "last error: ssh stream to test-host", "retry 2/6 in 3s"} {
+		if !strings.Contains(status, want) {
+			t.Fatalf("status %q missing %q", status, want)
+		}
 	}
 }

@@ -20,6 +20,14 @@ type Transport interface {
 	InteractiveCommand(remoteCmd string) string
 }
 
+// DiagnosticSource is an optional capability for transports and their
+// adapters. It exposes the most useful recent network diagnostic for a
+// reconnect UI without making callers parse transport-specific stderr.
+// Implementations should return an empty string when no diagnostic is known.
+type DiagnosticSource interface {
+	LastDiagnostic() string
+}
+
 // PersistHandle identifies a durable session on a Persistence backend.
 type PersistHandle struct {
 	Kind string `json:"kind"`

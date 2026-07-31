@@ -467,10 +467,16 @@ func (v *Viz) Layout(ctx context.Context) (string, error) {
 	return out, nil
 }
 
-// activeWorkspace returns the workspace_ref cmux currently reports as focused,
-// so a present that omits --workspace still lands its split in the right place
-// instead of failing cmux new-split with "Surface not found".
+// activeWorkspace returns the caller's cmux workspace when Relay was launched
+// from a cmux terminal. This must win over the globally focused workspace:
+// another window may be focused by the time Relay asks cmux, and explicitly
+// passing that workspace to new-split would otherwise override cmux's normal
+// caller-workspace routing. Outside cmux, fall back to the focused workspace
+// so blind use remains supported.
 func (v *Viz) activeWorkspace(ctx context.Context) string {
+	if workspace := strings.TrimSpace(os.Getenv("CMUX_WORKSPACE_ID")); workspace != "" {
+		return workspace
+	}
 	out, err := v.run(ctx, "list-panes", "--json")
 	if err != nil {
 		return ""
@@ -682,9 +688,9 @@ func (v *Viz) lookup(sessionID string) (binding, error) {
 
 type panesJSON struct {
 	Panes []struct {
-		Ref               string   `json:"ref"`
-		SelectedSurfaceRef string  `json:"selected_surface_ref"`
-		SurfaceRefs       []string `json:"surface_refs"`
+		Ref                string   `json:"ref"`
+		SelectedSurfaceRef string   `json:"selected_surface_ref"`
+		SurfaceRefs        []string `json:"surface_refs"`
 	} `json:"panes"`
 }
 

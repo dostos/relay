@@ -22,6 +22,8 @@ type Transport struct {
 	Stderr io.Writer
 }
 
+const maxStreamStderrBytes = 8 * 1024
+
 func New(host string) *Transport {
 	return &Transport{Host: host}
 }
@@ -114,8 +116,57 @@ func (t *Transport) RunStream(ctx context.Context, cwd, command string, w io.Wri
 	args = append(args, t.Host, remote)
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 	cmd.Stdout = w
-	cmd.Stderr = w
-	return cmd.Run()
+	// Event streams are JSON-lines on stdout. Keeping stderr out of that stream
+	// prevents reconnect failures from being rendered as repeated fake events or
+	// raw terminal chatter. Return the final SSH diagnostic to the caller so it
+	// can present one structured error instead.
+	var stderr tailBuffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return streamError(t.Host, err, stderr.String())
+	}
+	return nil
+}
+
+// tailBuffer retains only the end of a stream. SSH diagnostics arrive at the
+// end of stderr, so this keeps error reporting useful without allowing a
+// broken or hostile remote command to grow the local process unboundedly.
+type tailBuffer struct {
+	data []byte
+}
+
+func (b *tailBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	if n >= maxStreamStderrBytes {
+		b.data = append(b.data[:0], p[n-maxStreamStderrBytes:]...)
+		return n, nil
+	}
+	excess := len(b.data) + n - maxStreamStderrBytes
+	if excess > 0 {
+		b.data = append(b.data[:0], b.data[excess:]...)
+	}
+	b.data = append(b.data, p...)
+	return n, nil
+}
+
+func (b *tailBuffer) String() string { return string(b.data) }
+
+func streamError(host string, err error, stderr string) error {
+	detail := lastNonEmptyLine(stderr)
+	if detail == "" {
+		return fmt.Errorf("ssh stream to %s: %w", host, err)
+	}
+	return fmt.Errorf("ssh stream to %s: %s", host, detail)
+}
+
+func lastNonEmptyLine(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if line := strings.TrimSpace(lines[i]); line != "" {
+			return line
+		}
+	}
+	return ""
 }
 
 func (t *Transport) ReadFile(ctx context.Context, path string) ([]byte, error) {

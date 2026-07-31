@@ -1,6 +1,9 @@
 package cmux
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestParseWorkspaceRef(t *testing.T) {
 	cases := []struct {
@@ -19,5 +22,14 @@ func TestParseWorkspaceRef(t *testing.T) {
 				t.Fatalf("parseWorkspaceRef(%q) = %q, want %q", c.in, got, c.want)
 			}
 		})
+	}
+}
+
+func TestActiveWorkspacePrefersCallingCmuxWorkspace(t *testing.T) {
+	t.Setenv("CMUX_WORKSPACE_ID", "workspace:beholder-pdf")
+
+	v := New()
+	if got := v.activeWorkspace(context.Background()); got != "workspace:beholder-pdf" {
+		t.Fatalf("activeWorkspace() = %q, want caller workspace", got)
 	}
 }

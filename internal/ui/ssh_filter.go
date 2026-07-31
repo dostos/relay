@@ -11,9 +11,10 @@ import (
 // SSHNoiseFilter wraps a writer and drops OpenSSH client disconnect chatter
 // that otherwise scrolls past an in-place reconnect status line.
 type SSHNoiseFilter struct {
-	W   io.Writer
-	mu  sync.Mutex
-	buf []byte
+	W    io.Writer
+	mu   sync.Mutex
+	buf  []byte
+	last string
 }
 
 func (f *SSHNoiseFilter) Write(p []byte) (int, error) {
@@ -28,6 +29,7 @@ func (f *SSHNoiseFilter) Write(p []byte) (int, error) {
 		line := f.buf[:i+1]
 		f.buf = f.buf[i+1:]
 		if isSSHNoise(string(line)) {
+			f.last = strings.TrimSpace(string(line))
 			continue
 		}
 		if _, err := f.W.Write(line); err != nil {
@@ -47,10 +49,20 @@ func (f *SSHNoiseFilter) Flush() error {
 	line := string(f.buf)
 	f.buf = nil
 	if isSSHNoise(line) {
+		f.last = strings.TrimSpace(line)
 		return nil
 	}
 	_, err := f.W.Write([]byte(line))
 	return err
+}
+
+// LastDiagnostic returns the latest suppressed OpenSSH diagnostic. It is intended
+// for an in-place reconnect status, where showing one current error is useful
+// but writing every failed attempt would corrupt the status line.
+func (f *SSHNoiseFilter) LastDiagnostic() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.last
 }
 
 // OpenSSH-shaped client diagnostics only (prefix/anchored). Avoids dropping
@@ -60,6 +72,7 @@ var (
 	reSSHShared     = regexp.MustCompile(`^Shared connection to \S+ closed\.$`)
 	reSSHReadReset  = regexp.MustCompile(`^Read from remote host \S+: Connection reset`)
 	reSSHClientLoop = regexp.MustCompile(`^client_loop:`)
+	reSSHConnect    = regexp.MustCompile(`^ssh: connect to host \S+(?: port \d+)?: `)
 )
 
 func isSSHNoise(line string) bool {
@@ -75,6 +88,8 @@ func isSSHNoise(line string) bool {
 	case reSSHReadReset.MatchString(s):
 		return true
 	case reSSHClientLoop.MatchString(s):
+		return true
+	case reSSHConnect.MatchString(s):
 		return true
 	default:
 		return false
