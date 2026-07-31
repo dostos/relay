@@ -98,6 +98,12 @@ orchestration**, not a transcript or chat bus. Correlated control envelopes
 survive agent exits, SSH reconnects, nested relays, and cmux restarts until the
 goal is answered, acknowledged, and terminal.
 
+The lineage is a strict management tree. A child can address only its
+authenticated immediate parent. Remote parents are agent managers: they
+resolve or escalate one level. Only a local cmux root receives human-facing
+notifications, so descendants cannot bypass their manager and interrupt the
+human directly.
+
 `relay session adopt` also provisions an owner-only bridge identity so an
 already-running agent can discover Relay from its tmux pane without receiving
 a secret in its prompt. Repair a session adopted by an older Relay release in

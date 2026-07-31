@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"os"
@@ -60,6 +61,30 @@ func TestParentCallerScope(t *testing.T) {
 	t.Setenv(bridge.SourceSessionEnv, "")
 	if err := authorizeParentCaller("sess-local"); err != nil {
 		t.Fatalf("local desktop invocation rejected: %v", err)
+	}
+}
+
+func TestAuthenticatedManagerCannotBypassHierarchy(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	t.Setenv(bridge.SourceSessionEnv, "sess-manager")
+	now := time.Now().UTC()
+	a := New()
+	for _, sess := range []*core.Session{
+		{ID: "sess-manager", HostID: "c3", Persist: ports.PersistHandle{Kind: "tmux", Name: "manager"}, CreatedAt: now},
+		{ID: "sess-root", HostID: core.LocalHostID, Persist: ports.PersistHandle{Kind: core.LocalPersistKind, Name: "root"}, Labels: map[string]string{"role": core.ParentRole}, CreatedAt: now},
+	} {
+		if err := a.Reg.PutSession(sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+	opts := core.HandoffOpts{SourceSessionID: "sess-root", Workspace: "workspace:1", Pane: "surface:1"}
+	if _, err := a.applyHandoffSource(context.Background(), &opts); err == nil || !bytes.Contains([]byte(err.Error()), []byte("bypasses authenticated manager")) {
+		t.Fatalf("hierarchy bypass error = %v", err)
+	}
+
+	opts.SourceSessionID = "sess-manager"
+	if _, err := a.applyHandoffSource(context.Background(), &opts); err != nil {
+		t.Fatalf("direct child rejected: %v", err)
 	}
 }
 

@@ -262,7 +262,12 @@ func (a *App) applyHandoffSource(ctx context.Context, opts *core.HandoffOpts) (s
 		return "", nil
 	}
 	sessionID, hostID, persistName, repoRef := sourceFromEnvironment(a.Reg)
-	if opts.SourceSessionID != "" {
+	// A bridge-authenticated child may create only a direct child of itself.
+	// It cannot name a grandparent/root and bypass its immediate manager.
+	if sessionID != "" && opts.SourceSessionID != "" && opts.SourceSessionID != sessionID {
+		return "", fmt.Errorf("handoff parent %s bypasses authenticated manager %s", opts.SourceSessionID, sessionID)
+	}
+	if sessionID == "" && opts.SourceSessionID != "" {
 		sessionID = opts.SourceSessionID
 		if sess, err := a.Reg.GetSession(sessionID); err == nil {
 			hostID, persistName, repoRef = sess.HostID, sess.Persist.Name, sess.RepoRef
@@ -2035,6 +2040,7 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 			"rules": []string{
 				"execute response.argv once",
 				"after a wait timeout stop the turn; never poll or attach",
+				"each child talks only to its immediate manager; only the local root asks a human",
 				"use parent inbox for decisions and receipts; never send transcripts",
 				"agent hooks ping the parent on input, result, and exit",
 			},

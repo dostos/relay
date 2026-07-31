@@ -435,18 +435,34 @@ func (p *ParentService) childEventText(ctx context.Context, ho *Handoff, ev coor
 		return compactText(kind + " from child")
 	}
 	if p.Sessions != nil {
-		if capture, err := p.Sessions.Capture(ctx, ho.SessionID, 12); err == nil {
-			lines := strings.Split(strings.TrimSpace(capture), "\n")
-			if len(lines) > 4 {
-				lines = lines[len(lines)-4:]
-			}
-			excerpt := compactText(strings.Join(lines, " | "))
+		if capture, err := p.Sessions.Capture(ctx, ho.SessionID, 80); err == nil {
+			excerpt := decisionExcerpt(capture)
 			if excerpt != "" {
-				return "child idle; decide blocked/completed: " + excerpt
+				return "child idle; manager decide blocked/completed: " + excerpt
 			}
 		}
 	}
-	return "child idle; decide whether it is blocked, complete, or should continue"
+	return "child idle; manager decide whether it is blocked, complete, or should continue"
+}
+
+func decisionExcerpt(capture string) string {
+	lines := strings.Split(capture, "\n")
+	useful := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.Trim(line, "─━═- ") == "" {
+			continue
+		}
+		// Common tmux/agent status bars carry no decision context.
+		if strings.HasPrefix(line, "|") && strings.Contains(line, "Auto") && strings.Contains(line, "~/") {
+			continue
+		}
+		useful = append(useful, line)
+	}
+	if len(useful) > 6 {
+		useful = useful[len(useful)-6:]
+	}
+	return compactText(strings.Join(useful, " | "))
 }
 
 func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coord.Event) (*ParentMessage, error) {
@@ -489,10 +505,15 @@ func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coo
 	}
 	notice := ParentNotice{MessageID: msg.ID, Kind: kind, Child: childName, Text: msg.Text, Action: action}
 	var notifyErr error
+	// Delivery is strictly one edge up the tree. Only a local root owns a
+	// human-facing cmux surface; every other parent is an agent manager and
+	// receives the same compact envelope in its own session.
 	if isLocalParent(parent) && p.Notifier != nil {
 		notifyErr = p.Notifier.NotifyParent(ctx, parent.ID, notice)
-	} else if p.Sessions != nil {
+	} else if !isLocalParent(parent) && p.Sessions != nil {
 		notifyErr = p.Sessions.Send(ctx, parent.ID, FormatParentNotice(notice), true)
+	} else {
+		notifyErr = fmt.Errorf("no delivery path for parent %s", parent.ID)
 	}
 	if notifyErr == nil {
 		now := time.Now().UTC()

@@ -23,6 +23,16 @@ type fakeRetirementViz struct {
 	closed []string
 }
 
+type recordingPersistence struct {
+	renamePersistence
+	sent []string
+}
+
+func (p *recordingPersistence) Send(_ context.Context, _ ports.Transport, _ ports.PersistHandle, text string, _ bool) error {
+	p.sent = append(p.sent, text)
+	return nil
+}
+
 func (f *fakeRetirementViz) Kind() string                   { return "test" }
 func (f *fakeRetirementViz) Available(context.Context) bool { return true }
 func (f *fakeRetirementViz) Present(context.Context, string, string, ports.Layout) (string, error) {
@@ -159,6 +169,56 @@ func TestRouteChildEventDeduplicatesAndKeepsMessageCompact(t *testing.T) {
 	graph, err := LoadHistory()
 	if err != nil || len(graph.Communications) != 1 || graph.Communications[0].Action != "request" {
 		t.Fatalf("history=%+v err=%v", graph, err)
+	}
+}
+
+func TestRemoteManagerReceivesChildEventWithoutHumanNotification(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	recorder := &recordingPersistence{}
+	service.Sessions.Persist = recorder
+	now := time.Now().UTC()
+	manager := &Session{ID: "sess-manager", HostID: "c1", Persist: ports.PersistHandle{Kind: "tmux", Name: "manager"}, SourceSessionID: "sess-root", CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c3", Persist: ports.PersistHandle{Kind: "tmux", Name: "worker"}, SourceSessionID: manager.ID, CreatedAt: now}
+	for _, sess := range []*Session{manager, child} {
+		if err := reg.PutSession(sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ho := &Handoff{ID: "ho-worker", SessionID: child.ID, HostID: child.HostID, Kind: KindAgent, Status: StatusRunning, SourceSessionID: manager.ID, CreatedAt: now}
+	msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "permission_required", Meta: map[string]any{"text": "approve tool?"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.ParentSessionID != manager.ID || len(notifier.notices) != 0 {
+		t.Fatalf("event escaped immediate manager: msg=%+v human_notices=%d", msg, len(notifier.notices))
+	}
+	if len(recorder.sent) != 1 || !strings.Contains(recorder.sent[0], "relay parent reply "+msg.ID) {
+		t.Fatalf("manager delivery = %v", recorder.sent)
+	}
+}
+
+func TestDecisionExcerptDropsChromeAndKeepsPermissionPrompt(t *testing.T) {
+	capture := `
+  $ git -C /repo status Waiting for approval...
+
+────────────────────────────────────────
+ Run this command?
+ Not in allowlist: git -C, head
+  → Run (once) (y)
+    Add Shell(git -C), Shell(head) to allowlist? (tab)
+    Skip & tell the agent what to do instead (esc or n)
+
+| | Auto | ~/dev/folio · agent/backends-and-adapters · #2
+`
+	got := decisionExcerpt(capture)
+	if !strings.Contains(got, "Run this command?") || !strings.Contains(got, "Not in allowlist") {
+		t.Fatalf("decision context missing: %q", got)
+	}
+	if strings.Contains(got, "Auto") || strings.Contains(got, "~/dev/folio") {
+		t.Fatalf("status chrome leaked: %q", got)
+	}
+	if len(got) > parentTextLimit {
+		t.Fatalf("decision excerpt is unbounded: %d", len(got))
 	}
 }
 
