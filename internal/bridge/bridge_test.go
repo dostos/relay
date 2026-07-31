@@ -55,7 +55,7 @@ func TestBridgeAllowlist(t *testing.T) {
 	for _, argv := range [][]string{
 		{"host", "bootstrap", "-H", "c1"}, {"auth", "copy"}, {"session", "destroy", "sess-x"},
 		{"parent", "register", "--surface", "surface:1"}, {"parent", "link", "sess-p", "ho-1"},
-		{"parent", "retire", "sess-p"}, {"parent", "watch", "ho-1"},
+		{"parent", "retire", "sess-p"}, {"parent", "watch", "ho-1"}, {"policy", "list"},
 	} {
 		if err := validateArgv(argv); err == nil {
 			t.Fatalf("expected %v to be rejected", argv)

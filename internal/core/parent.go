@@ -48,6 +48,10 @@ type ParentMessage struct {
 	Reply           string             `json:"reply,omitempty"`
 	RepliedAt       *time.Time         `json:"replied_at,omitempty"`
 	AckedAt         *time.Time         `json:"acked_at,omitempty"`
+	PolicyID        string             `json:"policy_id,omitempty"`
+	PolicyAction    string             `json:"policy_action,omitempty"`
+	AutoHandled     bool               `json:"auto_handled,omitempty"`
+	PolicyError     string             `json:"policy_error,omitempty"`
 }
 
 // ParentInboxItem is the turn-level projection of a durable parent message.
@@ -62,6 +66,9 @@ type ParentInboxItem struct {
 	Text           string             `json:"text,omitempty"`
 	State          ParentMessageState `json:"state,omitempty"`
 	Reply          string             `json:"reply,omitempty"`
+	PolicyID       string             `json:"policy_id,omitempty"`
+	AutoHandled    bool               `json:"auto_handled,omitempty"`
+	PolicyError    string             `json:"policy_error,omitempty"`
 	Next           string             `json:"next"`
 	Argv           []string           `json:"argv"`
 }
@@ -81,6 +88,9 @@ func CompactParentMessage(msg *ParentMessage, includeState bool) ParentInboxItem
 	if includeState {
 		item.State = msg.State
 		item.Reply = msg.Reply
+		item.PolicyID = msg.PolicyID
+		item.AutoHandled = msg.AutoHandled
+		item.PolicyError = msg.PolicyError
 	}
 	return item
 }
@@ -109,6 +119,7 @@ type ParentService struct {
 	Coord        ports.Coord
 	Viz          ports.Viz
 	Notifier     ParentNotifier
+	Policies     *PolicyService
 	NewTransport TransportFactory
 }
 
@@ -495,6 +506,9 @@ func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coo
 		return nil, err
 	}
 	_ = AppendCommunication(msg, "request", "")
+	if handled, decided := p.applyPolicy(ctx, ho, ev, msg); decided {
+		return handled, nil
+	}
 	childName := ho.HostID
 	if child, err := p.Reg.GetSession(ho.SessionID); err == nil {
 		childName = child.Persist.Name + "@" + ho.HostID
@@ -521,6 +535,57 @@ func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coo
 		_ = writeParentMessage(msg, false)
 	}
 	return msg, notifyErr
+}
+
+func (p *ParentService) applyPolicy(ctx context.Context, ho *Handoff, ev coord.Event, msg *ParentMessage) (*ParentMessage, bool) {
+	if p.Policies == nil || msg == nil {
+		return msg, false
+	}
+	seen, pending := map[string]bool{}, map[string]bool{}
+	if messages, err := p.ListMessages(msg.ParentSessionID, false); err == nil {
+		for _, other := range messages {
+			if other.ID == msg.ID || other.HandoffID != msg.HandoffID {
+				continue
+			}
+			if time.Since(other.CreatedAt) <= 2*time.Minute {
+				seen[other.Kind] = true
+			}
+			if other.State == ParentMessagePending {
+				pending[other.Kind] = true
+			}
+		}
+	}
+	decision, err := p.Policies.Decide(PolicyContext{
+		Kind: msg.Kind, SourceKind: ev.Kind, Agent: ho.Agent, Host: ho.HostID, Text: msg.Text,
+		Command: eventString(ev.Meta, "command", "cmd"), SeenKinds: seen, PendingKinds: pending,
+	})
+	if err != nil {
+		msg.PolicyError = compactText(err.Error())
+		_ = writeParentMessage(msg, false)
+		return msg, false
+	}
+	if !decision.Matched {
+		return msg, false
+	}
+	msg.PolicyID, msg.PolicyAction = decision.RuleID, decision.Action
+	_ = writeParentMessage(msg, false)
+	var handled *ParentMessage
+	switch decision.Action {
+	case "reply":
+		handled, err = p.Reply(ctx, msg.ID, decision.Reply)
+	case "ack":
+		handled, err = p.Ack(msg.ID)
+	default:
+		err = fmt.Errorf("unsupported policy action %q", decision.Action)
+	}
+	if err != nil {
+		msg.PolicyError = compactText(err.Error())
+		_ = writeParentMessage(msg, false)
+		return msg, false
+	}
+	handled.PolicyID, handled.PolicyAction, handled.AutoHandled = decision.RuleID, decision.Action, true
+	_ = writeParentMessage(handled, false)
+	return handled, true
 }
 
 func FormatParentNotice(n ParentNotice) string {
@@ -849,6 +914,10 @@ func AppendCommunication(msg *ParentMessage, action, text string) error {
 	}
 	if text != "" {
 		record["text"] = compactText(text)
+	}
+	if msg.PolicyID != "" {
+		record["policy_id"] = msg.PolicyID
+		record["auto_handled"] = true
 	}
 	return AppendLedger(record)
 }

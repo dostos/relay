@@ -39,6 +39,7 @@ type App struct {
 	Msg         *core.MsgService
 	Maint       *core.MaintenanceService
 	Parents     *core.ParentService
+	Policies    *core.PolicyService
 	Viz         ports.Viz
 	JSON        bool
 	CompactJSON bool
@@ -73,7 +74,8 @@ func New() *App {
 		Viz:          viz,
 		NewTransport: tf,
 	}
-	parents := &core.ParentService{Reg: reg, Sessions: sessions, Coord: coord, Viz: viz, Notifier: viz, NewTransport: tf}
+	policies := &core.PolicyService{}
+	parents := &core.ParentService{Reg: reg, Sessions: sessions, Coord: coord, Viz: viz, Notifier: viz, Policies: policies, NewTransport: tf}
 	handoffs.ParentRouter = parents
 	boot := &core.BootstrapService{NewTransport: tf}
 	auth := &core.AuthService{
@@ -93,13 +95,14 @@ func New() *App {
 			Coord:        coord,
 			Profiles:     profiles,
 		},
-		Reg:     reg,
-		Coord:   coord,
-		Msg:     &core.MsgService{Coord: coord, NewTransport: tf},
-		Maint:   &core.MaintenanceService{Sessions: sessions, Reg: reg, Viz: viz, NewTransport: tf},
-		Parents: parents,
-		Viz:     viz,
-		tf:      tf,
+		Reg:      reg,
+		Coord:    coord,
+		Msg:      &core.MsgService{Coord: coord, NewTransport: tf},
+		Maint:    &core.MaintenanceService{Sessions: sessions, Reg: reg, Viz: viz, NewTransport: tf},
+		Parents:  parents,
+		Policies: policies,
+		Viz:      viz,
+		tf:       tf,
 	}
 }
 
@@ -378,6 +381,8 @@ func (a *App) Run(args []string) int {
 		return a.cmdMsg(ctx, filtered[1:])
 	case "parent":
 		return a.cmdParent(ctx, filtered[1:])
+	case "policy":
+		return a.cmdPolicy(filtered[1:])
 	case "signal", "hook":
 		return a.cmdSignal(ctx, filtered[0], filtered[1:])
 	case "gc":
@@ -482,6 +487,12 @@ Long-lived goal orchestration (durable compact inbox + guarded local-pane cleanu
   relay parent state PARENT active|idle|complete
   relay parent status ID
   relay parent retire ID [--dry-run]
+
+Automatic handling policies (desktop-local; unmatched/errors go to manager):
+  relay policy list
+  relay policy check --kind KIND [--source RAW_KIND] [--agent NAME] [--host HOST] [--text TEXT] [--command CMD]
+  relay policy add ID --kind KIND [--source RAW_KIND] [--agent NAME] [--host HOST] [--contains TEXT ...] (--reply TEXT | --ack)
+  relay policy remove ID
 
 Agent-to-agent messages (relayd channels; any channel name):
   relay msg send -H HOST -c CHANNEL [--kind K] [--from ID] [--text ... | -- ...] [--meta JSON]
@@ -1812,6 +1823,151 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 	}
 }
 
+func (a *App) cmdPolicy(args []string) int {
+	a.JSON = true
+	a.CompactJSON = true
+	if a.Policies == nil {
+		return a.fail(fmt.Errorf("policy service unavailable"))
+	}
+	if len(args) == 0 {
+		args = []string{"list"}
+	}
+	switch args[0] {
+	case "list":
+		if len(args) != 1 {
+			return a.fail(fmt.Errorf("usage: relay policy list"))
+		}
+		path, builtins, cfg, err := a.Policies.Describe()
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "path": path, "builtins": builtins, "rules": cfg.Rules}))
+	case "remove", "rm":
+		if len(args) != 2 {
+			return a.fail(fmt.Errorf("usage: relay policy remove ID"))
+		}
+		if err := a.Policies.Remove(args[1]); err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "removed": args[1]}))
+	case "add":
+		if len(args) < 2 || strings.HasPrefix(args[1], "-") {
+			return a.fail(fmt.Errorf("usage: relay policy add ID --kind KIND [guards] (--reply TEXT | --ack)"))
+		}
+		rule := core.PolicyRule{ID: args[1]}
+		for i := 2; i < len(args); i++ {
+			switch args[i] {
+			case "--kind":
+				i++
+				if i < len(args) {
+					rule.Kind = args[i]
+				}
+			case "--source":
+				i++
+				if i < len(args) {
+					rule.SourceKind = args[i]
+				}
+			case "--agent":
+				i++
+				if i < len(args) {
+					rule.Agent = args[i]
+				}
+			case "--host":
+				i++
+				if i < len(args) {
+					rule.Host = args[i]
+				}
+			case "--contains":
+				i++
+				if i < len(args) {
+					rule.Contains = append(rule.Contains, args[i])
+				}
+			case "--seen":
+				i++
+				if i < len(args) {
+					rule.SeenKind = args[i]
+				}
+			case "--pending":
+				i++
+				if i < len(args) {
+					rule.PendingKind = args[i]
+				}
+			case "--reply":
+				i++
+				if i < len(args) {
+					rule.Action, rule.Reply = "reply", args[i]
+				}
+			case "--ack":
+				rule.Action = "ack"
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
+			}
+		}
+		if err := a.Policies.Add(rule); err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "rule": rule}))
+	case "check":
+		ctx := core.PolicyContext{SeenKinds: map[string]bool{}, PendingKinds: map[string]bool{}}
+		for i := 1; i < len(args); i++ {
+			switch args[i] {
+			case "--kind":
+				i++
+				if i < len(args) {
+					ctx.Kind = args[i]
+				}
+			case "--source":
+				i++
+				if i < len(args) {
+					ctx.SourceKind = args[i]
+				}
+			case "--agent":
+				i++
+				if i < len(args) {
+					ctx.Agent = args[i]
+				}
+			case "--host":
+				i++
+				if i < len(args) {
+					ctx.Host = args[i]
+				}
+			case "--text":
+				i++
+				if i < len(args) {
+					ctx.Text = args[i]
+				}
+			case "--command":
+				i++
+				if i < len(args) {
+					ctx.Command = args[i]
+				}
+			case "--seen":
+				i++
+				if i < len(args) {
+					ctx.SeenKinds[args[i]] = true
+				}
+			case "--pending":
+				i++
+				if i < len(args) {
+					ctx.PendingKinds[args[i]] = true
+				}
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
+			}
+		}
+		if ctx.Kind == "" {
+			return a.fail(fmt.Errorf("--kind required"))
+		}
+		decision, err := a.Policies.Decide(ctx)
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "decision": decision}))
+	default:
+		return a.fail(fmt.Errorf("usage: relay policy list|check|add|remove"))
+	}
+}
+
 // A bridge caller may act only as its authenticated source session. This lets
 // a remote parent orchestrate its own long-lived goal tree without exposing a
 // different local parent's durable inbox by guessed identifiers.
@@ -1897,18 +2053,27 @@ func (a *App) cmdSignal(ctx context.Context, mode string, args []string) int {
 			raw, _ := io.ReadAll(io.LimitReader(os.Stdin, 64<<10))
 			var payload map[string]any
 			if json.Unmarshal(raw, &payload) == nil {
-				for _, key := range []string{"message", "reason", "tool_name", "permission_mode", "last_assistant_message"} {
-					if value, ok := payload[key]; ok {
-						meta[key] = value
+				for _, key := range []string{"reason", "tool_name", "permission_mode", "cwd"} {
+					if value, ok := payload[key].(string); ok && value != "" {
+						meta[key] = compactHookField(value, 512)
 					}
 				}
 				if text == "" {
 					for _, key := range []string{"message", "reason", "last_assistant_message"} {
 						if value, ok := payload[key].(string); ok && value != "" {
-							text = value
+							text = compactHookField(value, 640)
 							break
 						}
 					}
+				}
+				command, _ := payload["command"].(string)
+				if command == "" {
+					if toolInput, ok := payload["tool_input"].(map[string]any); ok {
+						command, _ = toolInput["command"].(string)
+					}
+				}
+				if command != "" {
+					meta["command"] = compactHookField(command, 2048)
 				}
 			}
 		}
@@ -1921,7 +2086,7 @@ func (a *App) cmdSignal(ctx context.Context, mode string, args []string) int {
 		return a.fail(fmt.Errorf("RELAY_SESSION_NAME is not set"))
 	}
 	if text != "" {
-		meta["text"] = text
+		meta["text"] = compactHookField(text, 640)
 	}
 	if correlation != "" {
 		meta["correlation_id"] = correlation
@@ -1951,6 +2116,15 @@ func (a *App) cmdSignal(ctx context.Context, mode string, args []string) int {
 	}
 	response["kind"], response["session"] = kind, session
 	return a.errOut(a.out(response))
+}
+
+func compactHookField(value string, limit int) string {
+	value = strings.Join(strings.Fields(value), " ")
+	runes := []rune(value)
+	if limit > 0 && len(runes) > limit {
+		value = string(runes[:limit-1]) + "…"
+	}
+	return value
 }
 
 func (a *App) cmdEvents(ctx context.Context, args []string) int {
@@ -2042,7 +2216,7 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 				"after a wait timeout stop the turn; never poll or attach",
 				"each child talks only to its immediate manager; only the local root asks a human",
 				"use parent inbox for decisions and receipts; never send transcripts",
-				"agent hooks ping the parent on input, result, and exit",
+				"hooks signal input/result/exit; policies handle guarded/redundant events, else escalate",
 			},
 		}))
 	case "pick":

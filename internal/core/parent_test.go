@@ -222,6 +222,89 @@ func TestDecisionExcerptDropsChromeAndKeepsPermissionPrompt(t *testing.T) {
 	}
 }
 
+func TestPolicyCoalescesPermissionIdleWithoutSecondNotification(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	service.Policies = &PolicyService{Path: filepath.Join(t.TempDir(), "missing-policy.yaml")}
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "root"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c3", Persist: ports.PersistHandle{Kind: "tmux", Name: "worker"}, CreatedAt: now}
+	_ = reg.PutSession(parent)
+	_ = reg.PutSession(child)
+	ho := &Handoff{ID: "ho-1", SessionID: child.ID, HostID: child.HostID, Agent: "codex", Kind: KindAgent, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
+	first, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "permission_required", Meta: map[string]any{"text": "approve?"}})
+	if err != nil || first.State != ParentMessagePending || len(notifier.notices) != 1 {
+		t.Fatalf("permission=%+v err=%v notices=%d", first, err, len(notifier.notices))
+	}
+	second, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 2, Kind: "idle"})
+	if err != nil || second.State != ParentMessageAcked || !second.AutoHandled || second.PolicyID != "builtin.coalesce_permission_idle" {
+		t.Fatalf("idle=%+v err=%v", second, err)
+	}
+	if len(notifier.notices) != 1 {
+		t.Fatalf("redundant idle notified root: %d", len(notifier.notices))
+	}
+}
+
+func TestPolicyAutoReplyIsAuditedAndSkipsManagerPing(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	recorder := &recordingPersistence{}
+	service.Sessions.Persist = recorder
+	policy := &PolicyService{Path: filepath.Join(t.TempDir(), "policy.yaml")}
+	if err := policy.Add(PolicyRule{ID: "cursor-safe-read", Kind: "permission_required", Agent: "cursor-agent", Contains: []string{"git status"}, Action: "reply", Reply: "y"}); err != nil {
+		t.Fatal(err)
+	}
+	service.Policies = policy
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "root"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "cancun", Persist: ports.PersistHandle{Kind: "tmux", Name: "worker"}, CreatedAt: now}
+	_ = reg.PutSession(parent)
+	_ = reg.PutSession(child)
+	ho := &Handoff{ID: "ho-1", SessionID: child.ID, HostID: child.HostID, Agent: "cursor-agent", Kind: KindAgent, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
+	if err := reg.PutHandoff(ho); err != nil {
+		t.Fatal(err)
+	}
+	msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "permission_required", Meta: map[string]any{"text": "Run git status?", "command": "git status"}})
+	if err != nil || msg.State != ParentMessageReplied || msg.Reply != "y" || !msg.AutoHandled || msg.PolicyID != "cursor-safe-read" {
+		t.Fatalf("message=%+v err=%v", msg, err)
+	}
+	if len(notifier.notices) != 0 || len(recorder.sent) != 1 || recorder.sent[0] != "y" {
+		t.Fatalf("notices=%d sent=%v", len(notifier.notices), recorder.sent)
+	}
+	graph, err := LoadHistory()
+	if err != nil || len(graph.Communications) != 2 || graph.Communications[1].PolicyID != "cursor-safe-read" || !graph.Communications[1].AutoHandled {
+		t.Fatalf("policy audit history=%+v err=%v", graph, err)
+	}
+}
+
+func TestPolicyFailureFallsBackToManagerAndIsAudited(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	if err := os.WriteFile(path, []byte("version: [broken\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service.Policies = &PolicyService{Path: path}
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "root"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c3", Persist: ports.PersistHandle{Kind: "tmux", Name: "worker"}, CreatedAt: now}
+	_ = reg.PutSession(parent)
+	_ = reg.PutSession(child)
+	ho := &Handoff{ID: "ho-1", SessionID: child.ID, HostID: child.HostID, Agent: "codex", Kind: KindAgent, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
+	msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "permission_required", Meta: map[string]any{"text": "approve?"}})
+	if err != nil || msg.State != ParentMessagePending || msg.PolicyError == "" {
+		t.Fatalf("message=%+v err=%v", msg, err)
+	}
+	if len(notifier.notices) != 1 {
+		t.Fatalf("policy failure did not reach manager: notices=%d", len(notifier.notices))
+	}
+	messages, err := service.ListMessages(parent.ID, false)
+	if err != nil || len(messages) != 1 {
+		t.Fatalf("audited messages=%+v err=%v", messages, err)
+	}
+	item := CompactParentMessage(messages[0], true)
+	if item.PolicyError == "" {
+		t.Fatalf("policy error missing from compact inbox: %+v", item)
+	}
+}
+
 func TestRouteChildEventSupportsAllGoalControlKinds(t *testing.T) {
 	service, notifier, reg := newParentTestService(t)
 	now := time.Now().UTC()

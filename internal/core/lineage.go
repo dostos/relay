@@ -228,6 +228,8 @@ type HistoryCommunication struct {
 	HandoffID       string    `json:"handoff_id,omitempty"`
 	Kind            string    `json:"kind"`
 	Action          string    `json:"action"`
+	PolicyID        string    `json:"policy_id,omitempty"`
+	AutoHandled     bool      `json:"auto_handled,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
 }
 
@@ -264,7 +266,8 @@ func LoadHistory() (*HistoryGraph, error) {
 			communications = append(communications, HistoryCommunication{
 				MessageID: textField(raw, "message_id"), CorrelationID: textField(raw, "correlation_id"),
 				ParentSessionID: textField(raw, "parent_session_id"), ChildSessionID: textField(raw, "child_session_id"),
-				HandoffID: textField(raw, "handoff_id"), Kind: textField(raw, "kind"), Action: textField(raw, "action"), CreatedAt: ts,
+				HandoffID: textField(raw, "handoff_id"), Kind: textField(raw, "kind"), Action: textField(raw, "action"),
+				PolicyID: textField(raw, "policy_id"), AutoHandled: boolField(raw, "auto_handled"), CreatedAt: ts,
 			})
 			continue
 		}
@@ -323,6 +326,11 @@ func LoadHistory() (*HistoryGraph, error) {
 
 func textField(raw map[string]any, key string) string {
 	v, _ := raw[key].(string)
+	return v
+}
+
+func boolField(raw map[string]any, key string) bool {
+	v, _ := raw[key].(bool)
 	return v
 }
 
@@ -388,7 +396,11 @@ func FormatHistory(graph *HistoryGraph) string {
 	if len(graph.Communications) > 0 {
 		fmt.Fprintln(&out, "Communications:")
 		for _, message := range graph.Communications {
-			fmt.Fprintf(&out, "  %s %s %s (%s)\n", message.MessageID, message.Action, message.Kind, message.CorrelationID)
+			policy := ""
+			if message.PolicyID != "" {
+				policy = " [" + message.PolicyID + "]"
+			}
+			fmt.Fprintf(&out, "  %s %s %s (%s)%s\n", message.MessageID, message.Action, message.Kind, message.CorrelationID, policy)
 		}
 	}
 	return out.String()

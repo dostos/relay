@@ -116,6 +116,28 @@ handoff/sequence, stores a bounded envelope, and wakes the exact parent pane.
 No transcript is forwarded and no Relay instruction is added to the child
 goal. Set `relay_hooks: off` only when an agent runtime cannot execute hooks.
 
+The desktop policy gate removes redundant hook/fallback pings automatically
+and can answer stable CLI prompts with explicit literal-guarded rules. It
+normalizes bounded hook fields (`agent`, `host`, `text`, and `command`) so a
+provider can change its raw hook payload without changing the policy file.
+There is no blanket auto-approval rule: unmatched rules, malformed policy
+files, and failed replies continue one level up to the immediate manager.
+
+```bash
+relay policy list
+relay policy check --kind ask --agent cursor-agent \
+  --text "Run this command?" --command "git status"
+relay policy add cursor-read --kind ask --agent cursor-agent \
+  --contains "Run this command?" --contains "git status" --reply y
+relay policy remove cursor-read
+```
+
+All `--contains` literals must match, case-insensitively. Policies are
+desktop-local in `~/.config/relay/policy.yaml`; automatic decisions remain
+auditable with `relay parent inbox PARENT --all`. Built-ins only coalesce a
+tmux-idle fallback after an outstanding permission event and an `exit` shortly
+after a `result`; they never grant permission.
+
 Closing a local parent is deliberately gated:
 
 ```bash

@@ -285,7 +285,7 @@ func validateArgv(argv []string) error {
 	// lineage. Host bootstrap/auth and raw session mutation remain desktop-only.
 	reserved := map[string]bool{
 		"host": true, "auth": true, "targets": true, "session": true, "sess": true,
-		"handoff": true, "agent": true, "parent": true, "msg": true, "gc": true, "events": true,
+		"handoff": true, "agent": true, "parent": true, "policy": true, "msg": true, "gc": true, "events": true,
 		"viz": true, "pane": true, "resume": true, "doctor": true, "history": true,
 		"help": true, "version": true, "install-cmux-restore": true,
 	}

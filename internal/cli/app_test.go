@@ -167,3 +167,52 @@ func TestParentMessageArgsArePositional(t *testing.T) {
 		t.Fatalf("removed --message syntax was accepted: %q", id)
 	}
 }
+
+func TestPolicyCLIAddCheckRemove(t *testing.T) {
+	t.Setenv("RELAY_CONFIG_DIR", t.TempDir())
+	a := New()
+	add := captureStdout(t, func() {
+		if code := a.Run([]string{"policy", "add", "cursor-read", "--kind", "ask", "--agent", "cursor-agent", "--contains", "Run this command?", "--contains", "git status", "--reply", "y"}); code != 0 {
+			t.Fatalf("add exit=%d", code)
+		}
+	})
+	if !bytes.Contains([]byte(add), []byte(`"ok":true`)) {
+		t.Fatalf("add=%q", add)
+	}
+	check := captureStdout(t, func() {
+		if code := a.Run([]string{"policy", "check", "--kind", "ask", "--source", "idle", "--agent", "cursor-agent", "--text", "Run this command?", "--command", "git status"}); code != 0 {
+			t.Fatalf("check exit=%d", code)
+		}
+	})
+	if !bytes.Contains([]byte(check), []byte(`"rule_id":"cursor-read"`)) {
+		t.Fatalf("check=%q", check)
+	}
+	remove := captureStdout(t, func() {
+		if code := a.Run([]string{"policy", "remove", "cursor-read"}); code != 0 {
+			t.Fatalf("remove exit=%d", code)
+		}
+	})
+	if !bytes.Contains([]byte(remove), []byte(`"removed":"cursor-read"`)) {
+		t.Fatalf("remove=%q", remove)
+	}
+}
+
+func TestPolicyCLIRejectsUnguardedReply(t *testing.T) {
+	t.Setenv("RELAY_CONFIG_DIR", t.TempDir())
+	a := New()
+	out := captureStdout(t, func() {
+		if code := a.Run([]string{"policy", "add", "unsafe", "--kind", "permission_required", "--reply", "y"}); code == 0 {
+			t.Fatal("unguarded reply policy accepted")
+		}
+	})
+	if !bytes.Contains([]byte(out), []byte("literal --contains guard")) {
+		t.Fatalf("unexpected error=%q", out)
+	}
+}
+
+func TestCompactHookFieldBoundsProviderPayloads(t *testing.T) {
+	got := compactHookField("  Run\n this\tcommand?  ", 12)
+	if got != "Run this co…" {
+		t.Fatalf("compact field=%q", got)
+	}
+}

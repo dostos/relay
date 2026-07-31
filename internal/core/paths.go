@@ -24,6 +24,21 @@ func StateRoot() string {
 	return filepath.Join(xdg, AppName)
 }
 
+// ConfigRoot is the local desktop control-plane configuration directory.
+func ConfigRoot() string {
+	if v := os.Getenv("RELAY_CONFIG_DIR"); v != "" {
+		return v
+	}
+	xdg := os.Getenv("XDG_CONFIG_HOME")
+	if xdg == "" {
+		home, _ := os.UserHomeDir()
+		xdg = filepath.Join(home, ".config")
+	}
+	return filepath.Join(xdg, AppName)
+}
+
+func PolicyPath() string { return filepath.Join(ConfigRoot(), "policy.yaml") }
+
 func SessionsPath() string            { return filepath.Join(StateRoot(), "sessions.json") }
 func HandoffsDir() string             { return filepath.Join(StateRoot(), "handoffs") }
 func LedgerPath() string              { return filepath.Join(StateRoot(), "handoffs", "ledger.jsonl") }
