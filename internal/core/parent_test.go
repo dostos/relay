@@ -18,6 +18,29 @@ type fakeParentNotifier struct {
 	notices []ParentNotice
 }
 
+type fakeRetirementViz struct {
+	closed []string
+}
+
+func (f *fakeRetirementViz) Kind() string                   { return "test" }
+func (f *fakeRetirementViz) Available(context.Context) bool { return true }
+func (f *fakeRetirementViz) Present(context.Context, string, string, ports.Layout) (string, error) {
+	return "", nil
+}
+func (f *fakeRetirementViz) Focus(context.Context, string) error { return nil }
+func (f *fakeRetirementViz) Close(_ context.Context, sessionID string) error {
+	f.closed = append(f.closed, sessionID)
+	return nil
+}
+func (f *fakeRetirementViz) Layout(context.Context) (string, error) { return "", nil }
+func (f *fakeRetirementViz) SaveRestorable(context.Context) (int, error) {
+	return 0, nil
+}
+func (f *fakeRetirementViz) RestoreSaved(context.Context) (int, error) {
+	return 0, nil
+}
+func (f *fakeRetirementViz) BrandLabels(context.Context, map[string]string) error { return nil }
+
 func (f *fakeParentNotifier) BindLocalParent(_ context.Context, sessionID, surface string) (string, error) {
 	f.bound = append(f.bound, sessionID+"@"+surface)
 	return surface, nil
@@ -138,6 +161,42 @@ func TestRouteChildEventDeduplicatesAndKeepsMessageCompact(t *testing.T) {
 	}
 }
 
+func TestRouteChildEventSupportsAllGoalControlKinds(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "local-main"}, Labels: map[string]string{"role": ParentRole, "wake_mode": "notify"}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c3", Persist: ports.PersistHandle{Kind: "tmux", Name: "child"}, CreatedAt: now}
+	_ = reg.PutSession(parent)
+	_ = reg.PutSession(child)
+	ho := &Handoff{ID: "ho-control", SessionID: child.ID, HostID: "c3", Kind: KindAgent, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
+	_ = reg.PutHandoff(ho)
+
+	kinds := []string{"ask", "permission_required", "result", "exit"}
+	for i, kind := range kinds {
+		correlation := "corr-" + kind
+		msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{
+			Seq: int64(i + 1), Kind: kind,
+			Meta: map[string]any{"text": kind + " payload", "correlation_id": correlation},
+		})
+		if err != nil {
+			t.Fatalf("route %s: %v", kind, err)
+		}
+		if msg.Kind != kind || msg.CorrelationID != correlation || msg.State != ParentMessagePending {
+			t.Fatalf("%s message = %+v", kind, msg)
+		}
+		wantAction := "ack"
+		if kind == "ask" || kind == "permission_required" {
+			wantAction = "reply"
+		}
+		if got := notifier.notices[len(notifier.notices)-1].Action; got != wantAction {
+			t.Fatalf("%s action = %s, want %s", kind, got, wantAction)
+		}
+	}
+	if len(notifier.notices) != len(kinds) {
+		t.Fatalf("notices = %d, want %d", len(notifier.notices), len(kinds))
+	}
+}
+
 func TestReplyAndAckCloseInboxWithCorrelatedHistory(t *testing.T) {
 	service, _, reg := newParentTestService(t)
 	now := time.Now().UTC()
@@ -209,6 +268,17 @@ func TestRetirementGateRequiresStateChildrenInboxAndPushedRepos(t *testing.T) {
 		t.Fatalf("clean gate=%+v err=%v", gate, err)
 	}
 
+	if _, err := service.SetState(parent.ID, "active"); err != nil {
+		t.Fatal(err)
+	}
+	gate, _ = service.RetirementStatus(context.Background(), parent.ID)
+	if gate.Eligible || !strings.Contains(strings.Join(gate.Reasons, " "), "idle/complete") {
+		t.Fatalf("active parent eligible: %+v", gate)
+	}
+	if _, err := service.SetState(parent.ID, "complete"); err != nil {
+		t.Fatal(err)
+	}
+
 	if err := os.WriteFile(filepath.Join(repo, "dirty"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -220,6 +290,33 @@ func TestRetirementGateRequiresStateChildrenInboxAndPushedRepos(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if err := os.WriteFile(filepath.Join(repo, "README"), []byte("unpushed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, repo, "add", "README")
+	gitRun(t, repo, "commit", "-m", "unpushed")
+	gate, _ = service.RetirementStatus(context.Background(), parent.ID)
+	if gate.Eligible || len(gate.Repos) != 1 || gate.Repos[0].Pushed {
+		t.Fatalf("unpushed commit eligible: %+v", gate)
+	}
+	gitRun(t, repo, "push", "origin", "main")
+
+	pending := &ParentMessage{
+		V: 1, ID: "pm-pending", CorrelationID: "corr-pending",
+		ParentSessionID: parent.ID, ChildSessionID: "sess-finished", HandoffID: "ho-finished",
+		EventSeq: 1, Kind: "result", State: ParentMessagePending, CreatedAt: now,
+	}
+	if err := writeParentMessage(pending, true); err != nil {
+		t.Fatal(err)
+	}
+	gate, _ = service.RetirementStatus(context.Background(), parent.ID)
+	if gate.Eligible || len(gate.PendingInbox) != 1 {
+		t.Fatalf("pending inbox eligible: %+v", gate)
+	}
+	if _, err := service.Ack(pending.ID); err != nil {
+		t.Fatal(err)
+	}
+
 	ho := &Handoff{ID: "ho-active", SessionID: "sess-child", HostID: "c3", Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
 	_ = reg.PutHandoff(ho)
 	gate, _ = service.RetirementStatus(context.Background(), parent.ID)
@@ -228,12 +325,17 @@ func TestRetirementGateRequiresStateChildrenInboxAndPushedRepos(t *testing.T) {
 	}
 	ho.Status, ho.Outcome = StatusDone, "done"
 	_ = reg.PutHandoff(ho)
+	viz := &fakeRetirementViz{}
+	service.Viz = viz
 	retired, err := service.Retire(context.Background(), parent.ID, false)
 	if err != nil || !retired.Eligible || !retired.Closed {
 		t.Fatalf("retire=%+v err=%v", retired, err)
 	}
 	if _, err := reg.GetSession(parent.ID); err == nil {
 		t.Fatal("retired parent remains registered")
+	}
+	if len(viz.closed) != 1 || viz.closed[0] != parent.ID {
+		t.Fatalf("closed surfaces = %v", viz.closed)
 	}
 }
 
