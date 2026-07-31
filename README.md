@@ -98,6 +98,11 @@ orchestration**, not a transcript or chat bus. Correlated control envelopes
 survive agent exits, SSH reconnects, nested relays, and cmux restarts until the
 goal is answered, acknowledged, and terminal.
 
+`relay session adopt` also provisions an owner-only bridge identity so an
+already-running agent can discover Relay from its tmux pane without receiving
+a secret in its prompt. Repair a session adopted by an older Relay release in
+place with `relay session bridge sess-…`; no agent or tmux restart is needed.
+
 Each child has one detached blocking event watcher. Agent hooks publish
 `ask`, `permission_required`, `result`, and `exit`; Relay deduplicates by
 handoff/sequence, stores a bounded envelope, and wakes the exact parent pane.

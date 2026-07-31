@@ -60,6 +60,7 @@ relay pane rename sess-… personal-db           # persistent UI alias; tmux ide
 relay history                                 # durable source → destination graph
 relay parent register                         # make current local pane a lineage parent
 relay parent link --parent sess-… --handoff ho-… # adopt existing goal orchestration
+relay session bridge sess-…                  # repair legacy adopted pane, no restart
 relay parent status SESSION_ID                # token-efficient retirement gate
 ```
 

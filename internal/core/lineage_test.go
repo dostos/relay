@@ -1,6 +1,9 @@
 package core
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -67,5 +70,27 @@ func TestAuthorizeBridgeSource(t *testing.T) {
 	}
 	if err := AuthorizeBridgeSource(bridge.Source{SessionID: "sess-source", Token: "wrong"}); err == nil {
 		t.Fatal("expected wrong token to be rejected")
+	}
+}
+
+func TestLoadBridgeIdentityForPersist(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	if err := EnsureStateDirs(); err != nil {
+		t.Fatal(err)
+	}
+	want := BridgeIdentity{V: 1, SessionID: "sess-adopted", HostID: "c3", PersistName: "beholder", Socket: "/tmp/relay.sock", Token: "br-secret"}
+	raw, _ := json.Marshal(want)
+	if err := os.WriteFile(filepath.Join(BridgeIdentitiesDir(), "sess-adopted.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadBridgeIdentityForPersist("beholder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *got != want {
+		t.Fatalf("identity = %+v", got)
+	}
+	if _, err := loadBridgeIdentityForPersist("other"); err == nil {
+		t.Fatal("expected unknown tmux session to fail closed")
 	}
 }

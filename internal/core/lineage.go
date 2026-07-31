@@ -2,16 +2,19 @@ package core
 
 import (
 	"bufio"
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/dostos/relay/internal/bridge"
+	"github.com/dostos/relay/internal/ports"
 	"github.com/dostos/relay/internal/shellquote"
 )
 
@@ -34,6 +37,83 @@ func relaySessionCommand(command, sessionID, hostID, persistName, bridgeToken st
 
 func bridgeTokenPath(sessionID string) string {
 	return filepath.Join(BridgeTokensDir(), sanitizeID(sessionID)+".token")
+}
+
+// BridgeIdentity is the owner-only fallback used by already-running adopted
+// tmux sessions. New Relay sessions also receive it so nested handoffs keep
+// working after an agent replaces itself without inheriting the launch env.
+type BridgeIdentity struct {
+	V           int    `json:"v"`
+	SessionID   string `json:"session_id"`
+	HostID      string `json:"host_id"`
+	PersistName string `json:"persist_name"`
+	Socket      string `json:"socket"`
+	Token       string `json:"token"`
+}
+
+func remoteBridgeIdentityPath(sessionID string) string {
+	return "~/" + RemoteStateRel + "/bridge-identities/" + sanitizeID(sessionID) + ".json"
+}
+
+func bridgeIdentityPath(sessionID string) string {
+	return filepath.Join(BridgeIdentitiesDir(), sanitizeID(sessionID)+".json")
+}
+
+func provisionBridgeIdentity(ctx context.Context, t ports.Transport, sess *Session, token string) error {
+	if sess == nil || t == nil || token == "" {
+		return fmt.Errorf("bridge identity requires session, transport, and token")
+	}
+	identity := BridgeIdentity{
+		V: 1, SessionID: sess.ID, HostID: sess.HostID, PersistName: sess.Persist.Name,
+		Socket: BridgeRemoteSocket(sess.ID), Token: token,
+	}
+	raw, err := json.Marshal(identity)
+	if err != nil {
+		return err
+	}
+	return t.WriteFile(ctx, remoteBridgeIdentityPath(sess.ID), raw, "600")
+}
+
+func clearBridgeIdentity(ctx context.Context, t ports.Transport, sessionID string) {
+	// Overwrite instead of shell-removing: this revokes the secret while keeping
+	// cleanup inside Transport's bounded file API.
+	_ = t.WriteFile(ctx, remoteBridgeIdentityPath(sessionID), []byte("{}\n"), "600")
+}
+
+// LoadBridgeIdentityForCurrentPane discovers the tmux session containing the
+// caller, then loads only that session's owner-readable identity. It is used
+// when an adopted/rerolled agent process lacks Relay's original launch env.
+func LoadBridgeIdentityForCurrentPane() (*BridgeIdentity, error) {
+	pane := strings.TrimSpace(os.Getenv("TMUX_PANE"))
+	if pane == "" {
+		return nil, fmt.Errorf("not running in tmux")
+	}
+	out, err := exec.Command("tmux", "display-message", "-p", "-t", pane, "#{session_name}").Output()
+	if err != nil {
+		return nil, err
+	}
+	return loadBridgeIdentityForPersist(strings.TrimSpace(string(out)))
+}
+
+func loadBridgeIdentityForPersist(persistName string) (*BridgeIdentity, error) {
+	entries, err := os.ReadDir(BridgeIdentitiesDir())
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		raw, readErr := os.ReadFile(filepath.Join(BridgeIdentitiesDir(), entry.Name()))
+		if readErr != nil {
+			continue
+		}
+		var identity BridgeIdentity
+		if json.Unmarshal(raw, &identity) == nil && identity.PersistName == persistName && identity.SessionID != "" && identity.Socket != "" && identity.Token != "" {
+			return &identity, nil
+		}
+	}
+	return nil, fmt.Errorf("no bridge identity for tmux session %q", persistName)
 }
 
 func rememberBridgeToken(sessionID, token string) error {

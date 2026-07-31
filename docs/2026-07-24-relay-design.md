@@ -116,6 +116,10 @@ id exactly like remote-to-remote bridge launches.
 
 Existing goals can be migrated with `relay parent link --parent sess-…
 --handoff ho-…`; the link is one-time and starts the same blocking watcher.
+Already-running adopted tmux agents discover an owner-only bridge identity by
+their current tmux session name. `relay session bridge sess-…` provisions this
+identity for legacy registry entries without restarting or exposing its token
+to the agent transcript.
 
 Each parented handoff starts one detached watcher using a single blocking
 relayd subscription. The watcher routes only actionable events into

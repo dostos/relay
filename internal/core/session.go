@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -151,7 +153,15 @@ func (s *SessionService) Create(ctx context.Context, opts CreateOpts) (*Session,
 		SourcePersistName:  opts.SourcePersistName,
 		CreatedByHandoffID: opts.CreatedByHandoffID,
 	}
+	if err := provisionBridgeIdentity(ctx, t, sess, bridgeToken); err != nil {
+		_ = s.Persist.Destroy(ctx, t, h)
+		forgetBridgeToken(sessionID)
+		return nil, fmt.Errorf("provision bridge identity: %w", err)
+	}
 	if err := s.Reg.PutSession(sess); err != nil {
+		_ = s.Persist.Destroy(ctx, t, h)
+		clearBridgeIdentity(ctx, t, sess.ID)
+		forgetBridgeToken(sessionID)
 		return nil, err
 	}
 	RememberResume(sess)
@@ -203,8 +213,13 @@ func (s *SessionService) Adopt(ctx context.Context, opts CreateOpts) (*Session, 
 	if _, has := labels["adopted"]; !has {
 		labels["adopted"] = "existing"
 	}
+	sessionID := newID("sess")
+	bridgeToken := newID("br")
+	if err := rememberBridgeToken(sessionID, bridgeToken); err != nil {
+		return nil, err
+	}
 	sess := &Session{
-		ID:                 newID("sess"),
+		ID:                 sessionID,
 		HostID:             opts.HostID,
 		RemoteCWD:          cwd,
 		Persist:            h,
@@ -217,11 +232,47 @@ func (s *SessionService) Adopt(ctx context.Context, opts CreateOpts) (*Session, 
 		SourcePersistName:  opts.SourcePersistName,
 		CreatedByHandoffID: opts.CreatedByHandoffID,
 	}
+	if err := provisionBridgeIdentity(ctx, t, sess, bridgeToken); err != nil {
+		forgetBridgeToken(sessionID)
+		return nil, fmt.Errorf("provision adopted bridge identity: %w", err)
+	}
 	if err := s.Reg.PutSession(sess); err != nil {
+		clearBridgeIdentity(ctx, t, sess.ID)
+		forgetBridgeToken(sessionID)
 		return nil, err
 	}
 	RememberResume(sess)
 	_ = AppendSessionStart(sess)
+	return sess, nil
+}
+
+// ProvisionBridge repairs the authenticated fallback identity for an existing
+// registry session without restarting or injecting secrets into its agent.
+func (s *SessionService) ProvisionBridge(ctx context.Context, sessionID string) (*Session, error) {
+	sess, err := s.Reg.GetSession(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if sess.HostID == LocalHostID {
+		return nil, fmt.Errorf("local sessions do not use a remote bridge identity")
+	}
+	token := ""
+	if raw, readErr := os.ReadFile(bridgeTokenPath(sess.ID)); readErr == nil {
+		token = strings.TrimSpace(string(raw))
+	}
+	if token == "" {
+		token = newID("br")
+		if err := rememberBridgeToken(sess.ID, token); err != nil {
+			return nil, err
+		}
+	}
+	t, err := s.NewTransport(sess.HostID)
+	if err != nil {
+		return nil, err
+	}
+	if err := provisionBridgeIdentity(ctx, t, sess, token); err != nil {
+		return nil, err
+	}
 	return sess, nil
 }
 
@@ -286,6 +337,9 @@ func (s *SessionService) Rename(ctx context.Context, id, name string) (*Session,
 	}
 	if err := AppendSessionRename(sess.ID, old.Name, safe); err != nil {
 		return sess, fmt.Errorf("session renamed, but lineage update failed: %w", err)
+	}
+	if _, err := s.ProvisionBridge(ctx, sess.ID); err != nil {
+		return sess, fmt.Errorf("session renamed, but bridge identity update failed: %w", err)
 	}
 	return sess, nil
 }
@@ -396,6 +450,7 @@ func (s *SessionService) Destroy(ctx context.Context, id string, keepRemote bool
 		_ = s.Persist.Destroy(ctx, t, sess.Persist)
 		// Intentional teardown — cmux must not treat this as a reconnectable drop.
 		MarkResumeCleaned(sess.Persist.Name, "destroyed")
+		clearBridgeIdentity(ctx, t, sess.ID)
 		forgetBridgeToken(sess.ID)
 	} else {
 		// Local unbound; remote kept → disconnected/resumable.

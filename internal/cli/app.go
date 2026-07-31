@@ -161,14 +161,20 @@ func (a *App) forwardThroughDesktopBridge(args []string) (int, bool) {
 		break
 	}
 	sock := strings.TrimSpace(os.Getenv(bridge.SocketEnv))
-	if sock == "" || os.Getenv(bridge.LocalInvokeEnv) == "1" {
-		return 0, false
-	}
 	source := bridge.Source{
 		SessionID:   os.Getenv("RELAY_SESSION_ID"),
 		HostID:      os.Getenv("RELAY_SESSION_HOST"),
 		PersistName: os.Getenv("RELAY_SESSION_NAME"),
 		Token:       os.Getenv(bridge.SourceTokenEnv),
+	}
+	if sock == "" {
+		if identity, err := core.LoadBridgeIdentityForCurrentPane(); err == nil {
+			sock = identity.Socket
+			source = bridge.Source{SessionID: identity.SessionID, HostID: identity.HostID, PersistName: identity.PersistName, Token: identity.Token}
+		}
+	}
+	if sock == "" || os.Getenv(bridge.LocalInvokeEnv) == "1" {
+		return 0, false
 	}
 	resp, err := (bridge.Client{SockPath: sock}).Invoke(context.Background(), args, source)
 	if err != nil {
@@ -419,6 +425,7 @@ Sessions (explicit id; no guesswork):
   relay session adopt -H HOST --name TMUX [--cwd REMOTE] [--repo DIR]
                                       Register an already-running remote tmux
   relay session rename ID NAME        Rename tmux + reconnect/checkpoint identity in place
+  relay session bridge ID             Repair adopted pane bridge identity without restart
   relay session list
   relay session get ID
   relay session capture ID [-n LINES]
@@ -997,6 +1004,15 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 			"ok": true, "session_id": sess.ID, "persist_name": sess.Persist.Name,
 			"display_name": core.SessionDisplayName(sess), "cmux_rebound": rebound,
 		}))
+	case "bridge":
+		if len(args) != 2 {
+			return a.fail(fmt.Errorf("usage: relay session bridge ID"))
+		}
+		sess, err := a.Sessions.ProvisionBridge(ctx, args[1])
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "session_id": sess.ID, "host_id": sess.HostID, "persist_name": sess.Persist.Name, "bridge": "provisioned"}))
 	case "create":
 		host, rest := flagHost(args[1:])
 		opts := core.CreateOpts{HostID: host}
