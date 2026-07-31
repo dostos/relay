@@ -114,7 +114,7 @@ Notes:
 ## Commands
 
 ```text
-relay agent start -H HOST --container NAME --agent A --goal "…" [--repo R]
+relay agent start HOST A --container NAME [--repo R] -- "…"
                                         # handoff into a container (resolves → applies → verifies → starts)
 relay session create -H HOST --container NAME [--repo R]      # ad-hoc container session
 relay session exec|capture|send sess-…  # unchanged — container read from the session, wrapped automatically

@@ -265,7 +265,8 @@ func compactNotice(n core.ParentNotice) string {
 	if len(text) > 320 {
 		text = text[:319] + "…"
 	}
-	return fmt.Sprintf("[relay %s %s child=%s] %s; %s: relay parent %s --message %s", n.Kind, n.MessageID, n.Child, text, n.Action, n.Action, n.MessageID)
+	n.Text = text
+	return core.FormatParentNotice(n)
 }
 
 // BindSurface makes an existing cmux surface authoritative for a relay

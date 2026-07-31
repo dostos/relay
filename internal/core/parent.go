@@ -50,6 +50,41 @@ type ParentMessage struct {
 	AckedAt         *time.Time         `json:"acked_at,omitempty"`
 }
 
+// ParentInboxItem is the turn-level projection of a durable parent message.
+// Full timestamps, routing identity, and event cursors remain on disk and in
+// history; an orchestrator receives only what it needs for one decision.
+type ParentInboxItem struct {
+	ID             string             `json:"id"`
+	HandoffID      string             `json:"handoff_id"`
+	ChildSessionID string             `json:"child_session_id"`
+	CorrelationID  string             `json:"correlation_id,omitempty"`
+	Kind           string             `json:"kind"`
+	Text           string             `json:"text,omitempty"`
+	State          ParentMessageState `json:"state,omitempty"`
+	Reply          string             `json:"reply,omitempty"`
+	Next           string             `json:"next"`
+	Argv           []string           `json:"argv"`
+}
+
+func CompactParentMessage(msg *ParentMessage, includeState bool) ParentInboxItem {
+	next := "ack"
+	argv := []string{"relay", "parent", "ack", msg.ID}
+	if msg.Kind == "ask" || msg.Kind == "permission_required" {
+		next = "reply"
+		argv = []string{"relay", "parent", "reply", msg.ID, "--", "<decision>"}
+	}
+	item := ParentInboxItem{
+		ID: msg.ID, HandoffID: msg.HandoffID, ChildSessionID: msg.ChildSessionID,
+		CorrelationID: msg.CorrelationID, Kind: msg.Kind, Text: msg.Text,
+		Next: next, Argv: argv,
+	}
+	if includeState {
+		item.State = msg.State
+		item.Reply = msg.Reply
+	}
+	return item
+}
+
 type ParentNotice struct {
 	MessageID string
 	Kind      string
@@ -457,7 +492,7 @@ func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coo
 	if isLocalParent(parent) && p.Notifier != nil {
 		notifyErr = p.Notifier.NotifyParent(ctx, parent.ID, notice)
 	} else if p.Sessions != nil {
-		notifyErr = p.Sessions.Send(ctx, parent.ID, formatParentNotice(notice), true)
+		notifyErr = p.Sessions.Send(ctx, parent.ID, FormatParentNotice(notice), true)
 	}
 	if notifyErr == nil {
 		now := time.Now().UTC()
@@ -467,9 +502,13 @@ func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coo
 	return msg, notifyErr
 }
 
-func formatParentNotice(n ParentNotice) string {
+func FormatParentNotice(n ParentNotice) string {
 	text := compactText(n.Text)
-	return fmt.Sprintf("[relay %s %s child=%s] %s; %s: relay parent %s --message %s", n.Kind, n.MessageID, n.Child, text, n.Action, n.Action, n.MessageID)
+	suffix := ""
+	if n.Action == "reply" {
+		suffix = " <decision>"
+	}
+	return fmt.Sprintf("[relay %s %s child=%s] %s | relay parent %s %s%s", n.Kind, n.MessageID, n.Child, text, n.Action, n.MessageID, suffix)
 }
 
 func (p *ParentService) Watch(ctx context.Context, handoffID string) error {

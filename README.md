@@ -32,9 +32,9 @@ relay is the thin control plane for that. cmux stays the windowing surface; rela
 Hand a goal to Claude / Codex / cursor-agent on a lab box. Close cmux. Reopen later — Vault runs `relay resume --session …` and the pane is back in the same tmux session.
 
 ```bash
-relay agent start -H host-a --agent cursor-agent --goal "fix the flaky eval; keep tests green"
+relay agent start host-a cursor-agent -- "fix the flaky eval; keep tests green"
 # → {"next":"wait","argv":["relay","agent","wait",…]}
-relay agent wait --handoff ho-… [--timeout 120]
+relay agent wait ho-… [--timeout 120]
 ```
 
 ### 2) Project workspace with several durable remotes
@@ -73,7 +73,7 @@ relay history
 # └─[relay]→ c1/followup (human)
 
 # an agent handoff records the agent and ho-… edge as well
-relay agent start -H c1 --agent codex --name analysis --goal "continue the analysis"
+relay agent start c1 codex --name analysis -- "continue the analysis"
 ```
 
 Child placement follows the recorded session binding, not whichever pane is
@@ -87,10 +87,10 @@ auto-registers the caller as its parent; an explicit migration is:
 
 ```bash
 relay parent register --name personal-db-main --repo ./projects/infrastructure/workspace-search
-relay parent link --parent sess-… --handoff ho-…  # adopt existing work
-relay parent inbox --session sess-…       # compact, cursor-free durable inbox
-relay parent reply --message pm-… --text "approve"
-relay parent ack --message pm-…
+relay parent link sess-… ho-…        # adopt existing work
+relay parent inbox sess-…            # compact, cursor-free durable inbox
+relay parent reply pm-… approve
+relay parent ack pm-…
 ```
 
 This is a durable control plane for **long-lived, goal-based handoff and
@@ -133,23 +133,26 @@ relay host discover -H host-a --json
 relay host init -H host-a --apply   # installs relay + relayd on the host
 ```
 
-### 4) Orchestrator / skill loop (no poll loops)
+### 4) Orchestrator loop (no poll loops)
 
-Skills live in this repo (`skills/relay-sessions`, `skills/relay-handoff`). Agents follow JSON `next` / `argv` only — never `events tail -f` in a tight loop.
+`relay agent` is the self-describing agent protocol. Run `relay agent protocol`
+for its compact rules, then follow JSON `next` / `argv` only — never
+`events tail -f` in a tight loop and never attach an agent to a session.
 
 ## Install
 
 ```bash
 git clone https://github.com/dostos/relay.git
 cd relay
-./install.sh          # ~/.local/bin/relay{,d} + skill symlinks
+./install.sh          # ~/.local/bin/relay{,d}; CLI is the agent protocol
 relay doctor --json
 relay install-cmux-restore   # register Vault resume agent (also run by install.sh)
 ```
 
 In cmux: **Settings → Terminal → Resume Commands** → approve **relay** once.
 
-Skills are versioned under [`skills/`](skills/) and symlinked into `~/.claude/skills` (and `~/.codex/skills` when Codex is present). Edit in-repo; re-run `./install.sh`.
+No runtime-specific agent skill is required or installed. Workspace-level
+agent instructions only need to point at `relay agent protocol`.
 
 ## Quick start with cmux
 
@@ -159,7 +162,7 @@ relay host init -H HOST --apply
 
 # run work
 relay HOST NAME                     # current pane → named remote tmux
-relay agent start -H HOST --agent claude --goal "…"
+relay agent start HOST claude -- "…"
 # or attach an existing tmux session
 relay session adopt -H HOST --name my-tmux
 relay viz present sess-…          # opens a cmux split; ◆ RELAY tab title

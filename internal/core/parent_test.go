@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -348,5 +349,32 @@ func TestSessionDestroyCannotBypassParentGate(t *testing.T) {
 	}
 	if err := service.Sessions.Destroy(context.Background(), parent.ID, false); err == nil || !strings.Contains(err.Error(), "parent retire") {
 		t.Fatalf("unguarded destroy error = %v", err)
+	}
+}
+
+func TestCompactParentMessageOmitsDurableRoutingMetadata(t *testing.T) {
+	now := time.Now().UTC()
+	msg := &ParentMessage{
+		V: 1, ID: "pm-1", CorrelationID: "deploy-1",
+		ParentSessionID: "sess-parent", ChildSessionID: "sess-child",
+		HandoffID: "ho-1", EventSeq: 91, Kind: "permission_required",
+		Text: "approve deploy?", State: ParentMessagePending, CreatedAt: now,
+	}
+	item := CompactParentMessage(msg, false)
+	raw, err := json.Marshal(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, redundant := range []string{"parent_session_id", "event_seq", "created_at", "\"state\""} {
+		if strings.Contains(text, redundant) {
+			t.Fatalf("compact inbox leaked %s: %s", redundant, text)
+		}
+	}
+	if item.Next != "reply" || len(item.Argv) == 0 || item.Argv[len(item.Argv)-1] != "<decision>" {
+		t.Fatalf("compact inbox omitted executable decision: %s", text)
+	}
+	if len(raw) > 300 {
+		t.Fatalf("compact inbox item is not compact: %d bytes: %s", len(raw), raw)
 	}
 }

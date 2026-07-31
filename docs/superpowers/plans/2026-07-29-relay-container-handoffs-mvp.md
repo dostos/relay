@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add `relay agent start --container NAME` — hand off an agent goal into a docker container on a host, with the agent running via `docker exec` (tmux stays on the host), a resolved working dir, and a verify gate that refuses the handoff if the agent can't actually run in the container.
+**Goal:** Add `relay agent start HOST AGENT --container NAME -- GOAL` — hand off an agent goal into a docker container on a host, with the agent running via `docker exec` (tmux stays on the host), a resolved working dir, and a verify gate that refuses the handoff if the agent can't actually run in the container.
 
 **Architecture:** A container is a **session attribute**, not a new Transport or HostID. The base ssh transport and host tmux are unchanged; a `docker exec` wrapper is applied only to (a) the agent launch command sent into the holding shell and (b) ad-hoc `Exec`. Container targets are declared in the remote `host.yaml` `containers:` list and resolved at launch. Before the handoff starts, relay runs the agent's `--version` inside the container and maps known failure signatures (glibc, root, permission, missing binary, hook) to actionable errors.
 
@@ -710,21 +710,21 @@ containers:
 
 Run:
 ```bash
-relay agent start -H hamburg --container itest --agent claude --goal "reply with the single word PONG"
+relay agent start hamburg claude --container itest -- "reply with the single word PONG"
 ```
-Expected: returns `{"next":"wait",...}` (verify passed; handoff started). Then `relay agent wait --handoff ho-… --timeout 60` progresses to an actionable event; `relay agent capture --handoff ho-…` shows the agent in the container.
+Expected: returns `{"next":"wait",...}` (verify passed; handoff started). Then `relay agent wait ho-… --timeout 60` progresses to an actionable event; `relay agent capture ho-…` shows the agent in the container.
 
 - [ ] **Step 3: Negative path — verify gate refuses a non-runnable agent**
 
 Point `itest.container` at an old-glibc container (e.g. an Ubuntu 18.04 image) and run:
 ```bash
-relay agent start -H hamburg --container itest --agent codex --goal "x"
+relay agent start hamburg codex --container itest -- "x"
 ```
 Expected: non-zero exit with `container verify failed: … newer base image (node ≥18 needs glibc ≥2.28)` and **no** started handoff / orphan pane.
 
 - [ ] **Step 4: Durability — pane survives container restart**
 
-With a positive-path handoff running, `docker restart <container>` on the host, then `relay agent capture --handoff ho-…`. Expected: the host tmux pane persists (shows a dead `docker exec` pane), confirming tmux-on-host durability.
+With a positive-path handoff running, `docker restart <container>` on the host, then `relay agent capture ho-…`. Expected: the host tmux pane persists (shows a dead `docker exec` pane), confirming tmux-on-host durability.
 
 - [ ] **Step 5: Record results**
 

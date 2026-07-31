@@ -114,8 +114,8 @@ and an authoritative viz binding. Local registration never changes the pane's
 command or resume checkpoint. Handoffs launched there carry the parent session
 id exactly like remote-to-remote bridge launches.
 
-Existing goals can be migrated with `relay parent link --parent sess-…
---handoff ho-…`; the link is one-time and starts the same blocking watcher.
+Existing goals can be migrated with `relay parent link sess-… ho-…`; the link
+is one-time and starts the same blocking watcher.
 Already-running adopted tmux agents discover an owner-only bridge identity by
 their current tmux session name. `relay session bridge sess-…` provisions this
 identity for legacy registry entries without restarting or exposing its token

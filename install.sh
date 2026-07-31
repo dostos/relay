@@ -17,26 +17,26 @@ echo "installed $INSTALL_DIR/relay $INSTALL_DIR/relayd"
 "$INSTALL_DIR/relay" version
 "$INSTALL_DIR/relayd" version
 
-# Agentic skills live IN this repo (skills/). Symlink into agent skill dirs.
-# Source of truth: $ROOT/skills/relay-{sessions,handoff}
-link_skills() {
+# Relay's compact JSON + `next`/`argv` is the complete agent protocol. Remove
+# symlinks created by older installers; workspace AGENTS.md files can point at
+# `relay agent protocol` without a runtime-specific skill layer.
+unlink_relay_skills() {
   local dst="$1"
-  [[ -z "$dst" ]] && return 0
-  mkdir -p "$dst"
-  ln -sfn "$ROOT/skills/relay-sessions" "$dst/relay-sessions"
-  ln -sfn "$ROOT/skills/relay-handoff" "$dst/relay-handoff"
-  rm -f "$dst/sst-sessions" "$dst/sst-handoff"
-  echo "skills → $dst/relay-{sessions,handoff}"
+  local name target
+  [[ -d "$dst" ]] || return 0
+  for name in relay-sessions relay-handoff; do
+    [[ -L "$dst/$name" ]] || continue
+    target="$(readlink "$dst/$name")"
+    if [[ "$target" == "$ROOT/skills/$name" ]] || [[ ! -e "$dst/$name" ]]; then
+      rm "$dst/$name"
+      echo "removed legacy skill link $dst/$name"
+    fi
+  done
 }
-if [[ -n "${RELAY_SKILL_DIR:-}" ]]; then
-  link_skills "$RELAY_SKILL_DIR"
-else
-  link_skills "$HOME/.claude/skills"
-  # Codex shares the same SKILL.md layout when present.
-  if [[ -d "$HOME/.codex/skills" ]] || command -v codex >/dev/null 2>&1; then
-    link_skills "$HOME/.codex/skills"
-  fi
-fi
+unlink_relay_skills "$HOME/.agents/skills"
+unlink_relay_skills "$HOME/.claude/skills"
+unlink_relay_skills "$HOME/.codex/skills"
+unlink_relay_skills "$HOME/.cursor/skills"
 
 # Register with cmux Vault so panes re-launch after cmux quit / Mac reboot.
 if command -v cmux >/dev/null 2>&1 || [[ -x /Applications/cmux.app/Contents/Resources/bin/cmux ]]; then

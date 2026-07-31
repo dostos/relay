@@ -28,20 +28,21 @@ import (
 
 // App wires adapters and runs CLI commands.
 type App struct {
-	Sessions  *core.SessionService
-	Handoffs  *core.HandoffService
-	Profiles  *core.ProfileService
-	Auth      *core.AuthService
-	Bootstrap *core.BootstrapService
-	Discover  *core.DiscoverService
-	Reg       *core.Registry
-	Coord     ports.Coord
-	Msg       *core.MsgService
-	Maint     *core.MaintenanceService
-	Parents   *core.ParentService
-	Viz       ports.Viz
-	JSON      bool
-	tf        core.TransportFactory
+	Sessions    *core.SessionService
+	Handoffs    *core.HandoffService
+	Profiles    *core.ProfileService
+	Auth        *core.AuthService
+	Bootstrap   *core.BootstrapService
+	Discover    *core.DiscoverService
+	Reg         *core.Registry
+	Coord       ports.Coord
+	Msg         *core.MsgService
+	Maint       *core.MaintenanceService
+	Parents     *core.ParentService
+	Viz         ports.Viz
+	JSON        bool
+	CompactJSON bool
+	tf          core.TransportFactory
 }
 
 // New constructs the default App (SSH + tmux + cmux + relayd coord).
@@ -105,7 +106,10 @@ func New() *App {
 func (a *App) out(v any) error {
 	if a.JSON {
 		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
+		enc.SetEscapeHTML(false)
+		if !a.CompactJSON {
+			enc.SetIndent("", "  ")
+		}
 		return enc.Encode(v)
 	}
 	switch t := v.(type) {
@@ -136,7 +140,10 @@ func (a *App) failNext(err error, extra map[string]any) int {
 		payload[k] = v
 	}
 	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
+	if !a.CompactJSON {
+		enc.SetIndent("", "  ")
+	}
 	_ = enc.Encode(payload)
 	return 1
 }
@@ -447,25 +454,27 @@ Handoffs (goal-based / long-running):
   relay history                      Show durable relay/handoff lineage
 
 Agent surface (token-efficient; always JSON; NO poll loops):
-  relay agent start -H HOST --agent NAME --goal TEXT | --cmd CMD [--parent SESSION] [--workspace WS] [--pane PANE] [--no-pane]
-  relay agent pick -H HOST                                     # suggest agent by weekly headroom (advisory)
-  relay agent wait --handoff ID [--from SEQ] [--timeout SEC]   # blocks once
-  relay agent send --handoff ID -- TEXT
-  relay agent capture --handoff ID [-n LINES]
-  relay agent done --handoff ID [--outcome done|failed|abandoned] [--keep-session]
-  relay agent status --handoff ID
+  relay agent [protocol]                                    # print compact orchestration contract
+  relay agent start HOST AGENT [options] -- GOAL
+  relay agent start HOST --cmd CMD [options]
+  relay agent pick HOST                                        # suggest agent by weekly headroom (advisory)
+  relay agent wait ID [--from SEQ] [--timeout SEC]              # blocks once
+  relay agent send ID [--] TEXT
+  relay agent capture ID [-n LINES]
+  relay agent done ID [--outcome done|failed|abandoned] [--keep-session]
+  relay agent status ID
   # Follow response.next / response.argv. Never events tail -f in a loop.
   # Agents may also DECLARE state instead of going idle: emit kind
   # ask|note|progress|result (with meta.q/text) and 'agent wait' surfaces it.
 
 Long-lived goal orchestration (durable compact inbox + guarded local-pane cleanup):
   relay parent register [--surface REF] [--name NAME] [--repo DIR ...] [--wake inject|notify]
-  relay parent link --parent ID --handoff ID   # adopt an already-running goal
+  relay parent link PARENT HANDOFF             # adopt an already-running goal
   relay parent list
-  relay parent inbox --session ID [--all]
-  relay parent reply --message ID --text TEXT
-  relay parent ack --message ID
-  relay parent state ID --state active|idle|complete
+  relay parent inbox PARENT [--all]
+  relay parent reply MESSAGE [--] TEXT
+  relay parent ack MESSAGE
+  relay parent state PARENT active|idle|complete
   relay parent status ID
   relay parent retire ID [--dry-run]
   relay signal ask|permission_required|result|exit [--text TEXT] [--correlation ID]
@@ -1435,6 +1444,7 @@ func (a *App) cmdGC(ctx context.Context, args []string) int {
 //	relay msg read -H HOST -c CHANNEL [--from SEQ] [--follow] [--timeout S]
 //	relay msg wait -H HOST -c CHANNEL [-c CHANNEL2 …] [--from SEQ] [--timeout S]   (fan-in)
 func (a *App) cmdMsg(ctx context.Context, args []string) int {
+	a.CompactJSON = true
 	if len(args) == 0 {
 		return a.fail(fmt.Errorf("usage: relay msg send|read|wait …"))
 	}
@@ -1606,7 +1616,7 @@ func (a *App) cmdMsg(ctx context.Context, args []string) int {
 		}
 		a.JSON = true
 		if timedOut {
-			return a.errOut(a.out(map[string]any{"ok": true, "timed_out": true, "next": "wait", "hint": "no message before timeout; call wait again on a new turn (do not spin)"}))
+			return a.errOut(a.out(map[string]any{"ok": true, "timed_out": true, "next": "wait"}))
 		}
 		return a.errOut(a.out(map[string]any{"ok": true, "timed_out": false, "message": m, "next_from": m.Seq}))
 	default:
@@ -1618,6 +1628,7 @@ func (a *App) cmdMsg(ctx context.Context, args []string) int {
 // guarded retirement. It is JSON-first so hooks and agents never parse prose.
 func (a *App) cmdParent(ctx context.Context, args []string) int {
 	a.JSON = true
+	a.CompactJSON = true
 	if a.Parents == nil || len(args) == 0 {
 		return a.fail(fmt.Errorf("usage: relay parent register|link|list|inbox|reply|ack|state|status|retire …"))
 	}
@@ -1656,32 +1667,19 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		}
 		return a.errOut(a.out(map[string]any{"ok": true, "created": created, "session": sess}))
 	case "link":
-		var parentID, handoffID string
-		for i := 1; i < len(args); i++ {
-			switch args[i] {
-			case "--session", "--parent":
-				i++
-				if i < len(args) {
-					parentID = args[i]
-				}
-			case "--handoff":
-				i++
-				if i < len(args) {
-					handoffID = args[i]
-				}
-			default:
-				return a.fail(rejectUnknownFlag(args[i]))
-			}
+		if len(args) != 3 {
+			return a.fail(fmt.Errorf("usage: relay parent link PARENT HANDOFF"))
 		}
-		if parentID == "" || handoffID == "" {
-			return a.fail(fmt.Errorf("--parent and --handoff are required"))
-		}
+		parentID, handoffID := args[1], args[2]
 		ho, err := a.Parents.LinkChild(parentID, handoffID)
 		if err != nil {
 			return a.fail(err)
 		}
 		a.startParentWatcher(ho.ID)
-		return a.errOut(a.out(map[string]any{"ok": true, "parent_session_id": parentID, "handoff": ho}))
+		return a.errOut(a.out(map[string]any{
+			"ok": true, "parent_session_id": parentID,
+			"handoff_id": ho.ID, "child_session_id": ho.SessionID,
+		}))
 	case "list":
 		list, err := a.Reg.ListSessions()
 		if err != nil {
@@ -1695,23 +1693,18 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		}
 		return a.errOut(a.out(map[string]any{"ok": true, "parents": out}))
 	case "inbox":
-		var parentID string
+		if len(args) < 2 || strings.HasPrefix(args[1], "-") {
+			return a.fail(fmt.Errorf("usage: relay parent inbox PARENT [--all]"))
+		}
+		parentID := args[1]
 		all := false
-		for i := 1; i < len(args); i++ {
+		for i := 2; i < len(args); i++ {
 			switch args[i] {
-			case "--session", "--parent":
-				i++
-				if i < len(args) {
-					parentID = args[i]
-				}
 			case "--all":
 				all = true
 			default:
 				return a.fail(rejectUnknownFlag(args[i]))
 			}
-		}
-		if parentID == "" {
-			return a.fail(fmt.Errorf("--session parent id required"))
 		}
 		if err := authorizeParentCaller(parentID); err != nil {
 			return a.fail(err)
@@ -1720,11 +1713,15 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		if err != nil {
 			return a.fail(err)
 		}
-		return a.errOut(a.out(map[string]any{"ok": true, "parent_session_id": parentID, "messages": msgs, "count": len(msgs)}))
+		items := make([]core.ParentInboxItem, 0, len(msgs))
+		for _, msg := range msgs {
+			items = append(items, core.CompactParentMessage(msg, all))
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "parent_session_id": parentID, "messages": items, "count": len(items)}))
 	case "reply":
 		messageID, text := parentMessageArgs(args[1:])
 		if messageID == "" || text == "" {
-			return a.fail(fmt.Errorf("usage: relay parent reply --message ID --text TEXT"))
+			return a.fail(fmt.Errorf("usage: relay parent reply MESSAGE [--] TEXT"))
 		}
 		candidate, err := a.Parents.FindMessage(messageID)
 		if err != nil {
@@ -1741,7 +1738,10 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 	case "ack":
 		messageID, _ := parentMessageArgs(args[1:])
 		if messageID == "" {
-			return a.fail(fmt.Errorf("usage: relay parent ack --message ID"))
+			return a.fail(fmt.Errorf("usage: relay parent ack MESSAGE"))
+		}
+		if len(args) != 2 {
+			return a.fail(fmt.Errorf("usage: relay parent ack MESSAGE"))
 		}
 		candidate, err := a.Parents.FindMessage(messageID)
 		if err != nil {
@@ -1757,61 +1757,33 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		return a.errOut(a.out(map[string]any{"ok": true, "message_id": msg.ID, "state": msg.State}))
 	case "state", "active", "idle", "complete":
 		state := args[0]
-		start := 1
 		if state == "state" {
-			state = ""
-		}
-		var sessionID string
-		for i := start; i < len(args); i++ {
-			switch args[i] {
-			case "--session", "--parent":
-				i++
-				if i < len(args) {
-					sessionID = args[i]
-				}
-			case "--state":
-				i++
-				if i < len(args) {
-					state = args[i]
-				}
-			default:
-				if sessionID == "" && !strings.HasPrefix(args[i], "-") {
-					sessionID = args[i]
-				} else {
-					return a.fail(rejectUnknownFlag(args[i]))
-				}
+			if len(args) != 3 {
+				return a.fail(fmt.Errorf("usage: relay parent state PARENT active|idle|complete"))
 			}
+			state = args[2]
+		} else if len(args) != 2 {
+			return a.fail(fmt.Errorf("usage: relay parent %s PARENT", state))
 		}
-		if sessionID == "" || state == "" {
-			return a.fail(fmt.Errorf("parent session and state required"))
-		}
+		sessionID := args[1]
 		sess, err := a.Parents.SetState(sessionID, state)
 		if err != nil {
 			return a.fail(err)
 		}
 		return a.errOut(a.out(map[string]any{"ok": true, "session_id": sess.ID, "state": state}))
 	case "status", "retire":
-		var sessionID string
+		if len(args) < 2 || strings.HasPrefix(args[1], "-") {
+			return a.fail(fmt.Errorf("usage: relay parent %s PARENT [--dry-run]", args[0]))
+		}
+		sessionID := args[1]
 		dryRun := args[0] == "status"
-		for i := 1; i < len(args); i++ {
+		for i := 2; i < len(args); i++ {
 			switch args[i] {
-			case "--session", "--parent":
-				i++
-				if i < len(args) {
-					sessionID = args[i]
-				}
 			case "--dry-run":
 				dryRun = true
 			default:
-				if sessionID == "" && !strings.HasPrefix(args[i], "-") {
-					sessionID = args[i]
-				} else {
-					return a.fail(rejectUnknownFlag(args[i]))
-				}
+				return a.fail(rejectUnknownFlag(args[i]))
 			}
-		}
-		if sessionID == "" {
-			return a.fail(fmt.Errorf("parent session required"))
 		}
 		if args[0] == "status" {
 			if err := authorizeParentCaller(sessionID); err != nil {
@@ -1824,21 +1796,10 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		}
 		return a.errOut(a.out(map[string]any{"ok": true, "retirement": gate}))
 	case "watch":
-		var handoffID string
-		for i := 1; i < len(args); i++ {
-			switch args[i] {
-			case "--handoff":
-				i++
-				if i < len(args) {
-					handoffID = args[i]
-				}
-			default:
-				return a.fail(rejectUnknownFlag(args[i]))
-			}
+		if len(args) != 2 || strings.HasPrefix(args[1], "-") {
+			return a.fail(fmt.Errorf("usage: relay parent watch HANDOFF"))
 		}
-		if handoffID == "" {
-			return a.fail(fmt.Errorf("--handoff id required"))
-		}
+		handoffID := args[1]
 		if err := a.Parents.Watch(ctx, handoffID); err != nil && ctx.Err() == nil {
 			return a.fail(err)
 		}
@@ -1860,24 +1821,15 @@ func authorizeParentCaller(parentID string) error {
 }
 
 func parentMessageArgs(args []string) (messageID, text string) {
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--message":
-			i++
-			if i < len(args) {
-				messageID = args[i]
-			}
-		case "--text":
-			i++
-			if i < len(args) {
-				text = args[i]
-			}
-		case "--":
-			text = strings.Join(args[i+1:], " ")
-			return
-		}
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return "", ""
 	}
-	return
+	messageID = args[0]
+	rest := args[1:]
+	if len(rest) > 0 && rest[0] == "--" {
+		rest = rest[1:]
+	}
+	return messageID, strings.Join(rest, " ")
 }
 
 func (a *App) startParentWatcher(handoffID string) {
@@ -1896,7 +1848,7 @@ func (a *App) startParentWatcher(handoffID string) {
 	if err != nil {
 		return
 	}
-	cmd := exec.Command(bin, "--json", "parent", "watch", "--handoff", handoffID)
+	cmd := exec.Command(bin, "--json", "parent", "watch", handoffID)
 	cmd.Stdout, cmd.Stderr = logFile, logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if cmd.Start() == nil {
@@ -1909,6 +1861,7 @@ func (a *App) startParentWatcher(handoffID string) {
 // the child host instead of crossing the desktop bridge.
 func (a *App) cmdSignal(ctx context.Context, mode string, args []string) int {
 	a.JSON = true
+	a.CompactJSON = true
 	var kind, text, correlation string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -2068,15 +2021,31 @@ func (a *App) cmdEvents(ctx context.Context, args []string) int {
 func (a *App) cmdAgent(ctx context.Context, args []string) int {
 	// Agent surface is always JSON (token-efficient machine contract).
 	a.JSON = true
+	a.CompactJSON = true
 	if len(args) == 0 {
-		return a.fail(fmt.Errorf("usage: relay agent start|pick|wait|send|capture|done|status …"))
+		args = []string{"protocol"}
 	}
 	switch args[0] {
+	case "protocol", "help", "--help", "-h":
+		return a.errOut(a.out(map[string]any{
+			"ok":      true,
+			"v":       1,
+			"purpose": "long-lived goal handoff and orchestration",
+			"start":   []string{"relay", "agent", "start", "HOST", "AGENT", "--", "GOAL"},
+			"resume":  []string{"relay", "agent", "status", "HANDOFF"},
+			"inbox":   []string{"relay", "parent", "inbox", "PARENT"},
+			"rules": []string{
+				"execute response.argv once",
+				"after a wait timeout stop the turn; never poll or attach",
+				"use parent inbox for decisions and receipts; never send transcripts",
+				"child state uses relay signal ask|permission_required|result|exit; hooks may call it",
+			},
+		}))
 	case "pick":
-		host, _ := flagHost(args[1:])
-		if host == "" {
-			return a.fail(fmt.Errorf("-H HOST required"))
+		if len(args) != 2 || strings.HasPrefix(args[1], "-") {
+			return a.fail(fmt.Errorf("usage: relay agent pick HOST"))
 		}
+		host := args[1]
 		profile, err := a.Profiles.Get(ctx, host, true)
 		if err != nil {
 			return a.fail(err)
@@ -2086,20 +2055,17 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 			"ok": true, "host_id": host, "picked": picked, "ranking": ranking,
 		}))
 	case "start":
-		host, rest := flagHost(args[1:])
+		if len(args) < 2 || strings.HasPrefix(args[1], "-") {
+			return a.fail(fmt.Errorf("usage: relay agent start HOST AGENT [options] -- GOAL | HOST --cmd CMD [options]"))
+		}
+		host, rest := args[1], args[2:]
 		opts := core.HandoffOpts{HostID: host}
+		if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+			opts.Agent = rest[0]
+			rest = rest[1:]
+		}
 		for i := 0; i < len(rest); i++ {
 			switch rest[i] {
-			case "--agent":
-				i++
-				if i < len(rest) {
-					opts.Agent = rest[i]
-				}
-			case "--goal":
-				i++
-				if i < len(rest) {
-					opts.Goal = rest[i]
-				}
 			case "--cmd", "--command":
 				i++
 				if i < len(rest) {
@@ -2149,9 +2115,18 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 				if i < len(rest) {
 					opts.Silence, _ = strconv.Atoi(rest[i])
 				}
+			case "--":
+				opts.Goal = strings.Join(rest[i+1:], " ")
+				i = len(rest)
 			default:
 				return a.fail(rejectUnknownFlag(rest[i]))
 			}
+		}
+		if opts.Command == "" && (opts.Agent == "" || opts.Goal == "") {
+			return a.fail(fmt.Errorf("usage: relay agent start HOST AGENT [options] -- GOAL | HOST --cmd CMD [options]"))
+		}
+		if opts.Command != "" && (opts.Agent != "" || opts.Goal != "") {
+			return a.fail(fmt.Errorf("choose an agent goal or --cmd, not both"))
 		}
 		sourceRepo, sourceErr := a.applyHandoffSource(ctx, &opts)
 		if sourceErr != nil {
@@ -2176,16 +2151,14 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 		}
 		return 0
 	case "wait":
-		var handoffID string
+		if len(args) < 2 || strings.HasPrefix(args[1], "-") {
+			return a.fail(fmt.Errorf("usage: relay agent wait HANDOFF [--from SEQ] [--timeout SEC]"))
+		}
+		handoffID := args[1]
 		var from int64
 		timeoutSec := 120
-		for i := 1; i < len(args); i++ {
+		for i := 2; i < len(args); i++ {
 			switch args[i] {
-			case "--handoff":
-				i++
-				if i < len(args) {
-					handoffID = args[i]
-				}
 			case "--from":
 				i++
 				if i < len(args) {
@@ -2200,9 +2173,6 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 				return a.fail(rejectUnknownFlag(args[i]))
 			}
 		}
-		if handoffID == "" {
-			return a.fail(fmt.Errorf("--handoff ID required"))
-		}
 		resp, err := a.Handoffs.AgentWait(ctx, handoffID, from, time.Duration(timeoutSec)*time.Second)
 		if resp != nil {
 			_ = a.out(resp)
@@ -2212,29 +2182,16 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 		}
 		return 0
 	case "send":
-		var handoffID string
-		var rest []string
-		for i := 1; i < len(args); i++ {
-			switch args[i] {
-			case "--handoff":
-				i++
-				if i < len(args) {
-					handoffID = args[i]
-				}
-			case "--":
-				rest = args[i+1:]
-				i = len(args)
-			default:
-				if strings.HasPrefix(args[i], "-") {
-					return a.fail(rejectUnknownFlag(args[i]))
-				}
-				rest = args[i:]
-				i = len(args)
-			}
+		if len(args) < 3 || strings.HasPrefix(args[1], "-") {
+			return a.fail(fmt.Errorf("usage: relay agent send HANDOFF [--] TEXT"))
+		}
+		handoffID, rest := args[1], args[2:]
+		if rest[0] == "--" {
+			rest = rest[1:]
 		}
 		text := strings.Join(rest, " ")
-		if handoffID == "" || text == "" {
-			return a.fail(fmt.Errorf("usage: relay agent send --handoff ID -- TEXT"))
+		if text == "" {
+			return a.fail(fmt.Errorf("usage: relay agent send HANDOFF [--] TEXT"))
 		}
 		resp, err := a.Handoffs.AgentSend(ctx, handoffID, text)
 		if resp != nil {
@@ -2245,15 +2202,13 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 		}
 		return 0
 	case "capture":
-		var handoffID string
+		if len(args) < 2 || strings.HasPrefix(args[1], "-") {
+			return a.fail(fmt.Errorf("usage: relay agent capture HANDOFF [-n LINES]"))
+		}
+		handoffID := args[1]
 		n := 80
-		for i := 1; i < len(args); i++ {
+		for i := 2; i < len(args); i++ {
 			switch args[i] {
-			case "--handoff":
-				i++
-				if i < len(args) {
-					handoffID = args[i]
-				}
 			case "-n", "--lines":
 				i++
 				if i < len(args) {
@@ -2262,9 +2217,6 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 			default:
 				return a.fail(rejectUnknownFlag(args[i]))
 			}
-		}
-		if handoffID == "" {
-			return a.fail(fmt.Errorf("--handoff ID required"))
 		}
 		resp, err := a.Handoffs.AgentCapture(ctx, handoffID, n)
 		if resp != nil {
@@ -2275,17 +2227,15 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 		}
 		return 0
 	case "done":
-		var handoffID string
+		if len(args) < 2 || strings.HasPrefix(args[1], "-") {
+			return a.fail(fmt.Errorf("usage: relay agent done HANDOFF [--outcome done|failed|abandoned]"))
+		}
+		handoffID := args[1]
 		outcome := core.OutcomeDone
 		keep := false
 		closeViz := true
-		for i := 1; i < len(args); i++ {
+		for i := 2; i < len(args); i++ {
 			switch args[i] {
-			case "--handoff":
-				i++
-				if i < len(args) {
-					handoffID = args[i]
-				}
 			case "--outcome":
 				i++
 				if i < len(args) {
@@ -2299,9 +2249,6 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 				return a.fail(rejectUnknownFlag(args[i]))
 			}
 		}
-		if handoffID == "" {
-			return a.fail(fmt.Errorf("--handoff ID required"))
-		}
 		resp, err := a.Handoffs.AgentDone(ctx, handoffID, outcome, keep, closeViz)
 		if resp != nil {
 			_ = a.out(resp)
@@ -2311,21 +2258,10 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 		}
 		return 0
 	case "status":
-		var handoffID string
-		for i := 1; i < len(args); i++ {
-			switch args[i] {
-			case "--handoff":
-				i++
-				if i < len(args) {
-					handoffID = args[i]
-				}
-			default:
-				return a.fail(rejectUnknownFlag(args[i]))
-			}
+		if len(args) != 2 || strings.HasPrefix(args[1], "-") {
+			return a.fail(fmt.Errorf("usage: relay agent status HANDOFF"))
 		}
-		if handoffID == "" {
-			return a.fail(fmt.Errorf("--handoff ID required"))
-		}
+		handoffID := args[1]
 		resp, err := a.Handoffs.AgentStatus(ctx, handoffID)
 		if resp != nil {
 			_ = a.out(resp)

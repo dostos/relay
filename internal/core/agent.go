@@ -16,50 +16,59 @@ type AgentResponse struct {
 	HostID    string         `json:"host_id,omitempty"`
 	Kind      string         `json:"kind,omitempty"`
 	Status    string         `json:"status,omitempty"`
-	Goal      string         `json:"goal,omitempty"`
-	LastSeq   int64          `json:"last_seq"`
-	Event     *Event         `json:"event,omitempty"`
+	LastSeq   int64          `json:"last_seq,omitempty"`
+	Event     *AgentEvent    `json:"event,omitempty"`
 	TimedOut  bool           `json:"timed_out,omitempty"`
 	Text      string         `json:"text,omitempty"`
-	Next      string         `json:"next"` // wait|send|capture|done|escalate|null
+	Next      string         `json:"next,omitempty"` // wait|send|capture|done|escalate|null
 	Argv      []string       `json:"argv,omitempty"`
-	Hint      string         `json:"hint,omitempty"`
 	Error     string         `json:"error,omitempty"`
 	Extra     map[string]any `json:"extra,omitempty"`
 }
 
+// AgentEvent is the event projection an orchestrator needs for one decision.
+// The durable event stream retains timestamps, session names, and full meta;
+// the turn-level response avoids repeating those static fields and lifts text
+// out of meta exactly once.
+type AgentEvent struct {
+	Seq  int64          `json:"seq"`
+	Kind string         `json:"kind"`
+	Text string         `json:"text,omitempty"`
+	Meta map[string]any `json:"meta,omitempty"`
+}
+
 // DecideNext picks the single next verb after an event or timeout.
 // Pure policy — unit-tested without SSH.
-func DecideNext(kind HandoffKind, evKind string, timedOut bool) (next string, hint string) {
+func DecideNext(kind HandoffKind, evKind string, timedOut bool) string {
 	if timedOut {
-		return "wait", "no actionable event before timeout; call wait again on a new turn (do not spin)"
+		return "wait"
 	}
 	switch evKind {
 	case "exit":
-		return "done", "remote exited; finalize with done"
+		return "done"
 	case "needs_input", "permission_required":
 		if kind == KindJob {
-			return "escalate", "job needs_input — do not inject; escalate to human"
+			return "escalate"
 		}
-		return "send", "agent needs input; send a reply or escalate"
+		return "send"
 	case "ask":
 		// Explicit, declared question from the agent (meta.q/text) — no idle
 		// guessing. Always actionable, even for jobs (a job that explicitly
 		// asks is legitimately blocked on input).
-		return "send", "agent asked a question (see text); send an answer or escalate"
+		return "send"
 	case "note", "progress":
-		return "wait", "agent posted a note (see text); informational — keep waiting"
+		return "wait"
 	case "result":
-		return "wait", "agent posted a result (see text/meta); wait for exit to finalize"
+		return "wait"
 	case "idle":
 		if kind == KindJob {
-			return "wait", "job idle is informational — do not send; wait for exit"
+			return "wait"
 		}
-		return "send", "agent idle; capture if unsure, then send or escalate"
+		return "send"
 	case "started":
-		return "wait", "started; wait for idle/exit"
+		return "wait"
 	default:
-		return "wait", "continue waiting"
+		return "wait"
 	}
 }
 
@@ -79,22 +88,40 @@ func eventText(ev *Event) string {
 	return ""
 }
 
-func argvFor(next, handoffID, sessionID string) []string {
+func compactAgentEvent(ev *Event) *AgentEvent {
+	if ev == nil {
+		return nil
+	}
+	meta := make(map[string]any, len(ev.Meta))
+	for key, value := range ev.Meta {
+		switch key {
+		case "text", "q", "question", "msg", "note":
+			continue
+		default:
+			meta[key] = value
+		}
+	}
+	if len(meta) == 0 {
+		meta = nil
+	}
+	return &AgentEvent{Seq: ev.Seq, Kind: ev.Kind, Text: eventText(ev), Meta: meta}
+}
+
+func argvFor(next, handoffID string) []string {
 	switch next {
 	case "wait":
-		return []string{"relay", "agent", "wait", "--handoff", handoffID}
+		return []string{"relay", "agent", "wait", handoffID}
 	case "send":
-		return []string{"relay", "agent", "send", "--handoff", handoffID, "--", "<text>"}
+		return []string{"relay", "agent", "send", handoffID, "--", "<text>"}
 	case "capture":
-		return []string{"relay", "agent", "capture", "--handoff", handoffID}
+		return []string{"relay", "agent", "capture", handoffID}
 	case "done":
-		return []string{"relay", "agent", "done", "--handoff", handoffID, "--outcome", "done"}
+		return []string{"relay", "agent", "done", handoffID}
 	case "escalate":
-		return []string{"relay", "agent", "capture", "--handoff", handoffID}
+		return []string{"relay", "agent", "capture", handoffID}
 	case "status":
-		return []string{"relay", "agent", "status", "--handoff", handoffID}
+		return []string{"relay", "agent", "status", handoffID}
 	default:
-		_ = sessionID
 		return nil
 	}
 }
@@ -104,11 +131,6 @@ func (h *HandoffService) agentBase(ho *Handoff) AgentResponse {
 		OK:        true,
 		V:         1,
 		HandoffID: ho.ID,
-		SessionID: ho.SessionID,
-		HostID:    ho.HostID,
-		Kind:      string(ho.Kind),
-		Status:    string(ho.Status),
-		Goal:      ho.Goal,
 		LastSeq:   ho.LastSeq,
 	}
 }
@@ -119,13 +141,15 @@ func (h *HandoffService) AgentStart(ctx context.Context, opts HandoffOpts) (*Age
 	if err != nil {
 		return &AgentResponse{OK: false, V: 1, Error: err.Error(), Next: ""}, err
 	}
-	next, hint := "wait", "block on wait until idle/exit (no poll loop)"
 	resp := h.agentBase(ho)
-	resp.Next = next
-	resp.Hint = hint
-	resp.Argv = argvFor(next, ho.ID, ho.SessionID)
+	resp.SessionID = ho.SessionID
+	resp.HostID = ho.HostID
+	resp.Kind = string(ho.Kind)
+	resp.Status = string(ho.Status)
+	resp.Next = "wait"
+	resp.Argv = argvFor("wait", ho.ID)
 	if b != nil {
-		resp.Extra = map[string]any{"pane": b.Pane, "events": b.Events}
+		resp.Extra = map[string]any{"pane": b.Pane}
 	}
 	return &resp, nil
 }
@@ -138,19 +162,18 @@ func (h *HandoffService) AgentStatus(ctx context.Context, handoffID string) (*Ag
 		return &AgentResponse{OK: false, V: 1, Error: err.Error()}, err
 	}
 	resp := h.agentBase(ho)
+	resp.Kind = string(ho.Kind)
+	resp.Status = string(ho.Status)
 	switch {
 	case ho.Outcome != "" || ho.Status == StatusDone || ho.Status == StatusFailed || ho.Status == StatusAbandoned:
 		resp.Next = "null"
-		resp.Hint = "already finalized"
 		resp.Argv = nil
 	case ho.Status == StatusNeedsInput && ho.Kind == KindAgent:
 		resp.Next = "send"
-		resp.Hint = "handoff marked needs_input"
-		resp.Argv = argvFor("send", ho.ID, ho.SessionID)
+		resp.Argv = argvFor("send", ho.ID)
 	default:
 		resp.Next = "wait"
-		resp.Hint = "call wait (blocking) for the next actionable event"
-		resp.Argv = append(argvFor("wait", ho.ID, ho.SessionID), "--from", fmt.Sprintf("%d", ho.LastSeq))
+		resp.Argv = append(argvFor("wait", ho.ID), "--from", fmt.Sprintf("%d", ho.LastSeq))
 	}
 	return &resp, nil
 }
@@ -220,13 +243,11 @@ func (h *HandoffService) AgentWait(ctx context.Context, handoffID string, fromSe
 	}
 	resp := h.agentBase(ho)
 	if got != nil {
-		resp.Event = got
+		resp.Event = compactAgentEvent(got)
 		resp.LastSeq = got.Seq
-		resp.Text = eventText(got) // surface declared ask/note/result text
-		next, hint := DecideNext(ho.Kind, got.Kind, false)
+		next := DecideNext(ho.Kind, got.Kind, false)
 		resp.Next = next
-		resp.Hint = hint
-		resp.Argv = argvFor(next, ho.ID, ho.SessionID)
+		resp.Argv = argvFor(next, ho.ID)
 		if next == "wait" {
 			resp.Argv = append(resp.Argv, "--from", fmt.Sprintf("%d", got.Seq))
 		}
@@ -235,11 +256,10 @@ func (h *HandoffService) AgentWait(ctx context.Context, handoffID string, fromSe
 
 	timedOut := wctx.Err() == context.DeadlineExceeded
 	if timedOut || subErr != nil {
-		next, hint := DecideNext(ho.Kind, "", timedOut)
+		next := DecideNext(ho.Kind, "", timedOut)
 		resp.TimedOut = timedOut
 		resp.Next = next
-		resp.Hint = hint
-		resp.Argv = append(argvFor("wait", ho.ID, ho.SessionID), "--from", fmt.Sprintf("%d", ho.LastSeq))
+		resp.Argv = append(argvFor("wait", ho.ID), "--from", fmt.Sprintf("%d", ho.LastSeq))
 		if !timedOut && subErr != nil && wctx.Err() == nil {
 			resp.OK = false
 			resp.Error = subErr.Error()
@@ -248,8 +268,7 @@ func (h *HandoffService) AgentWait(ctx context.Context, handoffID string, fromSe
 		return &resp, nil
 	}
 	resp.Next = "wait"
-	resp.Hint = "stream ended without actionable event"
-	resp.Argv = append(argvFor("wait", ho.ID, ho.SessionID), "--from", fmt.Sprintf("%d", ho.LastSeq))
+	resp.Argv = append(argvFor("wait", ho.ID), "--from", fmt.Sprintf("%d", ho.LastSeq))
 	return &resp, nil
 }
 
@@ -264,8 +283,7 @@ func (h *HandoffService) AgentSend(ctx context.Context, handoffID, text string) 
 		resp.OK = false
 		resp.Error = "refuse send on job handoff"
 		resp.Next = "wait"
-		resp.Hint = "jobs are exit-driven; do not inject on idle"
-		resp.Argv = append(argvFor("wait", ho.ID, ho.SessionID), "--from", fmt.Sprintf("%d", ho.LastSeq))
+		resp.Argv = append(argvFor("wait", ho.ID), "--from", fmt.Sprintf("%d", ho.LastSeq))
 		return &resp, fmt.Errorf("refuse send on job handoff")
 	}
 	if err := h.Sessions.Send(ctx, ho.SessionID, text, true); err != nil {
@@ -273,8 +291,7 @@ func (h *HandoffService) AgentSend(ctx context.Context, handoffID, text string) 
 	}
 	resp := h.agentBase(ho)
 	resp.Next = "wait"
-	resp.Hint = "injected; wait for next idle/exit"
-	resp.Argv = append(argvFor("wait", ho.ID, ho.SessionID), "--from", fmt.Sprintf("%d", ho.LastSeq))
+	resp.Argv = append(argvFor("wait", ho.ID), "--from", fmt.Sprintf("%d", ho.LastSeq))
 	return &resp, nil
 }
 
@@ -295,12 +312,10 @@ func (h *HandoffService) AgentCapture(ctx context.Context, handoffID string, lin
 	resp.Text = text
 	if ho.Kind == KindAgent && (ho.Status == StatusNeedsInput || ho.Status == StatusRunning) {
 		resp.Next = "send"
-		resp.Hint = "review text; send a reply or escalate to human"
-		resp.Argv = argvFor("send", ho.ID, ho.SessionID)
+		resp.Argv = argvFor("send", ho.ID)
 	} else {
 		resp.Next = "wait"
-		resp.Hint = "snapshot only; wait for actionable event"
-		resp.Argv = append(argvFor("wait", ho.ID, ho.SessionID), "--from", fmt.Sprintf("%d", ho.LastSeq))
+		resp.Argv = append(argvFor("wait", ho.ID), "--from", fmt.Sprintf("%d", ho.LastSeq))
 	}
 	return &resp, nil
 }
@@ -315,8 +330,8 @@ func (h *HandoffService) AgentDone(ctx context.Context, handoffID string, outcom
 		_ = h.Viz.Close(ctx, ho.SessionID)
 	}
 	resp := h.agentBase(ho)
+	resp.Status = string(ho.Status)
 	resp.Next = "null"
-	resp.Hint = "terminal — stop"
 	resp.Argv = nil
 	resp.Extra = map[string]any{"outcome": ho.Outcome, "exit_code": ho.ExitCode}
 	return &resp, nil

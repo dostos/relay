@@ -89,3 +89,56 @@ func TestJSONErrorShape(t *testing.T) {
 		t.Fatalf("error=%q", errStr)
 	}
 }
+
+func TestAgentProtocolIsCompactAndSelfDescribing(t *testing.T) {
+	a := New()
+	out := captureStdout(t, func() {
+		if code := a.Run([]string{"agent"}); code != 0 {
+			t.Fatalf("agent protocol exit=%d", code)
+		}
+	})
+	if bytes.Count([]byte(out), []byte("\n")) != 1 || len(out) > 600 {
+		t.Fatalf("protocol is not compact: %d bytes: %q", len(out), out)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal([]byte(out), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["purpose"] != "long-lived goal handoff and orchestration" {
+		t.Fatalf("unexpected protocol: %v", resp)
+	}
+}
+
+func TestAgentStatusRejectsRemovedHandoffFlag(t *testing.T) {
+	a := New()
+	out := captureStdout(t, func() {
+		if code := a.Run([]string{"agent", "status", "--handoff", "ho-1"}); code == 0 {
+			t.Fatal("removed --handoff syntax was accepted")
+		}
+	})
+	if !bytes.Contains([]byte(out), []byte("agent status HANDOFF")) {
+		t.Fatalf("missing positional usage: %q", out)
+	}
+}
+
+func TestAgentStartRejectsRemovedAgentAndGoalFlags(t *testing.T) {
+	a := New()
+	out := captureStdout(t, func() {
+		if code := a.Run([]string{"agent", "start", "c1", "--agent", "codex", "--goal", "x"}); code == 0 {
+			t.Fatal("removed --agent/--goal syntax was accepted")
+		}
+	})
+	if !bytes.Contains([]byte(out), []byte("unknown flag")) {
+		t.Fatalf("missing removed-flag error: %q", out)
+	}
+}
+
+func TestParentMessageArgsArePositional(t *testing.T) {
+	id, text := parentMessageArgs([]string{"pm-1", "--", "approve", "once"})
+	if id != "pm-1" || text != "approve once" {
+		t.Fatalf("got id=%q text=%q", id, text)
+	}
+	if id, _ := parentMessageArgs([]string{"--message", "pm-1"}); id != "" {
+		t.Fatalf("removed --message syntax was accepted: %q", id)
+	}
+}

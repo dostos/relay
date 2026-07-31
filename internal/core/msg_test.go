@@ -48,7 +48,7 @@ func TestDecideNextExplicitSignals(t *testing.T) {
 		{KindAgent, "exit", "done"},
 	}
 	for _, c := range cases {
-		if n, _ := DecideNext(c.kind, c.ev, false); n != c.wantNext {
+		if n := DecideNext(c.kind, c.ev, false); n != c.wantNext {
 			t.Fatalf("DecideNext(%v,%q)=%q want %q", c.kind, c.ev, n, c.wantNext)
 		}
 	}
