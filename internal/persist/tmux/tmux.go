@@ -86,7 +86,14 @@ func (p *Persist) Rename(ctx context.Context, t ports.Transport, from, to ports.
 }
 
 func (p *Persist) Exists(ctx context.Context, t ports.Transport, h ports.PersistHandle) (bool, error) {
-	_, _, err := t.Run(ctx, "", fmt.Sprintf("tmux has-session -t %s", shellquote.Quote(h.Name)))
+	// tmux target lookup accepts unique prefixes, but Relay session names are
+	// identities. Compare the listed name exactly so renaming
+	// "engram-apps-..." to "engram" does not mistake the source for a
+	// conflicting destination.
+	_, _, err := t.Run(ctx, "", fmt.Sprintf(
+		"tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -Fqx -- %s",
+		shellquote.Quote(h.Name),
+	))
 	if err != nil {
 		return false, nil
 	}
