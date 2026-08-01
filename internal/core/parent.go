@@ -1062,6 +1062,9 @@ func (p *ParentService) Reply(ctx context.Context, messageID, text string) (*Par
 	}
 	now := time.Now().UTC()
 	msg.State, msg.Reply, msg.RepliedAt, msg.AckedAt = ParentMessageReplied, text, &now, &now
+	// The holder of the envelope is the session that ruled on it, which after
+	// a failover is an ancestor rather than the intended manager.
+	msg.ResolvedBySessionID = msg.ParentSessionID
 	if err := writeParentMessage(msg, false); err != nil {
 		return nil, err
 	}
@@ -1089,6 +1092,7 @@ func (p *ParentService) Ack(messageID string) (*ParentMessage, error) {
 	}
 	now := time.Now().UTC()
 	msg.State, msg.AckedAt = ParentMessageAcked, &now
+	msg.ResolvedBySessionID = msg.ParentSessionID
 	if err := writeParentMessage(msg, false); err != nil {
 		return nil, err
 	}

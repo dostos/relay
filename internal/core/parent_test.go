@@ -989,3 +989,33 @@ func TestPendingAttentionFindsAskHeldByAnAncestor(t *testing.T) {
 		t.Fatalf("want pm-held, got %s", got.ID)
 	}
 }
+
+func TestReplyRecordsTheResolvingSession(t *testing.T) {
+	service, _, reg := newParentTestService(t)
+	now := time.Now().UTC()
+	root, manager, child, ho := failoverTree(t, reg)
+	ho.Status = StatusNeedsInput
+	if err := reg.PutHandoff(ho); err != nil {
+		t.Fatal(err)
+	}
+	// The root holds the ask because the manager was disconnected.
+	msg := &ParentMessage{
+		V: 1, ID: "pm-resolve", ParentSessionID: root.ID, ChildSessionID: child.ID,
+		HandoffID: ho.ID, Kind: "ask", State: ParentMessagePending,
+		IntendedParentSessionID: manager.ID, CreatedAt: now,
+	}
+	if err := writeParentMessage(msg, true); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := service.Reply(context.Background(), msg.ID, "approved")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.ResolvedBySessionID != root.ID {
+		t.Fatalf("want the root recorded as resolver, got %q", resolved.ResolvedBySessionID)
+	}
+	if resolved.State != ParentMessageReplied {
+		t.Fatalf("want replied state, got %s", resolved.State)
+	}
+}

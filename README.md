@@ -108,6 +108,15 @@ resolve or escalate one level. Only a local cmux root receives human-facing
 notifications, so descendants cannot bypass their manager and interrupt the
 human directly.
 
+Escalation is delivered to the nearest **live** ancestor. A manager that
+cannot receive the envelope — laptop asleep, cmux quit, SSH dropped — is
+passed over so the child never stalls on a sleeping manager. A live manager
+is never skipped, so this adds resilience without weakening the tree: the
+envelope still travels the lineage, one unresolved ask per handoff is
+preserved across the failover, and the skipped manager is recorded on the
+message (`intended_parent_session_id`) alongside who actually ruled
+(`resolved_by_session_id`).
+
 `relay session adopt` also provisions an owner-only bridge identity so an
 already-running agent can discover Relay from its tmux pane without receiving
 a secret in its prompt. Repair a session adopted by an older Relay release in
