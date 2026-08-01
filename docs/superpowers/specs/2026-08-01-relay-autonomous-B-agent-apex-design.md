@@ -1,7 +1,7 @@
 # relay — autonomous mode, Part B: agent apex ("root mode"), rules & audit
 
 Date: 2026-08-01
-Status: Proposed
+Status: Implemented (apex lifecycle + conductor role). Phase 3 ergonomics landed early as `relay root adopt|enroll|unenroll|status|rules|digest`; the role ships at `share/roles/relay-conductor.md`. Not yet exercised against a real always-on host.
 Series: Part **B** of Autonomous Mode (A → B → C). **Depends on Part A** (nearest-live-ancestor escalation): B assumes an escalation reliably reaches the nearest live ancestor. See A for the shared model.
 
 ## Problem

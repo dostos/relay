@@ -1,7 +1,7 @@
 # relay — autonomous mode, Part C: lateral child-to-child communication
 
 Date: 2026-08-01
-Status: Proposed
+Status: Implemented (Layer 2 boards). `relay board post|query|watch`, `--subtree` rollup, and agent-protocol entries landed. Layer 1 remains the pre-existing raw `relay msg`; no separate free-bus surface was added, since boards covered the real need.
 Series: Part **C** of Autonomous Mode (A → B → C). **Orthogonal** to A/B — it rides the same tree + relayd substrate and is independent of the escalation changes, but is sequenced last. See A for the shared model.
 
 ## Problem
