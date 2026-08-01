@@ -120,8 +120,10 @@ so routine tool calls do not consume parent turns. Each child also has one
 detached blocking event watcher. Agent hooks publish `permission_required`,
 `result`, and `exit`; the tmux-idle sensor supplies the `ask` fallback for
 agents without an input hook. Relay deduplicates by handoff/sequence, collapses
-repeated idle samples of one unresolved prompt, stores a bounded envelope, and
-wakes the exact parent pane once.
+repeated idle samples into one unresolved attention envelope per child, stores
+it durably while the parent is disconnected, and wakes the exact parent pane
+once after delivery succeeds. Rebinding a parent retries its undelivered inbox;
+it never replays the sensor samples.
 No transcript is forwarded and no Relay instruction is added to the child
 goal. Set `relay_hooks: off` only when an agent runtime cannot execute hooks.
 

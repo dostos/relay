@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,8 +16,9 @@ import (
 )
 
 type fakeParentNotifier struct {
-	bound   []string
-	notices []ParentNotice
+	bound      []string
+	notices    []ParentNotice
+	notifyFail bool
 }
 
 type fakeRetirementViz struct {
@@ -75,6 +77,9 @@ func (f *fakeParentNotifier) BindLocalParent(_ context.Context, sessionID, surfa
 }
 func (f *fakeParentNotifier) NotifyParent(_ context.Context, _ string, notice ParentNotice) error {
 	f.notices = append(f.notices, notice)
+	if f.notifyFail {
+		return errors.New("parent disconnected")
+	}
 	return nil
 }
 
@@ -292,11 +297,39 @@ func TestIdlePermissionPromptIsClassifiedAndNotifiedOnce(t *testing.T) {
 		t.Fatalf("first=%+v err=%v notices=%d", first, err, len(notifier.notices))
 	}
 	second, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 2, Kind: "idle"})
-	if err != nil || second.State != ParentMessageAcked || !second.AutoHandled || second.PolicyID != "builtin.coalesce_repeated_idle" {
+	if err != nil || second.ID != first.ID || second.State != ParentMessagePending {
 		t.Fatalf("second=%+v err=%v", second, err)
 	}
 	if len(notifier.notices) != 1 {
 		t.Fatalf("repeated prompt notices=%d", len(notifier.notices))
+	}
+}
+
+func TestDisconnectedParentRetriesOneDurableAttentionEnvelope(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	service.Policies = &PolicyService{Path: filepath.Join(t.TempDir(), "missing-policy.yaml")}
+	service.Sessions.Persist = &capturePersistence{capture: "Completed checkpoint\n→ Add a follow-up\n"}
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "root"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c1", Persist: ports.PersistHandle{Kind: "tmux", Name: "worker"}, CreatedAt: now}
+	_ = reg.PutSession(parent)
+	_ = reg.PutSession(child)
+	ho := &Handoff{ID: "ho-1", SessionID: child.ID, HostID: child.HostID, Kind: KindAgent, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
+	_ = reg.PutHandoff(ho)
+
+	notifier.notifyFail = true
+	first, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "idle"})
+	if err == nil || first.DeliveredAt != nil {
+		t.Fatalf("disconnected first=%+v err=%v", first, err)
+	}
+	notifier.notifyFail = false
+	second, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 2, Kind: "idle"})
+	if err != nil || second.ID != first.ID || second.DeliveredAt == nil {
+		t.Fatalf("reconnect second=%+v err=%v", second, err)
+	}
+	messages, err := service.ListMessages(parent.ID, false)
+	if err != nil || len(messages) != 1 || len(notifier.notices) != 2 {
+		t.Fatalf("messages=%+v notices=%d err=%v", messages, len(notifier.notices), err)
 	}
 }
 
@@ -420,7 +453,7 @@ func TestTerminalHandoffEventsNeverReachParent(t *testing.T) {
 	}
 }
 
-func TestPolicyCoalescesPermissionIdleWithoutSecondNotification(t *testing.T) {
+func TestPendingPermissionAbsorbsIdleWithoutSecondNotification(t *testing.T) {
 	service, notifier, reg := newParentTestService(t)
 	service.Policies = &PolicyService{Path: filepath.Join(t.TempDir(), "missing-policy.yaml")}
 	now := time.Now().UTC()
@@ -434,7 +467,7 @@ func TestPolicyCoalescesPermissionIdleWithoutSecondNotification(t *testing.T) {
 		t.Fatalf("permission=%+v err=%v notices=%d", first, err, len(notifier.notices))
 	}
 	second, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 2, Kind: "idle"})
-	if err != nil || second.State != ParentMessageAcked || !second.AutoHandled || second.PolicyID != "builtin.coalesce_permission_idle" {
+	if err != nil || second.ID != first.ID || second.State != ParentMessagePending {
 		t.Fatalf("idle=%+v err=%v", second, err)
 	}
 	if len(notifier.notices) != 1 {

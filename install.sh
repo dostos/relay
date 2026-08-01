@@ -17,6 +17,36 @@ echo "installed $INSTALL_DIR/relay $INSTALL_DIR/relayd"
 "$INSTALL_DIR/relay" version
 "$INSTALL_DIR/relayd" version
 
+# Running watcher processes keep the old executable image after an upgrade.
+# Recycle them so inbox deduplication and reconnect behavior change atomically
+# with the installed CLI instead of only after the next handoff.
+STATE_ROOT="${RELAY_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/relay}"
+WATCH_DIR="$STATE_ROOT/parent-watch"
+watchers_refreshed=0
+if [[ -d "$WATCH_DIR" ]]; then
+  shopt -s nullglob
+  for lock in "$WATCH_DIR"/*.lock; do
+    handoff_id="$(basename "$lock" .lock)"
+    watcher_pid="$(tr -dc '0-9' < "$lock")"
+    if [[ -n "$watcher_pid" ]] && kill -0 "$watcher_pid" 2>/dev/null; then
+      watcher_cmd="$(ps -p "$watcher_pid" -o command= 2>/dev/null || true)"
+      if [[ "$watcher_cmd" == *"parent watch $handoff_id"* ]]; then
+        kill "$watcher_pid" 2>/dev/null || true
+        for _ in {1..20}; do
+          kill -0 "$watcher_pid" 2>/dev/null || break
+          sleep 0.05
+        done
+      fi
+    fi
+    nohup "$INSTALL_DIR/relay" --json parent watch "$handoff_id" >> "$WATCH_DIR/$handoff_id.log" 2>&1 &
+    watchers_refreshed=$((watchers_refreshed + 1))
+  done
+  shopt -u nullglob
+fi
+if (( watchers_refreshed > 0 )); then
+  echo "relay parent watchers: refreshed $watchers_refreshed"
+fi
+
 # Relay's compact JSON + `next`/`argv` is the complete agent protocol. Remove
 # symlinks created by older installers; workspace AGENTS.md files can point at
 # `relay agent protocol` without a runtime-specific skill layer.

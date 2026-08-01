@@ -209,6 +209,7 @@ func (p *ParentService) RegisterLocal(ctx context.Context, opts RegisterParentOp
 			if _, err := p.Notifier.BindLocalParent(ctx, sess.ID, surface); err != nil {
 				return nil, false, err
 			}
+			_, _ = p.DeliverPending(ctx, sess.ID)
 			return sess, false, nil
 		}
 	}
@@ -283,6 +284,7 @@ func (p *ParentService) BindLocal(ctx context.Context, parentID, surface string)
 	if err := p.Reg.PutSession(sess); err != nil {
 		return nil, err
 	}
+	_, _ = p.DeliverPending(ctx, sess.ID)
 	_ = AppendLedger(map[string]any{
 		"v": 1, "type": "parent_bind", "ts": sess.UpdatedAt.Format(time.RFC3339),
 		"session_id": sess.ID, "old_surface": oldSurface, "surface": surface,
@@ -614,6 +616,81 @@ func (p *ParentService) childEventText(ctx context.Context, ho *Handoff, ev coor
 	return "remote child idle on " + ho.HostID + "; inspect handoff, not local paths; manager decide blocked/completed/continue", kind, true
 }
 
+func attentionMessage(kind string) bool {
+	return kind == "ask" || kind == "permission_required"
+}
+
+func (p *ParentService) pendingAttention(parentID, handoffID string) *ParentMessage {
+	messages, err := p.ListMessages(parentID, true)
+	if err != nil {
+		return nil
+	}
+	for _, msg := range messages {
+		if msg.HandoffID == handoffID && attentionMessage(msg.Kind) {
+			return msg
+		}
+	}
+	return nil
+}
+
+func (p *ParentService) deliverMessage(ctx context.Context, parent *Session, ho *Handoff, msg *ParentMessage) error {
+	if msg == nil || msg.State != ParentMessagePending || msg.DeliveredAt != nil {
+		return nil
+	}
+	childName := ho.HostID
+	if child, err := p.Reg.GetSession(ho.SessionID); err == nil {
+		childName = child.Persist.Name + "@" + ho.HostID
+	}
+	action := "ack"
+	if attentionMessage(msg.Kind) {
+		action = "reply"
+	}
+	notice := ParentNotice{MessageID: msg.ID, HandoffID: ho.ID, Kind: msg.Kind, Child: childName, Text: msg.Text, Action: action}
+	var err error
+	if isLocalParent(parent) && p.Notifier != nil {
+		err = p.Notifier.NotifyParent(ctx, parent.ID, notice)
+	} else if !isLocalParent(parent) && p.Sessions != nil {
+		err = p.Sessions.Send(ctx, parent.ID, FormatParentNotice(notice), true)
+	} else {
+		err = fmt.Errorf("no delivery path for parent %s", parent.ID)
+	}
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	msg.DeliveredAt = &now
+	return writeParentMessage(msg, false)
+}
+
+// DeliverPending retries durable envelopes after a parent pane is rebound.
+// Repeated idle samples never create additional attention messages, so this
+// produces at most one unresolved ask per child handoff.
+func (p *ParentService) DeliverPending(ctx context.Context, parentID string) (int, error) {
+	parent, err := p.Reg.GetSession(parentID)
+	if err != nil {
+		return 0, err
+	}
+	messages, err := p.ListMessages(parentID, true)
+	if err != nil {
+		return 0, err
+	}
+	delivered := 0
+	for _, msg := range messages {
+		if msg.DeliveredAt != nil {
+			continue
+		}
+		ho, getErr := p.Reg.GetHandoff(msg.HandoffID)
+		if getErr != nil || handoffTerminal(ho) {
+			continue
+		}
+		if err := p.deliverMessage(ctx, parent, ho, msg); err != nil {
+			return delivered, err
+		}
+		delivered++
+	}
+	return delivered, nil
+}
+
 func panePermissionPrompt(capture string) bool {
 	tail := strings.ToLower(capture)
 	for _, prompt := range []string{"run this command?", "not in allowlist", "permission", "approve", "confirm or esc"} {
@@ -681,6 +758,18 @@ func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coo
 		return nil, nil
 	}
 	kind = detectedKind
+	// An idle sensor samples the same blocked pane repeatedly. Preserve one
+	// durable attention envelope until it is replied/acked, independent of the
+	// event sequence. If its earlier delivery failed, this sample retries that
+	// same message instead of allocating and injecting another one.
+	if ev.Kind == "idle" && attentionMessage(kind) {
+		if pending := p.pendingAttention(parent.ID, ho.ID); pending != nil {
+			if pending.DeliveredAt == nil {
+				return pending, p.deliverMessage(ctx, parent, ho, pending)
+			}
+			return pending, nil
+		}
+	}
 	msg := &ParentMessage{
 		V: 1, ID: id, CorrelationID: compactText(correlationID),
 		ParentSessionID: parent.ID, ChildSessionID: ho.SessionID, HandoffID: ho.ID,
@@ -697,32 +786,9 @@ func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coo
 	if handled, decided := p.applyPolicy(ctx, ho, ev, msg); decided {
 		return handled, nil
 	}
-	childName := ho.HostID
-	if child, err := p.Reg.GetSession(ho.SessionID); err == nil {
-		childName = child.Persist.Name + "@" + ho.HostID
-	}
-	action := "ack"
-	if kind == "ask" || kind == "permission_required" {
-		action = "reply"
-	}
-	notice := ParentNotice{MessageID: msg.ID, HandoffID: ho.ID, Kind: kind, Child: childName, Text: msg.Text, Action: action}
-	var notifyErr error
 	// Delivery is strictly one edge up the tree. Only a local root owns a
-	// human-facing cmux surface; every other parent is an agent manager and
-	// receives the same compact envelope in its own session.
-	if isLocalParent(parent) && p.Notifier != nil {
-		notifyErr = p.Notifier.NotifyParent(ctx, parent.ID, notice)
-	} else if !isLocalParent(parent) && p.Sessions != nil {
-		notifyErr = p.Sessions.Send(ctx, parent.ID, FormatParentNotice(notice), true)
-	} else {
-		notifyErr = fmt.Errorf("no delivery path for parent %s", parent.ID)
-	}
-	if notifyErr == nil {
-		now := time.Now().UTC()
-		msg.DeliveredAt = &now
-		_ = writeParentMessage(msg, false)
-	}
-	return msg, notifyErr
+	// human-facing cmux surface; every other parent is an agent manager.
+	return msg, p.deliverMessage(ctx, parent, ho, msg)
 }
 
 func (p *ParentService) applyPolicy(ctx context.Context, ho *Handoff, ev coord.Event, msg *ParentMessage) (*ParentMessage, bool) {
