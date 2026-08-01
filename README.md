@@ -117,6 +117,23 @@ preserved across the failover, and the skipped manager is recorded on the
 message (`intended_parent_session_id`) alongside who actually ruled
 (`resolved_by_session_id`).
 
+Escalation is vertical, but peers often need to coordinate without asking
+anyone to decide anything. The children of one manager share a **board** — a
+categorized surface for status, resources, and artifacts:
+
+```bash
+relay board post -c status -k phase -- "scoring, 40% done"
+relay board query -c status          # peers' current state, compact JSON
+relay board watch -c status          # zero-token wait for the next update
+```
+
+A board holds *state*, not conversation: re-posting a key supersedes it, and a
+query folds to the latest value per node and key, so an agent pays for current
+state rather than history. Scope needs no permission check — a board id is
+derived from the caller's own lineage, so a node cannot name another subtree's
+board, and identity comes from the authenticated bridge envelope rather than an
+argument.
+
 `relay session adopt` also provisions an owner-only bridge identity so an
 already-running agent can discover Relay from its tmux pane without receiving
 a secret in its prompt. Repair a session adopted by an older Relay release in
@@ -280,6 +297,7 @@ relay HOST NAME                             # named tmux in current cmux pane
 relay session … / session adopt             # durable tmux
 relay agent start|wait|send|capture|done    # orchestrator API
 relay parent register|inbox|reply|ack       # durable parent communication
+relay board post|query|watch                # manager-scoped peer coordination
 relay parent status|retire                  # guarded local-pane cleanup
 relay history                               # source → destination lineage
 relay pane list                             # owned surface/workspace/pane + parent + liveness
