@@ -143,6 +143,100 @@ func (b *BoardService) Query(ctx context.Context, sessionID, category, key strin
 	return out, nil
 }
 
+// QuerySubtree rolls up every board beneath this session — its own children's
+// board plus those of each descendant manager — in one call.
+//
+// This is the multi-level view: a manager asking "what is my whole subtree
+// doing" would otherwise issue one query per manager and pay for the fan-out
+// in its own context. The tool does the walk; the agent gets one folded answer.
+// Scope still needs no check: the walk starts at the caller and only descends.
+func (b *BoardService) QuerySubtree(ctx context.Context, sessionID, category, key string) ([]BoardEntry, error) {
+	if b == nil || b.Reg == nil || b.Msg == nil {
+		return nil, fmt.Errorf("board service not configured")
+	}
+	category, err := normalizeCategory(category)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := b.Reg.GetSession(sessionID); err != nil {
+		return nil, err
+	}
+	all, err := b.Reg.ListSessions()
+	if err != nil {
+		return nil, err
+	}
+	children := map[string][]*Session{}
+	for _, sess := range all {
+		if sess.SourceSessionID != "" {
+			children[sess.SourceSessionID] = append(children[sess.SourceSessionID], sess)
+		}
+	}
+	key = strings.TrimSpace(key)
+	var out []BoardEntry
+	seen := map[string]bool{}
+	// Breadth-first over managers, bounded like every other lineage walk here.
+	frontier := []string{sessionID}
+	for depth := 0; depth < maxAncestorDepth && len(frontier) > 0; depth++ {
+		var next []string
+		for _, managerID := range frontier {
+			kids := children[managerID]
+			if len(kids) == 0 || seen[managerID] {
+				continue
+			}
+			seen[managerID] = true
+			manager, err := b.Reg.GetSession(managerID)
+			if err != nil {
+				continue
+			}
+			entries, err := b.readBoard(ctx, manager, category, key)
+			if err == nil {
+				out = append(out, entries...)
+			}
+			for _, kid := range kids {
+				next = append(next, kid.ID)
+			}
+		}
+		frontier = next
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Node != out[j].Node {
+			return out[i].Node < out[j].Node
+		}
+		return out[i].Key < out[j].Key
+	})
+	return out, nil
+}
+
+// readBoard folds one manager's board to the latest entry per (node, key).
+func (b *BoardService) readBoard(ctx context.Context, manager *Session, category, key string) ([]BoardEntry, error) {
+	msgs, _, err := b.Msg.Read(ctx, manager.HostID, boardChannel(manager.ID, category), 0, false, 0)
+	if err != nil {
+		return nil, err
+	}
+	latest := map[string]BoardEntry{}
+	for _, m := range msgs {
+		entry := BoardEntry{Node: m.From, Category: category, Text: m.Text, Seq: m.Seq, TS: m.TS}
+		if m.Meta != nil {
+			if k, ok := m.Meta["key"].(string); ok {
+				entry.Key = k
+			}
+		}
+		if entry.Node == "" || (key != "" && entry.Key != key) {
+			continue
+		}
+		id := entry.Node + "\x00" + entry.Key
+		if prev, ok := latest[id]; ok && prev.Seq > entry.Seq {
+			continue
+		}
+		latest[id] = entry
+	}
+	out := make([]BoardEntry, 0, len(latest))
+	for _, entry := range latest {
+		out = append(out, entry)
+	}
+	return out, nil
+}
+
 // Watch blocks until a peer posts to the board, then returns that entry. It is
 // a zero-token wait on the existing relayd subscribe stream — never a poll.
 func (b *BoardService) Watch(ctx context.Context, sessionID, category string, fromSeq int64, timeout time.Duration) (*BoardEntry, bool, error) {
