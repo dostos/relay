@@ -282,11 +282,22 @@ func (v *Viz) NotifyParent(ctx context.Context, sessionID string, notice core.Pa
 	if sess == nil || sess.Labels["wake_mode"] != "inject" {
 		return nil
 	}
-	if _, err := v.run(ctx, "send", "--surface", b.Surface, "--", body); err != nil {
+	if _, err := v.run(ctx, surfaceCommand("send", b.Surface, b.Workspace, "--", body)...); err != nil {
 		return err
 	}
-	_, err = v.run(ctx, "send-key", "--surface", b.Surface, "ENTER")
+	_, err = v.run(ctx, surfaceCommand("send-key", b.Surface, b.Workspace, "ENTER")...)
 	return err
+}
+
+// surfaceCommand keeps multi-step input directed at the same pane even when
+// its workspace is not focused. Short surface refs alone are not sufficient
+// for a follow-up send-key in a background cmux workspace.
+func surfaceCommand(command, surface, workspace string, tail ...string) []string {
+	args := []string{command, "--surface", surface}
+	if workspace != "" {
+		args = append(args, "--workspace", workspace)
+	}
+	return append(args, tail...)
 }
 
 func compactNotice(n core.ParentNotice) string {

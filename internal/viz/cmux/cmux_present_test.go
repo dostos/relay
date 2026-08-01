@@ -3,11 +3,38 @@ package cmux
 import (
 	"context"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/dostos/relay/internal/ports"
 )
+
+func TestSurfaceCommandPinsTextAndEnterToWorkspace(t *testing.T) {
+	tests := []struct {
+		name string
+		got  []string
+		want []string
+	}{
+		{
+			name: "text",
+			got:  surfaceCommand("send", "surface:62", "workspace:9", "--", "decision needed"),
+			want: []string{"send", "--surface", "surface:62", "--workspace", "workspace:9", "--", "decision needed"},
+		},
+		{
+			name: "enter",
+			got:  surfaceCommand("send-key", "surface:62", "workspace:9", "ENTER"),
+			want: []string{"send-key", "--surface", "surface:62", "--workspace", "workspace:9", "ENTER"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if !reflect.DeepEqual(test.got, test.want) {
+				t.Fatalf("surfaceCommand() = %q, want %q", test.got, test.want)
+			}
+		})
+	}
+}
 
 func TestParseWorkspaceRef(t *testing.T) {
 	cases := []struct {
