@@ -117,6 +117,31 @@ preserved across the failover, and the skipped manager is recorded on the
 message (`intended_parent_session_id`) alongside who actually ruled
 (`resolved_by_session_id`).
 
+### Autonomous mode
+
+Park an always-on agent at the top of the tree and enrolled roots keep working
+while you are away. Because escalation goes to the nearest *live* ancestor, a
+sleeping laptop is simply skipped and the question lands on the apex instead of
+stalling:
+
+```bash
+relay agent start home claude -- "$(cat share/roles/relay-conductor.md)"
+relay root adopt sess-…            # designate that session as the apex
+relay root enroll sess-beholder    # this root's subtree is now governed
+relay root rules beholder          # where its human-authored rules live
+relay root digest                  # what needed you vs. what it ruled
+```
+
+The apex rules against **human-authored per-project rules** and holds anything
+they do not clearly permit — silence in the rules is a "no". Mode is
+structural, not a flag: a subtree is governed exactly when it has an agent-root
+ancestor, so `relay root unenroll` is the entire off switch. The apex must
+itself be a root, so you remain the last escalation stop.
+
+Relay stays model-free throughout. It owns enrollment, rule resolution, and the
+audit; the judgment lives in the portable role at
+[`share/roles/relay-conductor.md`](share/roles/relay-conductor.md).
+
 Escalation is vertical, but peers often need to coordinate without asking
 anyone to decide anything. The children of one manager share a **board** — a
 categorized surface for status, resources, and artifacts:
@@ -299,6 +324,7 @@ relay session … / session adopt             # durable tmux
 relay agent start|wait|send|capture|done    # orchestrator API
 relay parent register|inbox|reply|ack       # durable parent communication
 relay board post|query|watch                # manager-scoped peer coordination
+relay root adopt|enroll|status|digest       # always-on apex (autonomous mode)
 relay parent status|retire                  # guarded local-pane cleanup
 relay history                               # source → destination lineage
 relay pane list                             # owned surface/workspace/pane + parent + liveness
