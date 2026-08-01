@@ -757,6 +757,38 @@ func decisionExcerpt(capture string) string {
 	return compactText(strings.Join(useful, " "))
 }
 
+// deliveryCandidates lists the sessions that may receive an escalation, in
+// lineage order: the immediate manager first, then its ancestors. Liveness is
+// the OUTCOME of attempting delivery rather than a separate presence oracle,
+// so the caller walks this list and stops at the first hop that succeeds. A
+// live manager is therefore never skipped — only ancestors that genuinely
+// cannot receive the envelope are passed over.
+func (p *ParentService) deliveryCandidates(ho *Handoff) []*Session {
+	immediate, err := p.Reg.GetSession(ho.SourceSessionID)
+	if err != nil || immediate == nil {
+		return nil
+	}
+	return append([]*Session{immediate}, AncestorChain(p.Reg, immediate.ID)...)
+}
+
+// retargetMessage moves a still-undelivered envelope from a skipped ancestor's
+// inbox to the next candidate's, preserving one logical escalation: the inbox
+// is a directory per parent session, so the old record is removed rather than
+// left behind as a duplicate ask.
+func (p *ParentService) retargetMessage(msg *ParentMessage, from, to *Session) error {
+	if msg.IntendedParentSessionID == "" {
+		msg.IntendedParentSessionID = from.ID
+	}
+	msg.SkippedSessionIDs = append(msg.SkippedSessionIDs, from.ID)
+	oldPath := parentMessagePath(from.ID, msg.ID)
+	msg.ParentSessionID = to.ID
+	if err := writeParentMessage(msg, false); err != nil {
+		return err
+	}
+	_ = os.Remove(oldPath)
+	return nil
+}
+
 func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coord.Event) (*ParentMessage, error) {
 	if ho == nil || ho.SourceSessionID == "" || handoffTerminal(ho) {
 		return nil, nil
@@ -765,10 +797,11 @@ func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coo
 	if kind == "" {
 		return nil, nil
 	}
-	parent, err := p.Reg.GetSession(ho.SourceSessionID)
-	if err != nil {
-		return nil, err
+	candidates := p.deliveryCandidates(ho)
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("handoff %s has no reachable parent lineage", ho.ID)
 	}
+	parent := candidates[0]
 	id := parentMessageID(parent.ID, ho.ID, kind, ev.Seq)
 	correlationID := eventString(ev.Meta, "correlation_id", "request_id")
 	if correlationID == "" {
@@ -811,9 +844,25 @@ func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coo
 	if handled, decided := p.applyPolicy(ctx, ho, ev, msg); decided {
 		return handled, nil
 	}
-	// Delivery is strictly one edge up the tree. Only a local root owns a
-	// human-facing cmux surface; every other parent is an agent manager.
-	return msg, p.deliverMessage(ctx, parent, ho, msg)
+	// Delivery walks UP to the nearest ancestor that can actually receive the
+	// envelope. A live manager is never skipped: the walk stops at the first
+	// successful delivery. Only a local root owns a human-facing cmux surface;
+	// every other ancestor is an agent manager.
+	var deliverErr error
+	for i, candidate := range candidates {
+		if i > 0 {
+			if err := p.retargetMessage(msg, candidates[i-1], candidate); err != nil {
+				return msg, err
+			}
+		}
+		deliverErr = p.deliverMessage(ctx, candidate, ho, msg)
+		if deliverErr == nil {
+			return msg, nil
+		}
+	}
+	// Nothing in the chain was reachable. The envelope stays durably pending
+	// with its last target so DeliverPending retries it on reconnect.
+	return msg, deliverErr
 }
 
 func (p *ParentService) applyPolicy(ctx context.Context, ho *Handoff, ev coord.Event, msg *ParentMessage) (*ParentMessage, bool) {

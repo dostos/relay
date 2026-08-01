@@ -835,3 +835,133 @@ func TestDeliveryAttemptIsBounded(t *testing.T) {
 		t.Fatalf("delivery was not bounded, took %s", elapsed)
 	}
 }
+
+// failingPersistence simulates an unreachable remote manager.
+type failingPersistence struct {
+	renamePersistence
+	attempts []string
+}
+
+func (p *failingPersistence) Send(_ context.Context, _ ports.Transport, handle ports.PersistHandle, _ string, _ bool) error {
+	p.attempts = append(p.attempts, handle.Name)
+	return errors.New("host unreachable")
+}
+
+func failoverTree(t *testing.T, reg *Registry) (root, manager, child *Session, ho *Handoff) {
+	t.Helper()
+	now := time.Now().UTC()
+	root = &Session{
+		ID: "sess-root", HostID: LocalHostID,
+		Persist:   ports.PersistHandle{Kind: LocalPersistKind, Name: "local-main"},
+		Labels:    map[string]string{"role": ParentRole, "wake_mode": "notify"},
+		CreatedAt: now,
+	}
+	manager = &Session{
+		ID: "sess-manager", HostID: "c1",
+		Persist:         ports.PersistHandle{Kind: "tmux", Name: "manager"},
+		SourceSessionID: root.ID, CreatedAt: now,
+	}
+	child = &Session{
+		ID: "sess-child", HostID: "c3",
+		Persist:         ports.PersistHandle{Kind: "tmux", Name: "worker"},
+		SourceSessionID: manager.ID, CreatedAt: now,
+	}
+	for _, sess := range []*Session{root, manager, child} {
+		if err := reg.PutSession(sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ho = &Handoff{
+		ID: "ho-worker", SessionID: child.ID, HostID: child.HostID,
+		Kind: KindAgent, Status: StatusRunning, SourceSessionID: manager.ID, CreatedAt: now,
+	}
+	return root, manager, child, ho
+}
+
+func TestEscalationFailsOverToNearestLiveAncestor(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	// The remote manager is unreachable; the local root is live.
+	service.Sessions.Persist = &failingPersistence{}
+	root, manager, _, ho := failoverTree(t, reg)
+
+	msg, err := service.RouteChildEvent(context.Background(), ho,
+		coord.Event{Seq: 1, Kind: "permission_required", Meta: map[string]any{"text": "approve tool?"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg == nil {
+		t.Fatal("want an escalation message")
+	}
+	if msg.ParentSessionID != root.ID {
+		t.Fatalf("want delivery to the live root, got %s", msg.ParentSessionID)
+	}
+	if msg.IntendedParentSessionID != manager.ID {
+		t.Fatalf("want the skipped manager recorded, got %q", msg.IntendedParentSessionID)
+	}
+	if len(msg.SkippedSessionIDs) != 1 || msg.SkippedSessionIDs[0] != manager.ID {
+		t.Fatalf("want the manager in skipped ids, got %+v", msg.SkippedSessionIDs)
+	}
+	if msg.DeliveredAt == nil {
+		t.Fatal("want the escalation delivered")
+	}
+	if len(notifier.notices) != 1 {
+		t.Fatalf("want exactly one human-facing notice, got %d", len(notifier.notices))
+	}
+	// Exactly one durable envelope must exist across the whole tree.
+	rootMsgs, _ := service.ListMessages(root.ID, false)
+	managerMsgs, _ := service.ListMessages(manager.ID, false)
+	if len(rootMsgs) != 1 || len(managerMsgs) != 0 {
+		t.Fatalf("want one envelope held by the root, got root=%d manager=%d", len(rootMsgs), len(managerMsgs))
+	}
+}
+
+func TestEscalationNeverSkipsALiveManager(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	recorder := &recordingPersistence{}
+	service.Sessions.Persist = recorder
+	_, manager, _, ho := failoverTree(t, reg)
+
+	msg, err := service.RouteChildEvent(context.Background(), ho,
+		coord.Event{Seq: 1, Kind: "permission_required", Meta: map[string]any{"text": "approve tool?"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.ParentSessionID != manager.ID {
+		t.Fatalf("a live manager must not be skipped, went to %s", msg.ParentSessionID)
+	}
+	if msg.IntendedParentSessionID != "" {
+		t.Fatalf("no failover expected, got intended=%q", msg.IntendedParentSessionID)
+	}
+	if len(notifier.notices) != 0 {
+		t.Fatalf("the human root must not be interrupted, got %d notices", len(notifier.notices))
+	}
+	if len(recorder.sent) != 1 {
+		t.Fatalf("want one tmux injection to the manager, got %d", len(recorder.sent))
+	}
+}
+
+func TestEscalationStaysPendingWhenNoAncestorIsLive(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	service.Sessions.Persist = &failingPersistence{}
+	notifier.notifyFail = true
+	_, _, _, ho := failoverTree(t, reg)
+
+	msg, _ := service.RouteChildEvent(context.Background(), ho,
+		coord.Event{Seq: 1, Kind: "permission_required", Meta: map[string]any{"text": "approve tool?"}})
+	if msg == nil {
+		t.Fatal("the escalation must still be durably recorded")
+	}
+	if msg.DeliveredAt != nil {
+		t.Fatal("nothing was reachable; it must not be marked delivered")
+	}
+	if msg.State != ParentMessagePending {
+		t.Fatalf("want it left pending for reconnect retry, got %s", msg.State)
+	}
+	held, err := service.ListMessages(msg.ParentSessionID, true)
+	if err != nil {
+		t.Fatalf("pending message must be listable: %v", err)
+	}
+	if len(held) != 1 {
+		t.Fatalf("want exactly one pending envelope, got %d", len(held))
+	}
+}
