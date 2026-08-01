@@ -198,7 +198,7 @@ func TestRouteChildEventDeduplicatesAndKeepsMessageCompact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if msg.Kind != "permission_required" || msg.CorrelationID != "req-7" || len(msg.Text) > parentTextLimit {
+	if msg.Kind != "permission_required" || msg.CorrelationID != "req-7" || len(msg.Text) > ParentTextLimit {
 		t.Fatalf("message = %+v", msg)
 	}
 	if len(notifier.notices) != 1 {
@@ -263,7 +263,7 @@ func TestDecisionExcerptDropsChromeAndKeepsPermissionPrompt(t *testing.T) {
 	if strings.Contains(got, "Auto") || strings.Contains(got, "~/dev/folio") {
 		t.Fatalf("status chrome leaked: %q", got)
 	}
-	if len(got) > parentTextLimit {
+	if len(got) > ParentTextLimit {
 		t.Fatalf("decision excerpt is unbounded: %d", len(got))
 	}
 }

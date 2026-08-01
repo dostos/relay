@@ -66,7 +66,6 @@ func composerHolds(screen, marker string) bool {
 // reported as stalled. Swallowing the failure is what let a question go missing
 // while looking delivered.
 func (v *Viz) submitInjected(ctx context.Context, sessionID string, b binding, marker string) error {
-	var lastErr error
 	for attempt := 0; attempt < injectConfirmAttempts; attempt++ {
 		if _, err := v.run(ctx, surfaceCommand("send-key", b.Surface, b.Workspace, "ENTER")...); err != nil {
 			return err
@@ -80,13 +79,12 @@ func (v *Viz) submitInjected(ctx context.Context, sessionID string, b binding, m
 		if err != nil {
 			// Cannot verify: assume the keystroke landed rather than
 			// re-sending blindly into a pane we cannot read.
-			lastErr = err
 			return nil
 		}
 		if !composerHolds(screen, marker) {
 			return nil
 		}
 	}
-	return fmt.Errorf("injected message %s is still unsent in %s's composer after %d attempts (last read: %v)",
-		marker, sessionID, injectConfirmAttempts, lastErr)
+	return fmt.Errorf("injected message %s is still unsent in %s's composer after %d attempts",
+		marker, sessionID, injectConfirmAttempts)
 }

@@ -28,9 +28,6 @@ import (
 // than the characters saved here.
 const ParentTextLimit = 600
 
-// parentTextLimit is the unexported alias used throughout this file.
-const parentTextLimit = ParentTextLimit
-
 // deliveryAttemptTimeout bounds ONE delivery hop. SessionService.Send passes
 // the caller's context straight to the transport with no timeout of its own,
 // so without this a dead SSH host would stall the whole ancestor walk.
@@ -498,8 +495,8 @@ func parentMessagePath(parentID, messageID string) string {
 
 func compactText(text string) string {
 	text = strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
-	if len(text) > parentTextLimit {
-		text = text[:parentTextLimit-3] + "..."
+	if len(text) > ParentTextLimit {
+		text = text[:ParentTextLimit-3] + "..."
 	}
 	return text
 }
@@ -804,13 +801,9 @@ func paneStillActive(capture string) bool {
 // empty composer placeholder.
 var chromeMarkers = []string{
 	"esc to interrupt",
-	"ctrl + t",
 	"shift + tab",
 	"esc dismiss",
-	"to view transcript",
-	"Improve documentation in @filename",
 	"Context left",
-	"tokens)",
 }
 
 // isFrameLine reports whether a line is mostly box-drawing glyphs — a table
@@ -868,6 +861,11 @@ func isChromeLine(line string) bool {
 	}
 	// A bare working-directory line under a status bar.
 	if strings.HasPrefix(line, "~/") && !strings.ContainsAny(line, " \t") {
+		return true
+	}
+	// The composer is an input line, never decision content — whatever it
+	// holds is either a placeholder or text the child has not sent.
+	if strings.HasPrefix(line, "›") || strings.HasPrefix(line, "❯") {
 		return true
 	}
 	// Scrollback pointers: "… truncated (164 more lines)".
