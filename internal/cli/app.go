@@ -2193,6 +2193,16 @@ func (a *App) cmdRoot(args []string) int {
 	if len(args) == 0 {
 		return a.fail(fmt.Errorf("usage: relay root adopt|enroll|unenroll|status|rules|digest …"))
 	}
+	// The digest is the human's decision queue and names every governed
+	// subtree, so it must never be readable by an arbitrary session. The bridge
+	// allowlist already keeps `root` desktop-only; this is the second lock, so
+	// the guarantee does not depend on that list staying correct.
+	if caller := strings.TrimSpace(os.Getenv(bridge.SourceSessionEnv)); caller != "" {
+		apex, err := a.Roots.Apex()
+		if err != nil || apex.ID != caller {
+			return a.fail(fmt.Errorf("relay root is outside authenticated caller scope"))
+		}
+	}
 	sub, rest := args[0], args[1:]
 	positional := ""
 	after := int64(0)

@@ -293,6 +293,11 @@ func validateArgv(argv []string) error {
 		"viz": true, "pane": true, "resume": true, "doctor": true, "history": true,
 		"help": true, "version": true, "install-cmux-restore": true,
 		"resolve": true, "log": true,
+		// board and root are reserved so the two-token host shorthand below
+		// cannot admit them unchecked. board is re-allowed per subcommand;
+		// root stays desktop-only because the apex lifecycle is an operator
+		// action and its digest is the human's decision queue.
+		"board": true, "root": true,
 	}
 	if len(filtered) == 2 && !reserved[filtered[0]] && !strings.HasPrefix(filtered[0], "-") && !strings.HasPrefix(filtered[1], "-") {
 		return nil
@@ -307,6 +312,17 @@ func validateArgv(argv []string) error {
 		allowed := map[string]bool{"inbox": true, "reply": true, "ack": true, "status": true}
 		if !allowed[filtered[1]] {
 			return fmt.Errorf("relay parent %q is not allowed through the desktop bridge", filtered[1])
+		}
+		return nil
+	case "board":
+		if len(filtered) < 2 {
+			return fmt.Errorf("board subcommand required")
+		}
+		// Peers coordinate through the board; the caller's identity is taken
+		// from the authenticated envelope, so these are safe to forward.
+		allowed := map[string]bool{"post": true, "query": true, "watch": true}
+		if !allowed[filtered[1]] {
+			return fmt.Errorf("relay board %q is not allowed through the desktop bridge", filtered[1])
 		}
 		return nil
 	case "agent", "handoff", "history", "help", "version", "targets", "resolve", "log":

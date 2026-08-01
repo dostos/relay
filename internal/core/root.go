@@ -142,7 +142,10 @@ func (r *RootService) Unenroll(sessionID string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	if sess.SourceSessionID != apex.ID {
+	// Enrollment is what GovernedLabel records. Without checking it, unenroll
+	// would also detach workers the apex spawned itself — they report to the
+	// apex without ever having been enrolled — silently orphaning live work.
+	if sess.SourceSessionID != apex.ID || sess.Labels[GovernedLabel] != "true" {
 		return nil, fmt.Errorf("session %s is not enrolled", sessionID)
 	}
 	sess.SourceSessionID, sess.SourceHostID, sess.SourcePersistName = "", "", ""
@@ -165,7 +168,8 @@ func (r *RootService) Governed() ([]*Session, error) {
 	}
 	var out []*Session
 	for _, sess := range list {
-		if sess.SourceSessionID == apex.ID {
+		// Enrolled roots only — not every worker the apex happens to manage.
+		if sess.SourceSessionID == apex.ID && sess.Labels[GovernedLabel] == "true" {
 			out = append(out, sess)
 		}
 	}

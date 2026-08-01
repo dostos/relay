@@ -186,3 +186,35 @@ func TestRulesPathIsProjectScopedAndRefusesTraversal(t *testing.T) {
 		}
 	}
 }
+
+// The apex's own workers report to it without being enrolled; unenroll must
+// not detach them, or live work is silently orphaned.
+func TestUnenrollLeavesTheApexOwnWorkersAlone(t *testing.T) {
+	root, reg := newRootTestService(t)
+	if _, err := root.Adopt("sess-apex"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	worker := &Session{
+		ID: "sess-worker", HostID: "home",
+		Persist:         ports.PersistHandle{Kind: "tmux", Name: "worker"},
+		SourceSessionID: "sess-apex", CreatedAt: now,
+	}
+	if err := reg.PutSession(worker); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.Unenroll("sess-worker"); err == nil {
+		t.Fatal("a worker the apex spawned was never enrolled and must not be detached")
+	}
+	got, _ := reg.GetSession("sess-worker")
+	if got.SourceSessionID != "sess-apex" {
+		t.Fatalf("worker was orphaned: manager=%q", got.SourceSessionID)
+	}
+	governed, err := root.Governed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(governed) != 0 {
+		t.Fatalf("an unenrolled worker must not appear as governed: %+v", governed)
+	}
+}

@@ -87,3 +87,30 @@ func TestSerializeInvocationDoesNotBlockWaits(t *testing.T) {
 		}
 	}
 }
+
+// The apex digest is the human's decision queue; it must not be reachable by
+// an arbitrary session through the two-token host shorthand.
+func TestBridgeRefusesRootAndAllowsBoard(t *testing.T) {
+	for _, argv := range [][]string{
+		{"root", "digest"}, {"root", "status"}, {"--json", "root", "digest"},
+		{"root", "adopt", "sess-x"}, {"root", "enroll", "sess-x"},
+	} {
+		if err := validateArgv(argv); err == nil {
+			t.Fatalf("argv %v must be refused through the bridge", argv)
+		}
+	}
+	// Boards are the peer coordination surface and must be reachable.
+	for _, argv := range [][]string{
+		{"board", "query", "-c", "status"},
+		{"board", "post", "-c", "status", "-k", "phase", "--", "hi"},
+		{"board", "watch", "-c", "status"},
+		{"board", "query", "-c", "status", "--subtree"},
+	} {
+		if err := validateArgv(argv); err != nil {
+			t.Fatalf("argv %v must be allowed: %v", argv, err)
+		}
+	}
+	if err := validateArgv([]string{"board", "destroy"}); err == nil {
+		t.Fatal("unknown board subcommand must be refused")
+	}
+}
