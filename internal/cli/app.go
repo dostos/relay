@@ -37,6 +37,7 @@ type App struct {
 	Reg         *core.Registry
 	Coord       ports.Coord
 	Msg         *core.MsgService
+	Boards      *core.BoardService
 	Maint       *core.MaintenanceService
 	Parents     *core.ParentService
 	Policies    *core.PolicyService
@@ -74,6 +75,7 @@ func New() *App {
 		Viz:          viz,
 		NewTransport: tf,
 	}
+	msgs := &core.MsgService{Coord: coord, NewTransport: tf}
 	policies := &core.PolicyService{}
 	parents := &core.ParentService{Reg: reg, Sessions: sessions, Coord: coord, Viz: viz, Notifier: viz, Policies: policies, NewTransport: tf}
 	handoffs.ParentRouter = parents
@@ -97,7 +99,8 @@ func New() *App {
 		},
 		Reg:      reg,
 		Coord:    coord,
-		Msg:      &core.MsgService{Coord: coord, NewTransport: tf},
+		Msg:      msgs,
+		Boards:   &core.BoardService{Reg: reg, Msg: msgs},
 		Maint:    &core.MaintenanceService{Sessions: sessions, Reg: reg, Viz: viz, NewTransport: tf},
 		Parents:  parents,
 		Policies: policies,
@@ -403,6 +406,8 @@ func (a *App) Run(args []string) int {
 		return a.cmdDoctor(ctx, filtered[1:])
 	case "history":
 		return a.cmdHistory(filtered[1:])
+	case "board":
+		return a.cmdBoard(ctx, filtered[1:])
 	default:
 		if len(filtered) == 2 {
 			return a.cmdNamed(ctx, filtered[0], filtered[1])
@@ -2172,6 +2177,106 @@ func authorizeParentCaller(parentID string) error {
 		return fmt.Errorf("parent session %s is outside authenticated caller scope", parentID)
 	}
 	return nil
+}
+
+// boardCaller resolves which session is acting. A bridge-authenticated agent
+// always acts as itself: the identity comes from its authenticated envelope,
+// never from an argument, so a peer cannot post or query as someone else.
+// --session is accepted only outside a bridge context, for local operators.
+func boardCaller(explicit string) (string, error) {
+	authenticated := strings.TrimSpace(os.Getenv(bridge.SourceSessionEnv))
+	if authenticated != "" {
+		if explicit != "" && explicit != authenticated {
+			return "", fmt.Errorf("session %s is outside authenticated caller scope", explicit)
+		}
+		return authenticated, nil
+	}
+	if explicit == "" {
+		return "", fmt.Errorf("--session required outside a relay-managed pane")
+	}
+	return explicit, nil
+}
+
+// cmdBoard exposes the manager-scoped peer board. Output is compact machine
+// JSON: a query returns current state only, never history.
+func (a *App) cmdBoard(ctx context.Context, args []string) int {
+	a.JSON = true
+	a.CompactJSON = true
+	if len(args) == 0 {
+		return a.fail(fmt.Errorf("usage: relay board post|query|watch …"))
+	}
+	sub, rest := args[0], args[1:]
+	var session, category, key, text string
+	var fromSeq int64
+	timeoutSec := 120
+	for i := 0; i < len(rest); i++ {
+		switch rest[i] {
+		case "--session", "-s":
+			i++
+			if i < len(rest) {
+				session = rest[i]
+			}
+		case "--category", "-c":
+			i++
+			if i < len(rest) {
+				category = rest[i]
+			}
+		case "--key", "-k":
+			i++
+			if i < len(rest) {
+				key = rest[i]
+			}
+		case "--from":
+			i++
+			if i < len(rest) {
+				fromSeq, _ = strconv.ParseInt(rest[i], 10, 64)
+			}
+		case "--timeout":
+			i++
+			if i < len(rest) {
+				timeoutSec, _ = strconv.Atoi(rest[i])
+			}
+		case "--":
+			text = strings.Join(rest[i+1:], " ")
+			i = len(rest)
+		default:
+			if strings.HasPrefix(rest[i], "-") {
+				return a.fail(fmt.Errorf("unknown flag %q", rest[i]))
+			}
+		}
+	}
+	caller, err := boardCaller(session)
+	if err != nil {
+		return a.fail(err)
+	}
+	switch sub {
+	case "post":
+		if text == "" {
+			return a.fail(fmt.Errorf("usage: relay board post -c CATEGORY [-k KEY] -- TEXT"))
+		}
+		seq, err := a.Boards.Post(ctx, caller, category, key, text)
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "seq": seq}))
+	case "query":
+		entries, err := a.Boards.Query(ctx, caller, category, key, true)
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "entries": entries, "count": len(entries)}))
+	case "watch":
+		entry, timedOut, err := a.Boards.Watch(ctx, caller, category, fromSeq, time.Duration(timeoutSec)*time.Second)
+		if err != nil {
+			return a.fail(err)
+		}
+		if timedOut {
+			return a.errOut(a.out(map[string]any{"ok": true, "timeout": true}))
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "entry": entry}))
+	default:
+		return a.fail(fmt.Errorf("usage: relay board post|query|watch …"))
+	}
 }
 
 func parentMessageArgs(args []string) (messageID, text string) {

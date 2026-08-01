@@ -284,3 +284,30 @@ func TestCompactHookFieldBoundsProviderPayloads(t *testing.T) {
 		t.Fatalf("compact field=%q", got)
 	}
 }
+
+func TestBoardCallerRefusesToActAsAnotherSession(t *testing.T) {
+	t.Setenv(bridge.SourceSessionEnv, "sess-me")
+	// A bridge-authenticated agent always acts as itself.
+	got, err := boardCaller("")
+	if err != nil || got != "sess-me" {
+		t.Fatalf("want the authenticated session, got %q (%v)", got, err)
+	}
+	// Naming itself explicitly is fine.
+	if got, err := boardCaller("sess-me"); err != nil || got != "sess-me" {
+		t.Fatalf("self-reference must be allowed, got %q (%v)", got, err)
+	}
+	// Naming a peer must be refused.
+	if _, err := boardCaller("sess-someone-else"); err == nil {
+		t.Fatal("an agent must not be able to act as another session")
+	}
+}
+
+func TestBoardCallerRequiresSessionOutsideBridge(t *testing.T) {
+	t.Setenv(bridge.SourceSessionEnv, "")
+	if _, err := boardCaller(""); err == nil {
+		t.Fatal("outside a relay pane the caller must be named explicitly")
+	}
+	if got, err := boardCaller("sess-local"); err != nil || got != "sess-local" {
+		t.Fatalf("local operator use must work, got %q (%v)", got, err)
+	}
+}
