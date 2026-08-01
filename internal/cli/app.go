@@ -3401,16 +3401,69 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 		detail = "available"
 	}
 	checks = append(checks, check{"cmux_viz", cmuxOK, detail})
-	bridgeDetail := "on demand"
-	bridgeOK := true
+	// The bridge result must reflect the ping. It used to be initialised true
+	// and only ever re-set true, so a dead bridge — which strands every remote
+	// agent's control path — still reported ok.
+	bridgeOK := false
+	bridgeDetail := "not running; remote agents cannot reach this control plane"
 	if err := (bridge.Client{SockPath: core.DesktopBridgeSocketPath()}).Ping(ctx); err == nil {
 		bridgeOK = true
 		bridgeDetail = "running"
 	}
 	checks = append(checks, check{"desktop_bridge", bridgeOK, bridgeDetail})
-	checks = append(checks, check{"state_dir", true, core.StateRoot()})
+
+	// state_dir was a literal true while the only thing that could falsify it
+	// ran afterwards with its error discarded.
+	stateOK, stateDetail := true, core.StateRoot()
+	if err := core.EnsureStateDirs(); err != nil {
+		stateOK, stateDetail = false, err.Error()
+	}
+	checks = append(checks, check{"state_dir", stateOK, stateDetail})
+
+	// Checks for the failure class that cost hours today: things that look
+	// healthy while doing nothing. Each of these was invisible before.
+	if a.Roots != nil && a.Reg != nil {
+		sup := &core.SupervisorService{Reg: a.Reg, Parents: a.Parents}
+		if unwatched, err := sup.Unwatched(); err == nil {
+			ids := make([]string, 0, len(unwatched))
+			for _, ho := range unwatched {
+				ids = append(ids, ho.ID)
+			}
+			if len(ids) == 0 {
+				checks = append(checks, check{"handoff_watchers", true, "all live handoffs watched"})
+			} else {
+				checks = append(checks, check{"handoff_watchers", false,
+					"NOT routing escalations: " + strings.Join(ids, ", ")})
+			}
+		}
+		if apex, err := a.Roots.Apex(); err == nil {
+			ready := a.Roots.AgentReadinessFor(ctx, a.Sessions, apex.ID)
+			checks = append(checks, check{"apex_agent", ready.State == core.AgentReady,
+				string(ready.State) + " " + ready.Reason})
+		}
+		if a.Parents != nil {
+			if stale, err := a.Parents.FindStaleEscalations(core.EscalationMaxHold(), time.Now().UTC()); err == nil {
+				if len(stale) == 0 {
+					checks = append(checks, check{"pending_decisions", true, "none stalled"})
+				} else {
+					oldest := stale[0]
+					for _, s := range stale {
+						if s.HeldFor > oldest.HeldFor {
+							oldest = s
+						}
+					}
+					checks = append(checks, check{"pending_decisions", false,
+						fmt.Sprintf("%d unanswered, oldest %s waiting %dm",
+							len(stale), oldest.Message.ID, int(oldest.HeldFor.Minutes()))})
+				}
+			}
+		}
+	}
 	if host == "" {
-		checks = append(checks, check{"coord", false, "pass -H HOST to probe remote relayd"})
+		// Not probed is not the same as broken. Failing here would make doctor
+		// always exit non-zero, which trains the reader to ignore it — and a
+		// diagnostic nobody trusts is worse than none.
+		checks = append(checks, check{"coord", true, "not probed; pass -H HOST for a remote relayd check"})
 	} else if a.Coord != nil {
 		t, err := a.tf(host)
 		if err != nil {
@@ -3421,10 +3474,24 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 			checks = append(checks, check{"coord", true, "relayd ok on " + host})
 		}
 	}
-	_ = core.EnsureStateDirs()
-	return a.errOut(a.out(map[string]any{"checks": checks, "adapters": map[string]string{
-		"transport": "ssh", "persistence": "tmux", "viz": "cmux", "coord": "relayd",
-	}}))
+	// A diagnostic that always exits 0 cannot be used in a script or a health
+	// loop — the caller has to parse prose to learn anything went wrong.
+	failed := 0
+	for _, c := range checks {
+		if !c.OK {
+			failed++
+		}
+	}
+	code := 0
+	if failed > 0 {
+		code = 1
+	}
+	_ = a.out(map[string]any{
+		"ok": failed == 0, "failed": failed, "checks": checks,
+		"adapters": map[string]string{
+			"transport": "ssh", "persistence": "tmux", "viz": "cmux", "coord": "relayd",
+		}})
+	return code
 }
 
 func (a *App) brandAll(ctx context.Context) error {
