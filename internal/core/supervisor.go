@@ -121,6 +121,14 @@ func (s *SupervisorService) Reconcile(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// A question nobody answers must reach someone who can. This is the same
+	// tick because both are "the tree is not making progress" problems.
+	if n, ageErr := s.Parents.ReportStaleEscalations(ctx, EscalationMaxHold()); ageErr != nil {
+		s.emit("stale_report_error", "", ageErr)
+	} else if n > 0 {
+		s.emit("stalled_escalations_reported", "", nil)
+	}
+
 	started := 0
 	for _, ho := range pending {
 		s.mu.Lock()
