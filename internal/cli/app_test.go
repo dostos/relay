@@ -208,6 +208,34 @@ func TestParentLogReturnsCursorDelta(t *testing.T) {
 	}
 }
 
+func TestCommunicationLogInfersAuthenticatedManager(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	t.Setenv(bridge.SourceSessionEnv, "sess-parent")
+	msg := &core.ParentMessage{
+		ID: "pm-1", CorrelationID: "pm-1", ParentSessionID: "sess-parent",
+		ChildSessionID: "sess-child", HandoffID: "ho-1", Kind: "result", Text: "checkpoint complete",
+	}
+	if err := core.AppendCommunication(msg, "event", ""); err != nil {
+		t.Fatal(err)
+	}
+	a := New()
+	out := captureStdout(t, func() {
+		if code := a.Run([]string{"log", "0"}); code != 0 {
+			t.Fatalf("log exit=%d", code)
+		}
+	})
+	for _, want := range []string{`"next":1`, `"action":"event"`, `"summary":"checkpoint complete"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("compact log missing %s: %s", want, out)
+		}
+	}
+	for _, redundant := range []string{"parent_session_id", "correlation_id"} {
+		if strings.Contains(out, redundant) {
+			t.Fatalf("compact log leaked %s: %s", redundant, out)
+		}
+	}
+}
+
 func TestPolicyCLIAddCheckRemove(t *testing.T) {
 	t.Setenv("RELAY_CONFIG_DIR", t.TempDir())
 	a := New()

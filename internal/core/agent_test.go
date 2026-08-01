@@ -79,6 +79,19 @@ func TestArgvForWaitAndDone(t *testing.T) {
 	}
 }
 
+func TestManagedStartHasNoDuplicateWait(t *testing.T) {
+	managed := AgentResponse{Next: "stale", Argv: []string{"stale"}}
+	setStartContinuation(&managed, "ho-1", true)
+	if !managed.Managed || managed.Next != "" || managed.Argv != nil {
+		t.Fatalf("managed continuation = %+v", managed)
+	}
+	unmanaged := AgentResponse{}
+	setStartContinuation(&unmanaged, "ho-2", false)
+	if unmanaged.Managed || unmanaged.Next != "wait" || strings.Join(unmanaged.Argv, " ") != "relay agent wait ho-2" {
+		t.Fatalf("unmanaged continuation = %+v", unmanaged)
+	}
+}
+
 func TestAgentRestartOptionsPreserveDurableGoalSpec(t *testing.T) {
 	t.Setenv("RELAY_STATE_DIR", t.TempDir())
 	reg := &Registry{}

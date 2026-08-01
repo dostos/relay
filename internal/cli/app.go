@@ -381,6 +381,10 @@ func (a *App) Run(args []string) int {
 		return a.cmdMsg(ctx, filtered[1:])
 	case "parent":
 		return a.cmdParent(ctx, filtered[1:])
+	case "resolve":
+		return a.cmdResolve(ctx, filtered[1:])
+	case "log":
+		return a.cmdCommunicationLog(filtered[1:])
 	case "policy":
 		return a.cmdPolicy(filtered[1:])
 	case "signal", "hook":
@@ -474,9 +478,11 @@ Agent surface (token-efficient; always JSON; NO poll loops):
   relay agent capture ID [-n LINES]
   relay agent done ID [--outcome done|failed|abandoned] [--keep-session]
   relay agent status ID
-  # Follow response.next / response.argv. Never events tail -f in a loop.
+  relay resolve MESSAGE [--] DECISION                        # the only response handshake
+  relay log [CURSOR]                                         # new compact manager context
+  # Managed starts have no follow-up; execute response.argv only when present.
   # Agents may also DECLARE state instead of going idle: emit kind
-  # ask|note|progress|result (with meta.q/text) and 'agent wait' surfaces it.
+  # ask|note|progress|result (with meta.q/text); the parent watcher surfaces it.
 
 Long-lived goal orchestration (durable compact inbox + guarded local-pane cleanup):
   relay parent register [--surface REF] [--name NAME] [--repo DIR ...] [--wake inject|notify]
@@ -484,12 +490,6 @@ Long-lived goal orchestration (durable compact inbox + guarded local-pane cleanu
   relay parent link PARENT HANDOFF             # adopt an already-running goal
   relay parent move PARENT HANDOFF             # explicitly repair a wrong parent edge
   relay parent list
-  relay parent inbox PARENT [--all]
-  relay parent log PARENT [--after CURSOR] [--limit N] [--handoff ID]
-                                      Read only new compact goal transitions.
-  relay parent sweep PARENT                  # ack stale notices from terminal children
-  relay parent reply MESSAGE [--] TEXT
-  relay parent ack MESSAGE
   relay parent state PARENT active|idle|complete
   relay parent status ID
   relay parent retire ID [--dry-run]
@@ -1943,6 +1943,81 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 	}
 }
 
+// cmdResolve is the sole agent-facing response operation. A question needs
+// one decision; informational child events acknowledge themselves on delivery.
+func (a *App) cmdResolve(ctx context.Context, args []string) int {
+	a.JSON = true
+	a.CompactJSON = true
+	messageID, decision := parentMessageArgs(args)
+	if messageID == "" || decision == "" {
+		return a.fail(fmt.Errorf("usage: relay resolve MESSAGE [--] DECISION"))
+	}
+	msg, err := a.Parents.FindMessage(messageID)
+	if err != nil {
+		return a.fail(err)
+	}
+	if err := authorizeParentCaller(msg.ParentSessionID); err != nil {
+		return a.fail(err)
+	}
+	resolved, err := a.Parents.Reply(ctx, messageID, decision)
+	if err != nil {
+		return a.fail(err)
+	}
+	return a.errOut(a.out(map[string]any{"ok": true, "state": resolved.State}))
+}
+
+// cmdCommunicationLog infers the manager identity from the authenticated
+// bridge source. Agents carry only a numeric cursor, never a parent session ID.
+func (a *App) cmdCommunicationLog(args []string) int {
+	a.JSON = true
+	a.CompactJSON = true
+	if len(args) > 1 {
+		return a.fail(fmt.Errorf("usage: relay log [CURSOR]"))
+	}
+	var after int64
+	if len(args) == 1 {
+		var err error
+		after, err = strconv.ParseInt(args[0], 10, 64)
+		if err != nil || after < 0 {
+			return a.fail(fmt.Errorf("invalid cursor %q", args[0]))
+		}
+	}
+	parentID, err := a.currentParentID()
+	if err != nil {
+		return a.fail(err)
+	}
+	page, err := core.LoadCommunicationPage(parentID, "", after, 20)
+	if err != nil {
+		return a.fail(err)
+	}
+	return a.errOut(a.out(map[string]any{"events": page.Entries, "next": page.NextAfter, "more": page.HasMore}))
+}
+
+func (a *App) currentParentID() (string, error) {
+	for _, key := range []string{bridge.SourceSessionEnv, "RELAY_SESSION_ID"} {
+		if id := strings.TrimSpace(os.Getenv(key)); id != "" {
+			if err := authorizeParentCaller(id); err != nil {
+				return "", err
+			}
+			return id, nil
+		}
+	}
+	surface, err := core.CurrentSurface()
+	if err != nil {
+		return "", fmt.Errorf("cannot infer manager session: %w", err)
+	}
+	sessions, err := a.Reg.ListSessions()
+	if err != nil {
+		return "", err
+	}
+	for _, session := range sessions {
+		if session.VizSurfaceRef == surface && session.Labels["role"] == core.ParentRole {
+			return session.ID, nil
+		}
+	}
+	return "", fmt.Errorf("current pane %s is not a Relay manager", surface)
+}
+
 func (a *App) cmdPolicy(args []string) int {
 	a.JSON = true
 	a.CompactJSON = true
@@ -2341,18 +2416,17 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 	case "protocol", "help", "--help", "-h":
 		return a.errOut(a.out(map[string]any{
 			"ok":      true,
-			"v":       1,
+			"v":       2,
 			"purpose": "long-lived goal handoff and orchestration",
 			"start":   []string{"relay", "agent", "start", "HOST", "AGENT", "--", "GOAL"},
-			"restart": []string{"relay", "agent", "restart", "HANDOFF"},
-			"resume":  []string{"relay", "agent", "status", "HANDOFF"},
-			"log":     []string{"relay", "parent", "log", "PARENT", "--after", "CURSOR"},
+			"resolve": []string{"relay", "resolve", "MESSAGE", "--", "DECISION"},
+			"log":     []string{"relay", "log", "CURSOR"},
 			"rules": []string{
-				"run response.argv once",
-				"wait timeout means stop; never poll/attach",
+				"managed start has no follow-up; hooks wake manager",
+				"run argv only when returned; wait timeout means stop",
 				"child->manager; only local root->human",
-				"inbox=decisions; log --after=delta context; no transcripts",
-				"hooks/policies handle routine events; otherwise escalate",
+				"hooks wake on input/result; result needs no ack",
+				"log is optional cursor delta; no transcripts/polling",
 			},
 		}))
 	case "pick":

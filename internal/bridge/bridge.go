@@ -228,6 +228,7 @@ func serializeInvocation(argv []string) bool {
 	if len(filtered) == 2 {
 		reserved := map[string]bool{
 			"agent": true, "handoff": true, "history": true, "help": true, "version": true, "targets": true,
+			"resolve": true, "log": true,
 		}
 		if !reserved[filtered[0]] {
 			return true
@@ -235,6 +236,9 @@ func serializeInvocation(argv []string) bool {
 	}
 	if len(filtered) < 2 {
 		return false
+	}
+	if filtered[0] == "resolve" {
+		return true
 	}
 	switch filtered[0] + " " + filtered[1] {
 	case "agent start", "agent done", "handoff finalize", "handoff reconcile", "parent reply", "parent ack", "parent state", "parent retire":
@@ -288,6 +292,7 @@ func validateArgv(argv []string) error {
 		"handoff": true, "agent": true, "parent": true, "policy": true, "msg": true, "gc": true, "events": true,
 		"viz": true, "pane": true, "resume": true, "doctor": true, "history": true,
 		"help": true, "version": true, "install-cmux-restore": true,
+		"resolve": true, "log": true,
 	}
 	if len(filtered) == 2 && !reserved[filtered[0]] && !strings.HasPrefix(filtered[0], "-") && !strings.HasPrefix(filtered[1], "-") {
 		return nil
@@ -304,7 +309,7 @@ func validateArgv(argv []string) error {
 			return fmt.Errorf("relay parent %q is not allowed through the desktop bridge", filtered[1])
 		}
 		return nil
-	case "agent", "handoff", "history", "help", "version", "targets":
+	case "agent", "handoff", "history", "help", "version", "targets", "resolve", "log":
 		return nil
 	default:
 		return fmt.Errorf("relay command %q is not allowed through the desktop bridge", filtered[0])

@@ -20,7 +20,7 @@ import (
 	"github.com/dostos/relay/internal/shellquote"
 )
 
-const parentTextLimit = 640
+const parentTextLimit = 320
 
 type ParentMessageState string
 
@@ -74,11 +74,11 @@ type ParentInboxItem struct {
 }
 
 func CompactParentMessage(msg *ParentMessage, includeState bool) ParentInboxItem {
-	next := "ack"
-	argv := []string{"relay", "parent", "ack", msg.ID}
+	next := ""
+	var argv []string
 	if msg.Kind == "ask" || msg.Kind == "permission_required" {
-		next = "reply"
-		argv = []string{"relay", "parent", "reply", msg.ID, "--", "<decision>"}
+		next = "resolve"
+		argv = []string{"relay", "resolve", msg.ID, "--", "<decision>"}
 	}
 	item := ParentInboxItem{
 		ID: msg.ID, HandoffID: msg.HandoffID, ChildSessionID: msg.ChildSessionID,
@@ -641,7 +641,7 @@ func (p *ParentService) deliverMessage(ctx context.Context, parent *Session, ho 
 	if child, err := p.Reg.GetSession(ho.SessionID); err == nil {
 		childName = child.Persist.Name + "@" + ho.HostID
 	}
-	action := "ack"
+	action := ""
 	if attentionMessage(msg.Kind) {
 		action = "reply"
 	}
@@ -659,6 +659,13 @@ func (p *ParentService) deliverMessage(ctx context.Context, parent *Session, ho 
 	}
 	now := time.Now().UTC()
 	msg.DeliveredAt = &now
+	// Results and exits are receipts, not questions. Successful injection is
+	// their delivery acknowledgement; making the manager run a second command
+	// adds no information and doubles the orchestration traffic.
+	if !attentionMessage(msg.Kind) {
+		msg.State = ParentMessageAcked
+		msg.AckedAt = &now
+	}
 	return writeParentMessage(msg, false)
 }
 
@@ -782,7 +789,11 @@ func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coo
 		}
 		return nil, err
 	}
-	_ = AppendCommunication(msg, "request", "")
+	logAction := "event"
+	if attentionMessage(msg.Kind) {
+		logAction = "request"
+	}
+	_ = AppendCommunication(msg, logAction, "")
 	if handled, decided := p.applyPolicy(ctx, ho, ev, msg); decided {
 		return handled, nil
 	}
@@ -844,11 +855,10 @@ func (p *ParentService) applyPolicy(ctx context.Context, ho *Handoff, ev coord.E
 
 func FormatParentNotice(n ParentNotice) string {
 	text := compactText(n.Text)
-	suffix := ""
 	if n.Action == "reply" {
-		suffix = " <decision>"
+		return fmt.Sprintf("[relay %s %s %s %s] %s | relay resolve %s <decision>", n.Kind, n.MessageID, n.Child, n.HandoffID, text, n.MessageID)
 	}
-	return fmt.Sprintf("[relay %s %s child=%s handoff=%s] %s | relay parent %s %s%s", n.Kind, n.MessageID, n.Child, n.HandoffID, text, n.Action, n.MessageID, suffix)
+	return fmt.Sprintf("[relay %s %s %s] %s", n.Kind, n.Child, n.HandoffID, text)
 }
 
 func (p *ParentService) Watch(ctx context.Context, handoffID string) error {
@@ -984,7 +994,7 @@ func (p *ParentService) Reply(ctx context.Context, messageID, text string) (*Par
 	ho.Status = StatusRunning
 	ho.UpdatedAt = now
 	_ = p.Reg.PutHandoff(ho)
-	_ = AppendCommunication(msg, "reply", text)
+	_ = AppendCommunication(msg, "resolve", text)
 	if p.Coord != nil && p.NewTransport != nil {
 		if child, getErr := p.Reg.GetSession(msg.ChildSessionID); getErr == nil {
 			if t, transportErr := p.NewTransport(child.HostID); transportErr == nil {
@@ -1179,7 +1189,7 @@ func AppendCommunication(msg *ParentMessage, action, text string) error {
 		"parent_session_id": msg.ParentSessionID, "child_session_id": msg.ChildSessionID,
 		"handoff_id": msg.HandoffID, "kind": msg.Kind, "event_seq": msg.EventSeq,
 	}
-	if text == "" && action == "request" {
+	if text == "" && (action == "request" || action == "event") {
 		text = msg.Text
 	}
 	if summary := communicationSummary(text); summary != "" {

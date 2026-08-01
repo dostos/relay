@@ -55,7 +55,7 @@ func TestCommunicationPageIsCompactAndCursorBased(t *testing.T) {
 	if err := AppendCommunication(first, "request", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := AppendCommunication(first, "reply", "continue with observability only"); err != nil {
+	if err := AppendCommunication(first, "resolve", "continue with observability only"); err != nil {
 		t.Fatal(err)
 	}
 	if err := AppendCommunication(&ParentMessage{
@@ -75,12 +75,41 @@ func TestCommunicationPageIsCompactAndCursorBased(t *testing.T) {
 	}
 
 	next, err := LoadCommunicationPage("sess-parent", "ho-1", page.NextAfter, 20)
-	if err != nil || len(next.Entries) != 1 || next.Entries[0].Action != "reply" || next.NextAfter != 3 || next.HasMore {
+	if err != nil || len(next.Entries) != 1 || next.Entries[0].Action != "resolve" || next.NextAfter != 3 || next.HasMore {
 		t.Fatalf("next page=%+v err=%v", next, err)
 	}
 	empty, err := LoadCommunicationPage("sess-parent", "", next.NextAfter, 20)
 	if err != nil || len(empty.Entries) != 0 || empty.NextAfter != 3 {
 		t.Fatalf("empty page=%+v err=%v", empty, err)
+	}
+}
+
+func TestCommunicationPageHidesAcknowledgementMechanics(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	dropped := &ParentMessage{
+		ID: "pm-drop", CorrelationID: "pm-drop", ParentSessionID: "sess-parent",
+		ChildSessionID: "sess-child", HandoffID: "ho-1", Kind: "exit", Text: "duplicate exit",
+	}
+	if err := AppendCommunication(dropped, "event", ""); err != nil {
+		t.Fatal(err)
+	}
+	dropped.PolicyID, dropped.AutoHandled = "builtin.coalesce_result_exit", true
+	if err := AppendCommunication(dropped, "ack", ""); err != nil {
+		t.Fatal(err)
+	}
+	result := &ParentMessage{
+		ID: "pm-result", CorrelationID: "pm-result", ParentSessionID: "sess-parent",
+		ChildSessionID: "sess-child", HandoffID: "ho-1", Kind: "result", Text: "done",
+	}
+	if err := AppendCommunication(result, "event", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendCommunication(result, "ack", ""); err != nil {
+		t.Fatal(err)
+	}
+	page, err := LoadCommunicationPage("sess-parent", "", 0, 20)
+	if err != nil || len(page.Entries) != 1 || page.Entries[0].MessageID != "pm-result" || page.NextAfter != 4 {
+		t.Fatalf("page=%+v err=%v", page, err)
 	}
 }
 

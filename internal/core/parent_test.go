@@ -237,7 +237,7 @@ func TestRemoteManagerReceivesChildEventWithoutHumanNotification(t *testing.T) {
 	if msg.ParentSessionID != manager.ID || len(notifier.notices) != 0 {
 		t.Fatalf("event escaped immediate manager: msg=%+v human_notices=%d", msg, len(notifier.notices))
 	}
-	if len(recorder.sent) != 1 || !strings.Contains(recorder.sent[0], "relay parent reply "+msg.ID) {
+	if len(recorder.sent) != 1 || !strings.Contains(recorder.sent[0], "relay resolve "+msg.ID) {
 		t.Fatalf("manager delivery = %v", recorder.sent)
 	}
 }
@@ -335,8 +335,12 @@ func TestDisconnectedParentRetriesOneDurableAttentionEnvelope(t *testing.T) {
 
 func TestFormatParentNoticeQualifiesRemoteHandoff(t *testing.T) {
 	got := FormatParentNotice(ParentNotice{MessageID: "pm-1", HandoffID: "ho-1", Kind: "ask", Child: "worker@cancun", Text: "inspect remote", Action: "reply"})
-	if !strings.Contains(got, "child=worker@cancun handoff=ho-1") || !strings.Contains(got, "relay parent reply pm-1") {
+	if !strings.Contains(got, "worker@cancun ho-1") || !strings.Contains(got, "relay resolve pm-1") {
 		t.Fatalf("notice lacks remote routing context: %q", got)
+	}
+	receipt := FormatParentNotice(ParentNotice{MessageID: "pm-2", HandoffID: "ho-1", Kind: "result", Child: "worker@cancun", Text: "done"})
+	if strings.Contains(receipt, "resolve") || strings.Contains(receipt, "pm-2") || receipt != "[relay result worker@cancun ho-1] done" {
+		t.Fatalf("receipt created a handshake: %q", receipt)
 	}
 }
 
@@ -556,10 +560,14 @@ func TestRouteChildEventSupportsAllGoalControlKinds(t *testing.T) {
 		if err != nil {
 			t.Fatalf("route %s: %v", kind, err)
 		}
-		if msg.Kind != kind || msg.CorrelationID != correlation || msg.State != ParentMessagePending {
+		wantState := ParentMessagePending
+		if kind == "result" || kind == "exit" {
+			wantState = ParentMessageAcked
+		}
+		if msg.Kind != kind || msg.CorrelationID != correlation || msg.State != wantState {
 			t.Fatalf("%s message = %+v", kind, msg)
 		}
-		wantAction := "ack"
+		wantAction := ""
 		if kind == "ask" || kind == "permission_required" {
 			wantAction = "reply"
 		}
@@ -572,7 +580,7 @@ func TestRouteChildEventSupportsAllGoalControlKinds(t *testing.T) {
 	}
 }
 
-func TestReplyAndAckCloseInboxWithCorrelatedHistory(t *testing.T) {
+func TestResolveAndDeliveryCloseInboxWithCorrelatedHistory(t *testing.T) {
 	service, _, reg := newParentTestService(t)
 	now := time.Now().UTC()
 	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "local"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
@@ -591,16 +599,15 @@ func TestReplyAndAckCloseInboxWithCorrelatedHistory(t *testing.T) {
 		t.Fatalf("replied handoff=%+v err=%v", storedHandoff, err)
 	}
 	result, _ := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 2, Kind: "result", Meta: map[string]any{"text": "done"}})
-	acked, err := service.Ack(result.ID)
-	if err != nil || acked.State != ParentMessageAcked {
-		t.Fatalf("ack=%+v err=%v", acked, err)
+	if result.State != ParentMessageAcked || result.AckedAt == nil {
+		t.Fatalf("result was not closed on delivery: %+v", result)
 	}
 	pending, _ := service.ListMessages(parent.ID, true)
 	if len(pending) != 0 {
 		t.Fatalf("pending = %+v", pending)
 	}
 	graph, _ := LoadHistory()
-	if len(graph.Communications) != 4 {
+	if len(graph.Communications) != 3 || graph.Communications[1].Action != "resolve" || graph.Communications[2].Action != "event" {
 		t.Fatalf("communications = %+v", graph.Communications)
 	}
 }
@@ -749,7 +756,7 @@ func TestCompactParentMessageOmitsDurableRoutingMetadata(t *testing.T) {
 			t.Fatalf("compact inbox leaked %s: %s", redundant, text)
 		}
 	}
-	if item.Next != "reply" || len(item.Argv) == 0 || item.Argv[len(item.Argv)-1] != "<decision>" {
+	if item.Next != "resolve" || len(item.Argv) == 0 || item.Argv[1] != "resolve" || item.Argv[len(item.Argv)-1] != "<decision>" {
 		t.Fatalf("compact inbox omitted executable decision: %s", text)
 	}
 	if len(raw) > 300 {

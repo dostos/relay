@@ -9,7 +9,7 @@ import (
 )
 
 // AgentResponse is the token-efficient JSON contract for `relay agent`.
-// Orchestrators follow Next/Argv — no skill rediscovery, no event poll loops.
+// Managed handoffs need no follow-up; unmanaged callers execute Argv once.
 type AgentResponse struct {
 	OK        bool           `json:"ok"`
 	V         int            `json:"v"`
@@ -21,8 +21,9 @@ type AgentResponse struct {
 	LastSeq   int64          `json:"last_seq,omitempty"`
 	Event     *AgentEvent    `json:"event,omitempty"`
 	TimedOut  bool           `json:"timed_out,omitempty"`
+	Managed   bool           `json:"managed,omitempty"`
 	Text      string         `json:"text,omitempty"`
-	Next      string         `json:"next,omitempty"` // wait|send|capture|done|escalate|null
+	Next      string         `json:"next,omitempty"` // unmanaged/recovery continuation
 	Argv      []string       `json:"argv,omitempty"`
 	Error     string         `json:"error,omitempty"`
 	Extra     map[string]any `json:"extra,omitempty"`
@@ -128,6 +129,16 @@ func argvFor(next, handoffID string) []string {
 	}
 }
 
+func setStartContinuation(resp *AgentResponse, handoffID string, managed bool) {
+	resp.Managed = managed
+	resp.Next = ""
+	resp.Argv = nil
+	if !managed {
+		resp.Next = "wait"
+		resp.Argv = argvFor("wait", handoffID)
+	}
+}
+
 func (h *HandoffService) agentBase(ho *Handoff) AgentResponse {
 	return AgentResponse{
 		OK:        true,
@@ -137,7 +148,9 @@ func (h *HandoffService) agentBase(ho *Handoff) AgentResponse {
 	}
 }
 
-// AgentStart launches a handoff and returns next=wait (never suggests tail -f loops).
+// AgentStart launches a handoff. Hierarchical children are owned by the
+// detached parent watcher, so their manager gets no duplicate wait command.
+// Unmanaged callers retain the one-shot wait continuation.
 func (h *HandoffService) AgentStart(ctx context.Context, opts HandoffOpts) (*AgentResponse, error) {
 	b, ho, err := h.Launch(ctx, opts)
 	if err != nil {
@@ -148,8 +161,7 @@ func (h *HandoffService) AgentStart(ctx context.Context, opts HandoffOpts) (*Age
 	resp.HostID = ho.HostID
 	resp.Kind = string(ho.Kind)
 	resp.Status = string(ho.Status)
-	resp.Next = "wait"
-	resp.Argv = argvFor("wait", ho.ID)
+	setStartContinuation(&resp, ho.ID, opts.SourceSessionID != "")
 	if b != nil {
 		resp.Extra = map[string]any{"pane": b.Pane}
 	}

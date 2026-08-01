@@ -93,16 +93,14 @@ relay parent register --name personal-db-main --repo ./projects/infrastructure/w
 relay parent bind sess-… --surface surface:…  # cmux restarted the root pane
 relay parent link sess-… ho-…        # adopt existing work
 relay parent move sess-… ho-…        # explicitly repair a wrong parent edge
-relay parent inbox sess-…            # compact, cursor-free durable inbox
-relay parent log sess-… --after 0    # append-only compact communication delta
-relay parent reply pm-… approve
-relay parent ack pm-…
+relay resolve pm-… -- approve         # the only decision handshake
+relay log 0                            # optional compact delta; save returned cursor
 ```
 
 This is a durable control plane for **long-lived, goal-based handoff and
 orchestration**, not a transcript or chat bus. Correlated control envelopes
 survive agent exits, SSH reconnects, nested relays, and cmux restarts until the
-goal is answered, acknowledged, and terminal.
+goal is resolved and terminal.
 
 The lineage is a strict management tree. A child can address only its
 authenticated immediate parent. Remote parents are agent managers: they
@@ -128,10 +126,20 @@ it never replays the sensor samples.
 No transcript is forwarded and no Relay instruction is added to the child
 goal. Set `relay_hooks: off` only when an agent runtime cannot execute hooks.
 
-Managers that need durable context use `relay parent log PARENT --after N` and
-persist the returned `next_after`. The log records only meaningful request,
-reply, acknowledgement, result, and policy transitions with a bounded summary;
-it never stores or replays a conversation transcript or idle sensor samples.
+Managers that need durable context use `relay log N` and persist the returned
+`next` cursor. The authenticated session supplies the parent identity. The log
+records only meaningful request, resolution, result, and policy transitions
+with a bounded summary; it never stores or replays a conversation transcript or
+idle sensor samples.
+
+Informational `result` and `exit` events acknowledge themselves after successful
+delivery. Only unresolved input reaches a manager, and it takes one
+`relay resolve` call to continue the child; there is no receipt acknowledgement
+round trip.
+
+A handoff launched inside the hierarchy returns `managed: true` and no
+`next`/`argv`: Relay's detached watcher already owns the wait. This prevents a
+parent agent from starting a second blocking wait against the same child.
 
 The desktop policy gate removes redundant hook/fallback pings automatically
 and can answer stable CLI prompts with explicit literal-guarded rules. It
@@ -152,7 +160,7 @@ relay policy remove cursor-read
 
 All `--contains` literals must match, case-insensitively. Policies are
 desktop-local in `~/.config/relay/policy.yaml`; automatic decisions remain
-auditable with `relay parent inbox PARENT --all`. Built-ins coalesce repeated
+auditable in the communication log. Built-ins coalesce repeated
 idle samples while one ask/permission decision is pending, a tmux-idle
 fallback after an outstanding permission event, and an `exit` shortly after a
 `result`; they never grant permission themselves.
@@ -165,7 +173,7 @@ relay parent status sess-…                # dry-run reasons
 relay parent retire sess-…                # closes only when eligible
 ```
 
-Retirement requires every child terminal, the inbox acknowledged/replied, all
+Retirement requires every child terminal, no unresolved input, all
 scoped Git roots clean with no commits ahead of upstream, and an explicit
 `idle` or `complete` parent state. `session destroy` cannot bypass this gate.
 

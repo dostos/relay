@@ -46,7 +46,7 @@ func TestRejectInteractiveForward(t *testing.T) {
 
 func TestBridgeAllowlist(t *testing.T) {
 	for _, argv := range [][]string{
-		{"c1", "named"}, {"agent", "start", "c1", "codex", "--", "x"}, {"parent", "reply", "pm-1", "yes"}, {"--json", "history"},
+		{"c1", "named"}, {"agent", "start", "c1", "codex", "--", "x"}, {"resolve", "pm-1", "yes"}, {"log", "0"}, {"--json", "history"},
 	} {
 		if err := validateArgv(argv); err != nil {
 			t.Fatalf("expected %v to be allowed: %v", argv, err)
@@ -76,12 +76,12 @@ func TestDesktopInvokeEnvDropsStaleCmuxCaller(t *testing.T) {
 }
 
 func TestSerializeInvocationDoesNotBlockWaits(t *testing.T) {
-	for _, argv := range [][]string{{"c1", "named"}, {"agent", "start", "c1", "codex", "--", "x"}, {"agent", "done", "ho-1"}, {"parent", "reply", "pm-1", "yes"}} {
+	for _, argv := range [][]string{{"c1", "named"}, {"agent", "start", "c1", "codex", "--", "x"}, {"agent", "done", "ho-1"}, {"resolve", "pm-1", "yes"}} {
 		if !serializeInvocation(argv) {
 			t.Fatalf("expected %v to serialize", argv)
 		}
 	}
-	for _, argv := range [][]string{{"agent", "wait", "ho-1"}, {"agent", "capture", "ho-1"}, {"history"}} {
+	for _, argv := range [][]string{{"agent", "wait", "ho-1"}, {"agent", "capture", "ho-1"}, {"log", "0"}, {"history"}} {
 		if serializeInvocation(argv) {
 			t.Fatalf("expected %v not to serialize", argv)
 		}

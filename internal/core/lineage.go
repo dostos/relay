@@ -387,8 +387,22 @@ func LoadCommunicationPage(parentID, handoffID string, after int64, limit int) (
 		return nil, err
 	}
 	page := &CommunicationPage{Entries: []CommunicationEntry{}, NextAfter: after}
+	autoDropped := map[string]bool{}
+	for _, entry := range graph.Communications {
+		if entry.Action == "ack" && entry.AutoHandled {
+			autoDropped[entry.MessageID] = true
+		}
+	}
 	for _, entry := range graph.Communications {
 		if entry.Seq <= after {
+			continue
+		}
+		// Acknowledgements are storage mechanics, not manager context. When a
+		// built-in coalesces a message, hide both sides of that no-op transition.
+		if entry.Action == "ack" || autoDropped[entry.MessageID] {
+			if entry.Seq > page.NextAfter {
+				page.NextAfter = entry.Seq
+			}
 			continue
 		}
 		if entry.ParentSessionID != parentID || (handoffID != "" && entry.HandoffID != handoffID) {
@@ -402,11 +416,14 @@ func LoadCommunicationPage(parentID, handoffID string, after int64, limit int) (
 			break
 		}
 		page.Entries = append(page.Entries, CommunicationEntry{
-			Seq: entry.Seq, MessageID: entry.MessageID, CorrelationID: entry.CorrelationID,
+			Seq: entry.Seq, MessageID: entry.MessageID,
 			ChildSession: entry.ChildSessionID, HandoffID: entry.HandoffID,
 			Kind: entry.Kind, Action: entry.Action, Summary: entry.Summary,
 			PolicyID: entry.PolicyID, AutoHandled: entry.AutoHandled,
 		})
+		if entry.CorrelationID != entry.MessageID {
+			page.Entries[len(page.Entries)-1].CorrelationID = entry.CorrelationID
+		}
 		page.NextAfter = entry.Seq
 	}
 	return page, nil
