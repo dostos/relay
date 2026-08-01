@@ -2536,12 +2536,14 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 			"start":   []string{"relay", "agent", "start", "HOST", "AGENT", "--", "GOAL"},
 			"resolve": []string{"relay", "resolve", "MESSAGE", "--", "DECISION"},
 			"log":     []string{"relay", "log", "CURSOR"},
+			"board":   []string{"relay", "board", "query", "-c", "CATEGORY"},
 			"rules": []string{
 				"managed start has no follow-up; hooks wake manager",
 				"run argv only when returned; wait timeout means stop",
 				"child->manager; only local root->human",
 				"hooks wake on input/result; result needs no ack",
 				"log is optional cursor delta; no transcripts/polling",
+				"board=peer state; post -k KEY -- TEXT; query folds latest",
 			},
 		}))
 	case "pick":
