@@ -124,6 +124,7 @@ categorized surface for status, resources, and artifacts:
 ```bash
 relay board post -c status -k phase -- "scoring, 40% done"
 relay board query -c status          # peers' current state, compact JSON
+relay board query -c status --subtree # a manager's whole subtree, one call
 relay board watch -c status          # zero-token wait for the next update
 ```
 
