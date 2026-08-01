@@ -73,14 +73,6 @@ func ClassifyAgentPane(capture string) AgentReadiness {
 	}
 	tail := strings.ToLower(strings.Join(lines, "\n"))
 
-	for _, gate := range securityGates {
-		if strings.Contains(tail, gate.marker) {
-			return AgentReadiness{State: AgentBlocked, Reason: gate.reason}
-		}
-	}
-
-	// A trailing shell prompt with nothing after it means the agent exited or
-	// was never started.
 	last := ""
 	for i := len(lines) - 1; i >= 0; i-- {
 		if strings.TrimSpace(lines[i]) != "" {
@@ -88,9 +80,24 @@ func ClassifyAgentPane(capture string) AgentReadiness {
 			break
 		}
 	}
+
+	// A trailing shell prompt decides first. A LIVE gate always leaves the
+	// cursor at its own prompt, never back at a shell — so if the shell has the
+	// last word, any gate text above it is scrollback from a prompt that has
+	// already been answered or abandoned. Checking gates first made stale text
+	// mask a stopped agent indefinitely.
 	for _, p := range shellPrompts {
 		if strings.HasSuffix(last, p) || strings.HasSuffix(strings.TrimRight(last, " "), strings.TrimSpace(p)) {
 			return AgentReadiness{State: AgentAbsent, Reason: "pane is at a shell prompt; no agent running"}
+		}
+	}
+
+	// Otherwise a gate still wins over anything else in the tail: treating a
+	// pending security prompt as merely "absent" would invite an automation to
+	// relaunch on top of a decision the human has not made.
+	for _, gate := range securityGates {
+		if strings.Contains(tail, gate.marker) {
+			return AgentReadiness{State: AgentBlocked, Reason: gate.reason}
 		}
 	}
 	return AgentReadiness{State: AgentReady}

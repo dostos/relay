@@ -84,3 +84,19 @@ dostos@Jingyu-Home:~$ claude
 		t.Fatalf("a pending gate must win over scrollback, got %+v", got)
 	}
 }
+
+// Stale gate text in scrollback must not mask a stopped agent. A live gate
+// always leaves the cursor at its own prompt, so a trailing shell prompt means
+// the gate is history and the agent is gone.
+func TestStaleGateInScrollbackDoesNotMaskAStoppedAgent(t *testing.T) {
+	got := ClassifyAgentPane(`
+   ❯ 1. Yes, I trust this folder
+     2. No, exit
+   Enter to confirm · Esc to cancel
+  Resume this session with:
+  claude --resume 376af40c-7afa-45bd-bbc8-9c1b1b403903
+dostos@Jingyu-Home:~/dev/dostos-workspace$ `)
+	if got.State != AgentAbsent {
+		t.Fatalf("a stopped agent must read as absent, not %+v", got)
+	}
+}
