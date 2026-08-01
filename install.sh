@@ -38,7 +38,7 @@ if [[ -d "$WATCH_DIR" ]]; then
         done
       fi
     fi
-    nohup "$INSTALL_DIR/relay" --json parent watch "$handoff_id" >> "$WATCH_DIR/$handoff_id.log" 2>&1 &
+    "$INSTALL_DIR/relay" --json parent watch "$handoff_id" --detach >/dev/null 2>&1 || true
     watchers_refreshed=$((watchers_refreshed + 1))
   done
   shopt -u nullglob

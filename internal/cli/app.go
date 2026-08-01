@@ -1877,10 +1877,14 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		}
 		return a.errOut(a.out(map[string]any{"ok": true, "retirement": gate}))
 	case "watch":
-		if len(args) != 2 || strings.HasPrefix(args[1], "-") {
-			return a.fail(fmt.Errorf("usage: relay parent watch HANDOFF"))
+		if len(args) < 2 || len(args) > 3 || strings.HasPrefix(args[1], "-") || (len(args) == 3 && args[2] != "--detach") {
+			return a.fail(fmt.Errorf("usage: relay parent watch HANDOFF [--detach]"))
 		}
 		handoffID := args[1]
+		if len(args) == 3 {
+			a.startParentWatcher(handoffID)
+			return a.errOut(a.out(map[string]any{"ok": true, "handoff_id": handoffID, "watcher": "started"}))
+		}
 		if err := a.Parents.Watch(ctx, handoffID); err != nil && ctx.Err() == nil {
 			return a.fail(err)
 		}
