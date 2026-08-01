@@ -763,3 +763,42 @@ func TestCompactParentMessageOmitsDurableRoutingMetadata(t *testing.T) {
 		t.Fatalf("compact inbox item is not compact: %d bytes: %s", len(raw), raw)
 	}
 }
+
+func TestParentMessageCarriesFailoverAttribution(t *testing.T) {
+	msg := &ParentMessage{
+		V: 1, ID: "pm-x", ParentSessionID: "sess-root",
+		IntendedParentSessionID: "sess-mid",
+		SkippedSessionIDs:       []string{"sess-mid"},
+		ResolvedBySessionID:     "sess-root",
+	}
+	raw, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back ParentMessage
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.IntendedParentSessionID != "sess-mid" {
+		t.Fatalf("intended parent lost: %+v", back)
+	}
+	if len(back.SkippedSessionIDs) != 1 || back.SkippedSessionIDs[0] != "sess-mid" {
+		t.Fatalf("skipped ids lost: %+v", back)
+	}
+	if back.ResolvedBySessionID != "sess-root" {
+		t.Fatalf("resolver lost: %+v", back)
+	}
+}
+
+func TestParentMessageOmitsFailoverFieldsWhenDeliveredDirectly(t *testing.T) {
+	msg := &ParentMessage{V: 1, ID: "pm-y", ParentSessionID: "sess-root"}
+	raw, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"intended_parent_session_id", "skipped_session_ids", "resolved_by_session_id"} {
+		if strings.Contains(string(raw), field) {
+			t.Fatalf("field %s must be omitted when empty: %s", field, raw)
+		}
+	}
+}
