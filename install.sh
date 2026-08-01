@@ -21,6 +21,39 @@ echo "installed $INSTALL_DIR/relay $INSTALL_DIR/relayd"
 # Recycle them so inbox deduplication and reconnect behavior change atomically
 # with the installed CLI instead of only after the next handoff.
 STATE_ROOT="${RELAY_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/relay}"
+# The desktop bridge is a long-lived relayd process that keeps running the OLD
+# executable image after an upgrade, so its command allowlist silently lags the
+# installed CLI. That is how a remote agent gets "relay command X is not allowed
+# through the desktop bridge" for a command the installed binary permits — the
+# same stale-process-after-upgrade failure the watchers used to have.
+BRIDGE_SOCK="$STATE_ROOT/desktop-bridge.sock"
+if [[ -S "$BRIDGE_SOCK" ]]; then
+  bridge_pid="$(lsof -t "$BRIDGE_SOCK" 2>/dev/null | head -1 || true)"
+  if [[ -n "$bridge_pid" ]]; then
+    kill "$bridge_pid" 2>/dev/null || true
+    for _ in {1..20}; do
+      kill -0 "$bridge_pid" 2>/dev/null || break
+      sleep 0.25
+    done
+  fi
+  # Restart it on the new image. It is normally started on demand by
+  # `relay resume`, but a pane that is already attached will not re-trigger
+  # that, so leaving it down would strand every remote agent's control path.
+  nohup "$INSTALL_DIR/relayd" bridge --relay-bin "$INSTALL_DIR/relay" \
+    >> "$STATE_ROOT/desktop-bridge.log" 2>&1 &
+  disown 2>/dev/null || true
+  for _ in {1..20}; do
+    [[ -S "$BRIDGE_SOCK" ]] && lsof -t "$BRIDGE_SOCK" >/dev/null 2>&1 && break
+    sleep 0.25
+  done
+  if lsof -t "$BRIDGE_SOCK" >/dev/null 2>&1; then
+    echo "relay desktop bridge: restarted on the new binary"
+  else
+    echo "relay: WARNING - desktop bridge did not come back; remote agents cannot reach this control plane." >&2
+    echo "relay:   start it with: relayd bridge --relay-bin $INSTALL_DIR/relay &" >&2
+  fi
+fi
+
 # Watcher lifecycle belongs to `relay supervise`, not to this script. Restarting
 # N per-handoff watchers here used to race the flock of each dying watcher and
 # silently leave live handoffs unwatched. Restart the ONE supervisor instead.
