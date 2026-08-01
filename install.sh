@@ -23,28 +23,74 @@ echo "installed $INSTALL_DIR/relay $INSTALL_DIR/relayd"
 STATE_ROOT="${RELAY_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/relay}"
 WATCH_DIR="$STATE_ROOT/parent-watch"
 watchers_refreshed=0
+watchers_failed=0
+failed_handoffs=""
 if [[ -d "$WATCH_DIR" ]]; then
   shopt -s nullglob
   for lock in "$WATCH_DIR"/*.lock; do
     handoff_id="$(basename "$lock" .lock)"
+
+    # Only live handoffs need a watcher. A terminal handoff's watcher exits
+    # immediately by design, so killing and restarting it is pointless churn
+    # that also produces spurious "failed to restart" noise.
+    handoff_file="$STATE_ROOT/handoffs/$handoff_id.json"
+    [[ -f "$handoff_file" ]] || continue
+    handoff_status="$(sed -n 's/.*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$handoff_file" | head -1)"
+    case "$handoff_status" in
+      done|failed|abandoned|"") continue ;;
+    esac
+
     watcher_pid="$(tr -dc '0-9' < "$lock")"
     if [[ -n "$watcher_pid" ]] && kill -0 "$watcher_pid" 2>/dev/null; then
       watcher_cmd="$(ps -p "$watcher_pid" -o command= 2>/dev/null || true)"
       if [[ "$watcher_cmd" == *"parent watch $handoff_id"* ]]; then
+        # A watcher blocked in an SSH subscribe stream takes ~11s to honour
+        # SIGTERM (measured). The old 1s wait meant the restart raced the
+        # dying process for the flock, lost, and gave up — leaving the handoff
+        # with no watcher and its escalations silently unrouted. Wait properly,
+        # then SIGKILL so this is bounded either way.
         kill "$watcher_pid" 2>/dev/null || true
-        for _ in {1..20}; do
+        for _ in {1..60}; do
           kill -0 "$watcher_pid" 2>/dev/null || break
-          sleep 0.05
+          sleep 0.5
         done
+        if kill -0 "$watcher_pid" 2>/dev/null; then
+          kill -9 "$watcher_pid" 2>/dev/null || true
+          sleep 1
+        fi
       fi
     fi
-    "$INSTALL_DIR/relay" --json parent watch "$handoff_id" --detach >/dev/null 2>&1 || true
-    watchers_refreshed=$((watchers_refreshed + 1))
+
+    # VERIFY BY PROCESS, not by exit code: `parent watch --detach` reports
+    # success as soon as the child is spawned, so a child that then fails to
+    # take the lock exits silently while the command still returns 0.
+    watcher_started=0
+    for _ in {1..5}; do
+      "$INSTALL_DIR/relay" --json parent watch "$handoff_id" --detach >/dev/null 2>&1 || true
+      sleep 1
+      if pgrep -f "parent watch $handoff_id" >/dev/null 2>&1; then
+        watcher_started=1
+        break
+      fi
+    done
+    if (( watcher_started )); then
+      watchers_refreshed=$((watchers_refreshed + 1))
+    else
+      watchers_failed=$((watchers_failed + 1))
+      failed_handoffs="$failed_handoffs $handoff_id"
+    fi
   done
   shopt -u nullglob
 fi
 if (( watchers_refreshed > 0 )); then
   echo "relay parent watchers: refreshed $watchers_refreshed"
+fi
+# Never report success for a watcher that did not come back: a handoff with no
+# watcher routes nothing, and the failure is otherwise invisible.
+if (( watchers_failed > 0 )); then
+  echo "relay: WARNING - $watchers_failed parent watcher(s) failed to restart:$failed_handoffs" >&2
+  echo "relay: those handoffs are NOT routing escalations. Restart each with:" >&2
+  echo "relay:   relay parent watch <handoff-id> --detach" >&2
 fi
 
 # Relay's compact JSON + `next`/`argv` is the complete agent protocol. Remove
