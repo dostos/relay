@@ -111,3 +111,43 @@ func TestFreshEscalationsAreLeftAlone(t *testing.T) {
 		t.Fatalf("a fresh ask must not be reported, n=%d notices=%d", n, len(notifier.notices))
 	}
 }
+
+// A standing stall must not be re-announced every tick. Reporting twice a
+// minute forever trains the reader to ignore the channel and costs tokens for
+// zero new information.
+func TestStallIsNotReAnnouncedEveryTick(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	_, manager, _, ho := failoverTree(t, reg)
+	if err := reg.PutHandoff(ho); err != nil {
+		t.Fatal(err)
+	}
+	agedMessage(t, "pm-standing", manager.ID, ho.ID, 40*time.Minute, ParentMessagePending, "ask")
+
+	for i := 0; i < 5; i++ {
+		if _, err := service.ReportStaleEscalations(context.Background(), 15*time.Minute); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(notifier.notices) != 1 {
+		t.Fatalf("five ticks must produce one notice, got %d", len(notifier.notices))
+	}
+}
+
+// It must still get louder as it ages, so a long stall is not forgotten.
+func TestStallIsReAnnouncedOnceItHasAgedFurther(t *testing.T) {
+	now := time.Now().UTC()
+	long := now.Add(-30 * time.Minute)
+	msg := &ParentMessage{ID: "pm-x", StallReportedAt: &long}
+	// Held 2h, last told 30m ago: next report is due at held/2 = 1h, so not yet.
+	if stallDue(msg, 2*time.Hour, 15*time.Minute, now) {
+		t.Fatal("must not re-announce before the interval doubles")
+	}
+	// Held 40m, last told 30m ago: due at held/2 = 20m, so now.
+	if !stallDue(msg, 40*time.Minute, 15*time.Minute, now) {
+		t.Fatal("must re-announce once the interval has passed")
+	}
+	// Never reported: always due.
+	if !stallDue(&ParentMessage{ID: "pm-y"}, 20*time.Minute, 15*time.Minute, now) {
+		t.Fatal("a first stall must always be reported")
+	}
+}

@@ -112,7 +112,13 @@ func (p *ParentService) ReportStaleEscalations(ctx context.Context, maxHold time
 				"); it still owns the decision",
 			Action: "inspect",
 		}
+		if !stallDue(msg, item.HeldFor, maxHold, time.Now().UTC()) {
+			continue
+		}
 		if p.notifyStalled(ctx, manager, notice) == nil {
+			now := time.Now().UTC()
+			msg.StallReportedAt = &now
+			_ = writeParentMessage(msg, false)
 			reported++
 		}
 	}
@@ -129,4 +135,24 @@ func (p *ParentService) notifyStalled(ctx context.Context, manager *Session, not
 		return p.Sessions.Send(attemptCtx, manager.ID, FormatParentNotice(notice), true)
 	}
 	return nil
+}
+
+// stallDue decides whether a standing stall is worth re-announcing.
+//
+// Reporting every supervisor tick turns one stuck question into a notice twice
+// a minute, forever — which trains the reader to ignore the channel and costs
+// tokens for zero new information. Instead the interval doubles: told once at
+// the threshold, then at 2x, 4x, 8x the wait. A stall stays visible, and gets
+// louder the longer it lasts, without ever repeating itself minute to minute.
+func stallDue(msg *ParentMessage, heldFor, maxHold time.Duration, now time.Time) bool {
+	if msg.StallReportedAt == nil {
+		return true
+	}
+	sinceReport := now.Sub(*msg.StallReportedAt)
+	// Next report is due one full "held so far" later, i.e. geometric.
+	next := heldFor / 2
+	if next < maxHold {
+		next = maxHold
+	}
+	return sinceReport >= next
 }

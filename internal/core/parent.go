@@ -45,23 +45,26 @@ type ParentMessage struct {
 	ChildSessionID  string `json:"child_session_id"`
 	// Failover attribution. Empty on the common path where the immediate
 	// parent received the escalation directly.
-	IntendedParentSessionID string             `json:"intended_parent_session_id,omitempty"`
-	SkippedSessionIDs       []string           `json:"skipped_session_ids,omitempty"`
-	ResolvedBySessionID     string             `json:"resolved_by_session_id,omitempty"`
-	HandoffID               string             `json:"handoff_id"`
-	EventSeq                int64              `json:"event_seq"`
-	Kind                    string             `json:"kind"`
-	Text                    string             `json:"text,omitempty"`
-	State                   ParentMessageState `json:"state"`
-	CreatedAt               time.Time          `json:"created_at"`
-	DeliveredAt             *time.Time         `json:"delivered_at,omitempty"`
-	Reply                   string             `json:"reply,omitempty"`
-	RepliedAt               *time.Time         `json:"replied_at,omitempty"`
-	AckedAt                 *time.Time         `json:"acked_at,omitempty"`
-	PolicyID                string             `json:"policy_id,omitempty"`
-	PolicyAction            string             `json:"policy_action,omitempty"`
-	AutoHandled             bool               `json:"auto_handled,omitempty"`
-	PolicyError             string             `json:"policy_error,omitempty"`
+	IntendedParentSessionID string   `json:"intended_parent_session_id,omitempty"`
+	SkippedSessionIDs       []string `json:"skipped_session_ids,omitempty"`
+	ResolvedBySessionID     string   `json:"resolved_by_session_id,omitempty"`
+	// StallReportedAt records when this envelope's holder-manager was last told
+	// it was stuck, so a standing stall is not re-announced every tick.
+	StallReportedAt *time.Time         `json:"stall_reported_at,omitempty"`
+	HandoffID       string             `json:"handoff_id"`
+	EventSeq        int64              `json:"event_seq"`
+	Kind            string             `json:"kind"`
+	Text            string             `json:"text,omitempty"`
+	State           ParentMessageState `json:"state"`
+	CreatedAt       time.Time          `json:"created_at"`
+	DeliveredAt     *time.Time         `json:"delivered_at,omitempty"`
+	Reply           string             `json:"reply,omitempty"`
+	RepliedAt       *time.Time         `json:"replied_at,omitempty"`
+	AckedAt         *time.Time         `json:"acked_at,omitempty"`
+	PolicyID        string             `json:"policy_id,omitempty"`
+	PolicyAction    string             `json:"policy_action,omitempty"`
+	AutoHandled     bool               `json:"auto_handled,omitempty"`
+	PolicyError     string             `json:"policy_error,omitempty"`
 }
 
 // ParentInboxItem is the turn-level projection of a durable parent message.
