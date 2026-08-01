@@ -152,6 +152,23 @@ work from a session on an always-on host and declare
 `RELAY_CONTROL_PLANE_ALWAYS_ON=1` there. See
 [`docs/superpowers/specs/2026-08-01-relay-autonomous-D-control-plane-locality.md`](docs/superpowers/specs/2026-08-01-relay-autonomous-D-control-plane-locality.md).
 
+### Keeping watchers alive
+
+Each live handoff needs a watcher process to route its escalations. A handoff
+whose watcher has died looks exactly like a quiet one — nothing routes, and
+nothing says so. `relay supervise` owns that lifecycle: one long-lived process
+that reconciles live handoffs against running watchers every 30s and adopts
+anything unwatched.
+
+```bash
+relay supervise --check    # {"live":1,"ok":true,"unwatched":[]}; exit 1 if any are unwatched
+relay supervise            # the reconciler itself; run it under launchd
+```
+
+Install it with `share/launchd/com.dostos.relay-supervisor.plist` (replace the
+two `REPLACE_*` placeholders). `install.sh` then restarts that one process on
+upgrade instead of recycling every watcher individually.
+
 Escalation is vertical, but peers often need to coordinate without asking
 anyone to decide anything. The children of one manager share a **board** — a
 categorized surface for status, resources, and artifacts:
@@ -335,6 +352,7 @@ relay agent start|wait|send|capture|done    # orchestrator API
 relay parent register|inbox|reply|ack       # durable parent communication
 relay board post|query|watch                # manager-scoped peer coordination
 relay root adopt|enroll|status|digest       # always-on apex (autonomous mode)
+relay supervise [--check]                   # keep one watcher per live handoff
 relay parent status|retire                  # guarded local-pane cleanup
 relay history                               # source → destination lineage
 relay pane list                             # owned surface/workspace/pane + parent + liveness

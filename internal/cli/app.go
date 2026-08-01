@@ -412,6 +412,8 @@ func (a *App) Run(args []string) int {
 		return a.cmdBoard(ctx, filtered[1:])
 	case "root":
 		return a.cmdRoot(filtered[1:])
+	case "supervise":
+		return a.cmdSupervise(ctx, filtered[1:])
 	default:
 		if len(filtered) == 2 {
 			return a.cmdNamed(ctx, filtered[0], filtered[1])
@@ -2410,6 +2412,65 @@ func parentMessageArgs(args []string) (messageID, text string) {
 		rest = rest[1:]
 	}
 	return messageID, strings.Join(rest, " ")
+}
+
+// cmdSupervise keeps exactly one watcher running per live handoff.
+//
+// Watcher lifecycle used to belong to install.sh, which meant a watcher that
+// died for any other reason stayed dead and its handoff silently stopped
+// routing escalations. This makes it relay's job.
+func (a *App) cmdSupervise(ctx context.Context, args []string) int {
+	a.JSON = true
+	a.CompactJSON = true
+	check := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--check":
+			check = true
+		default:
+			return a.fail(rejectUnknownFlag(args[i]))
+		}
+	}
+	sup := &core.SupervisorService{
+		Reg:     a.Reg,
+		Parents: a.Parents,
+		OnEvent: func(event, handoffID string, err error) {
+			payload := map[string]any{"event": event}
+			if handoffID != "" {
+				payload["handoff_id"] = handoffID
+			}
+			if err != nil {
+				payload["error"] = err.Error()
+			}
+			_ = a.out(payload)
+		},
+	}
+	if check {
+		// Report only. Reconcile would start goroutines this process then kills
+		// on exit, which looks like success and supervises nothing.
+		sup.OnEvent = nil
+		unwatched, err := sup.Unwatched()
+		if err != nil {
+			return a.fail(err)
+		}
+		ids := make([]string, 0, len(unwatched))
+		for _, ho := range unwatched {
+			ids = append(ids, ho.ID)
+		}
+		live, _ := sup.NeedsWatch()
+		code := 0
+		if len(ids) > 0 {
+			code = 1
+		}
+		_ = a.out(map[string]any{
+			"ok": len(ids) == 0, "live": len(live), "unwatched": ids,
+		})
+		return code
+	}
+	if err := sup.Run(ctx); err != nil && ctx.Err() == nil {
+		return a.fail(err)
+	}
+	return 0
 }
 
 func (a *App) startParentWatcher(handoffID string) {
