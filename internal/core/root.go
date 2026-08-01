@@ -114,7 +114,7 @@ func (r *RootService) Adopt(sessionID string) (*Session, error) {
 		return nil, fmt.Errorf("session %s has a manager and cannot be the apex", sessionID)
 	}
 	if existing, err := r.Apex(); err == nil && existing.ID != sess.ID {
-		return nil, fmt.Errorf("apex already designated (%s); retire it first", existing.ID)
+		return nil, fmt.Errorf("apex already designated (%s); run: relay root release %s", existing.ID, existing.ID)
 	}
 	if sess.Labels == nil {
 		sess.Labels = map[string]string{}
@@ -124,6 +124,41 @@ func (r *RootService) Adopt(sessionID string) (*Session, error) {
 		return nil, err
 	}
 	return sess, nil
+}
+
+// Release un-designates the apex so a different session can take over — for
+// example moving governance from a laptop cmux pane to an always-on host.
+//
+// It refuses while roots are still enrolled. Clearing the label with roots
+// attached would leave them reporting to a session that is no longer an apex:
+// still governed by the lineage, but invisible to `root status`, which is a
+// worse state than either end of the swap.
+func (r *RootService) Release(sessionID string) (*Session, error) {
+	apex, err := r.Apex()
+	if err != nil {
+		return nil, err
+	}
+	if apex.ID != sessionID {
+		return nil, fmt.Errorf("session %s is not the apex (%s is)", sessionID, apex.ID)
+	}
+	governed, err := r.Governed()
+	if err != nil {
+		return nil, err
+	}
+	if len(governed) > 0 {
+		ids := make([]string, 0, len(governed))
+		for _, sess := range governed {
+			ids = append(ids, sess.ID)
+		}
+		return nil, fmt.Errorf(
+			"%d root(s) still enrolled (%s); unenroll them first",
+			len(ids), strings.Join(ids, ", "))
+	}
+	delete(apex.Labels, ApexLabel)
+	if err := r.Reg.PutSession(apex); err != nil {
+		return nil, err
+	}
+	return apex, nil
 }
 
 // Enroll places a root under the apex, which is what makes its subtree

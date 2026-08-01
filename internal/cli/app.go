@@ -2193,7 +2193,7 @@ func (a *App) cmdRoot(args []string) int {
 	a.JSON = true
 	a.CompactJSON = true
 	if len(args) == 0 {
-		return a.fail(fmt.Errorf("usage: relay root adopt|enroll|unenroll|status|rules|digest …"))
+		return a.fail(fmt.Errorf("usage: relay root adopt|release|enroll|unenroll|status|rules|digest …"))
 	}
 	// The digest is the human's decision queue and names every governed
 	// subtree, so it must never be readable by an arbitrary session. The bridge
@@ -2232,6 +2232,15 @@ func (a *App) cmdRoot(args []string) int {
 			return a.fail(err)
 		}
 		return a.errOut(a.out(map[string]any{"ok": true, "apex": sess.ID}))
+	case "release":
+		if positional == "" {
+			return a.fail(fmt.Errorf("usage: relay root release SESSION"))
+		}
+		sess, err := a.Roots.Release(positional)
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "released": sess.ID}))
 	case "enroll", "unenroll":
 		if positional == "" {
 			return a.fail(fmt.Errorf("usage: relay root %s SESSION", sub))
@@ -2288,7 +2297,7 @@ func (a *App) cmdRoot(args []string) int {
 		}
 		return a.errOut(a.out(digest))
 	default:
-		return a.fail(fmt.Errorf("usage: relay root adopt|enroll|unenroll|status|rules|digest …"))
+		return a.fail(fmt.Errorf("usage: relay root adopt|release|enroll|unenroll|status|rules|digest …"))
 	}
 }
 

@@ -2,6 +2,7 @@ package core
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -241,5 +242,50 @@ func TestControlPlaneDisclosesWhenGovernancePauses(t *testing.T) {
 	}
 	if cp.Warning != "" {
 		t.Fatalf("a declared always-on plane needs no warning, got %q", cp.Warning)
+	}
+}
+
+// Swapping the apex — e.g. moving governance off a laptop pane onto an
+// always-on host — must be possible. Adopt used to refuse and point at a
+// command that did not exist.
+func TestApexCanBeReleasedAndReplaced(t *testing.T) {
+	root, reg := newRootTestService(t)
+	if _, err := root.Adopt("sess-apex"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.Adopt("sess-proj-a"); err == nil {
+		t.Fatal("a second apex must be refused while one is designated")
+	}
+	if _, err := root.Release("sess-apex"); err != nil {
+		t.Fatalf("the apex must be releasable: %v", err)
+	}
+	if _, err := root.Apex(); err == nil {
+		t.Fatal("no apex should remain after release")
+	}
+	if _, err := root.Adopt("sess-proj-a"); err != nil {
+		t.Fatalf("a new apex must be adoptable after release: %v", err)
+	}
+	got, _ := reg.GetSession("sess-proj-a")
+	if got.Labels[ApexLabel] != "true" {
+		t.Fatalf("new apex not labelled: %v", got.Labels)
+	}
+}
+
+// Releasing while roots are attached would leave them reporting to a session
+// that is no longer an apex — governed by lineage but invisible to status.
+func TestReleaseRefusesWhileRootsAreEnrolled(t *testing.T) {
+	root, _ := newRootTestService(t)
+	if _, err := root.Adopt("sess-apex"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.Enroll("sess-proj-a"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := root.Release("sess-apex")
+	if err == nil {
+		t.Fatal("release must refuse while a root is enrolled")
+	}
+	if !strings.Contains(err.Error(), "sess-proj-a") {
+		t.Fatalf("the error must name what is still enrolled, got: %v", err)
 	}
 }
