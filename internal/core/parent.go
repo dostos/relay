@@ -22,6 +22,11 @@ import (
 
 const parentTextLimit = 320
 
+// deliveryAttemptTimeout bounds ONE delivery hop. SessionService.Send passes
+// the caller's context straight to the transport with no timeout of its own,
+// so without this a dead SSH host would stall the whole ancestor walk.
+const deliveryAttemptTimeout = 5 * time.Second
+
 type ParentMessageState string
 
 const (
@@ -653,9 +658,13 @@ func (p *ParentService) deliverMessage(ctx context.Context, parent *Session, ho 
 	notice := ParentNotice{MessageID: msg.ID, HandoffID: ho.ID, Kind: msg.Kind, Child: childName, Text: msg.Text, Action: action}
 	var err error
 	if isLocalParent(parent) && p.Notifier != nil {
-		err = p.Notifier.NotifyParent(ctx, parent.ID, notice)
+		attemptCtx, cancel := context.WithTimeout(ctx, deliveryAttemptTimeout)
+		err = p.Notifier.NotifyParent(attemptCtx, parent.ID, notice)
+		cancel()
 	} else if !isLocalParent(parent) && p.Sessions != nil {
-		err = p.Sessions.Send(ctx, parent.ID, FormatParentNotice(notice), true)
+		attemptCtx, cancel := context.WithTimeout(ctx, deliveryAttemptTimeout)
+		err = p.Sessions.Send(attemptCtx, parent.ID, FormatParentNotice(notice), true)
+		cancel()
 	} else {
 		err = fmt.Errorf("no delivery path for parent %s", parent.ID)
 	}

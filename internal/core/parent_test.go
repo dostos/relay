@@ -802,3 +802,36 @@ func TestParentMessageOmitsFailoverFieldsWhenDeliveredDirectly(t *testing.T) {
 		}
 	}
 }
+
+// blockingPersistence simulates a dead SSH host: Send hangs until ctx dies.
+type blockingPersistence struct {
+	renamePersistence
+}
+
+func (p *blockingPersistence) Send(ctx context.Context, _ ports.Transport, _ ports.PersistHandle, _ string, _ bool) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestDeliveryAttemptIsBounded(t *testing.T) {
+	service, _, reg := newParentTestService(t)
+	service.Sessions.Persist = &blockingPersistence{}
+	now := time.Now().UTC()
+	manager := &Session{ID: "sess-manager", HostID: "c1", Persist: ports.PersistHandle{Kind: "tmux", Name: "manager"}, CreatedAt: now}
+	if err := reg.PutSession(manager); err != nil {
+		t.Fatal(err)
+	}
+	ho := &Handoff{ID: "ho-1", SessionID: "sess-child", HostID: "c3", Kind: KindAgent, Status: StatusRunning, SourceSessionID: manager.ID, CreatedAt: now}
+	msg := &ParentMessage{V: 1, ID: "pm-block", ParentSessionID: manager.ID, ChildSessionID: "sess-child", HandoffID: ho.ID, Kind: "ask", State: ParentMessagePending, CreatedAt: now}
+
+	start := time.Now()
+	err := service.deliverMessage(context.Background(), manager, ho, msg)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("want delivery error when the transport hangs")
+	}
+	if elapsed > 10*time.Second {
+		t.Fatalf("delivery was not bounded, took %s", elapsed)
+	}
+}
