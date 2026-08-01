@@ -38,6 +38,7 @@ type App struct {
 	Coord       ports.Coord
 	Msg         *core.MsgService
 	Boards      *core.BoardService
+	Roots       *core.RootService
 	Maint       *core.MaintenanceService
 	Parents     *core.ParentService
 	Policies    *core.PolicyService
@@ -101,6 +102,7 @@ func New() *App {
 		Coord:    coord,
 		Msg:      msgs,
 		Boards:   &core.BoardService{Reg: reg, Msg: msgs},
+		Roots:    &core.RootService{Reg: reg},
 		Maint:    &core.MaintenanceService{Sessions: sessions, Reg: reg, Viz: viz, NewTransport: tf},
 		Parents:  parents,
 		Policies: policies,
@@ -408,6 +410,8 @@ func (a *App) Run(args []string) int {
 		return a.cmdHistory(filtered[1:])
 	case "board":
 		return a.cmdBoard(ctx, filtered[1:])
+	case "root":
+		return a.cmdRoot(filtered[1:])
 	default:
 		if len(filtered) == 2 {
 			return a.cmdNamed(ctx, filtered[0], filtered[1])
@@ -2177,6 +2181,91 @@ func authorizeParentCaller(parentID string) error {
 		return fmt.Errorf("parent session %s is outside authenticated caller scope", parentID)
 	}
 	return nil
+}
+
+// cmdRoot owns the apex lifecycle: which session governs, which roots are
+// enrolled under it, where their rules live, and what it decided while the
+// human was away. Relay stays model-free — the judgment lives in the apex
+// agent (share/roles/relay-conductor.md), not here.
+func (a *App) cmdRoot(args []string) int {
+	a.JSON = true
+	a.CompactJSON = true
+	if len(args) == 0 {
+		return a.fail(fmt.Errorf("usage: relay root adopt|enroll|unenroll|status|rules|digest …"))
+	}
+	sub, rest := args[0], args[1:]
+	positional := ""
+	after := int64(0)
+	for i := 0; i < len(rest); i++ {
+		switch rest[i] {
+		case "--after":
+			i++
+			if i < len(rest) {
+				after, _ = strconv.ParseInt(rest[i], 10, 64)
+			}
+		default:
+			if strings.HasPrefix(rest[i], "-") {
+				return a.fail(fmt.Errorf("unknown flag %q", rest[i]))
+			}
+			positional = rest[i]
+		}
+	}
+	switch sub {
+	case "adopt":
+		if positional == "" {
+			return a.fail(fmt.Errorf("usage: relay root adopt SESSION"))
+		}
+		sess, err := a.Roots.Adopt(positional)
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "apex": sess.ID}))
+	case "enroll", "unenroll":
+		if positional == "" {
+			return a.fail(fmt.Errorf("usage: relay root %s SESSION", sub))
+		}
+		act := a.Roots.Enroll
+		if sub == "unenroll" {
+			act = a.Roots.Unenroll
+		}
+		sess, err := act(positional)
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "session_id": sess.ID, "governed": sub == "enroll"}))
+	case "status":
+		apex, err := a.Roots.Apex()
+		if err != nil {
+			return a.fail(err)
+		}
+		governed, err := a.Roots.Governed()
+		if err != nil {
+			return a.fail(err)
+		}
+		ids := make([]string, 0, len(governed))
+		for _, sess := range governed {
+			ids = append(ids, sess.ID)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "apex": apex.ID, "governed": ids}))
+	case "rules":
+		if positional == "" {
+			return a.fail(fmt.Errorf("usage: relay root rules PROJECT"))
+		}
+		path, err := core.RulesPath(positional)
+		if err != nil {
+			return a.fail(err)
+		}
+		_, statErr := os.Stat(path)
+		return a.errOut(a.out(map[string]any{"ok": true, "path": path, "exists": statErr == nil}))
+	case "digest":
+		digest, err := a.Roots.Digest(a.Parents, after)
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(digest))
+	default:
+		return a.fail(fmt.Errorf("usage: relay root adopt|enroll|unenroll|status|rules|digest …"))
+	}
 }
 
 // boardCaller resolves which session is acting. A bridge-authenticated agent
