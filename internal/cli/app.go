@@ -102,7 +102,7 @@ func New() *App {
 		Coord:    coord,
 		Msg:      msgs,
 		Boards:   &core.BoardService{Reg: reg, Msg: msgs},
-		Roots:    &core.RootService{Reg: reg},
+		Roots:    &core.RootService{Reg: reg, Sessions: sessions},
 		Maint:    &core.MaintenanceService{Sessions: sessions, Reg: reg, Viz: viz, NewTransport: tf},
 		Parents:  parents,
 		Policies: policies,
@@ -411,7 +411,7 @@ func (a *App) Run(args []string) int {
 	case "board":
 		return a.cmdBoard(ctx, filtered[1:])
 	case "root":
-		return a.cmdRoot(filtered[1:])
+		return a.cmdRoot(ctx, filtered[1:])
 	case "supervise":
 		return a.cmdSupervise(ctx, filtered[1:])
 	default:
@@ -2189,7 +2189,7 @@ func authorizeParentCaller(parentID string) error {
 // enrolled under it, where their rules live, and what it decided while the
 // human was away. Relay stays model-free — the judgment lives in the apex
 // agent (share/roles/relay-conductor.md), not here.
-func (a *App) cmdRoot(args []string) int {
+func (a *App) cmdRoot(ctx context.Context, args []string) int {
 	a.JSON = true
 	a.CompactJSON = true
 	if len(args) == 0 {
@@ -2276,10 +2276,18 @@ func (a *App) cmdRoot(args []string) int {
 		for _, sess := range governed {
 			ids = append(ids, sess.ID)
 		}
-		return a.errOut(a.out(map[string]any{
+		// Report whether the apex agent is actually working. A configured but
+		// inert apex is indistinguishable from a healthy one otherwise.
+		readiness := a.Roots.AgentReadinessFor(ctx, a.Sessions, apex.ID)
+		out := map[string]any{
 			"ok": true, "apex": apex.ID, "governed": ids,
+			"agent":         readiness,
 			"control_plane": core.DescribeControlPlane(),
-		}))
+		}
+		if readiness.State != core.AgentReady {
+			out["ok"] = false
+		}
+		return a.errOut(a.out(out))
 	case "rules":
 		if positional == "" {
 			return a.fail(fmt.Errorf("usage: relay root rules PROJECT"))

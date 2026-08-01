@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,7 +25,8 @@ const (
 
 // RootService manages the apex and the roots enrolled under it.
 type RootService struct {
-	Reg *Registry
+	Reg      *Registry
+	Sessions *SessionService
 }
 
 // ControlPlane describes where governance actually runs. Enrolling a root
@@ -115,6 +117,21 @@ func (r *RootService) Adopt(sessionID string) (*Session, error) {
 	}
 	if existing, err := r.Apex(); err == nil && existing.ID != sess.ID {
 		return nil, fmt.Errorf("apex already designated (%s); run: relay root release %s", existing.ID, existing.ID)
+	}
+	// An apex whose agent is inert is worse than no apex: escalations arrive
+	// into a pane that will never answer them, and nothing says so.
+	if r.Sessions != nil {
+		ready := r.AgentReadinessFor(context.Background(), r.Sessions, sess.ID)
+		switch ready.State {
+		case AgentBlocked:
+			return nil, fmt.Errorf(
+				"apex agent is blocked (%s) — answer it yourself in the pane; relay will not answer a security gate for you",
+				ready.Reason)
+		case AgentAbsent:
+			return nil, fmt.Errorf(
+				"no agent is running in session %s (%s); start the conductor before adopting it as the apex",
+				sess.ID, ready.Reason)
+		}
 	}
 	if sess.Labels == nil {
 		sess.Labels = map[string]string{}
