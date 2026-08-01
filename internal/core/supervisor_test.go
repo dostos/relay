@@ -106,8 +106,10 @@ func TestReconcileIgnoresTerminalHandoffs(t *testing.T) {
 	}
 }
 
-// A watcher that exits frees its slot, so the next tick re-adopts the handoff
-// if it is still live. Without this, one transient failure would strand it.
+// A watcher that exits must free its slot, so the handoff is never stranded.
+// Whether it restarts immediately is governed by backoff: a watcher that
+// flapped is left alone for a while (see TestFlappingWatcherIsBackedOff), and
+// picked up again once that expires.
 func TestSlotIsFreedWhenAWatcherExits(t *testing.T) {
 	sup, reg := newSupervisorFixture(t)
 	putSupervisedHandoff(t, reg, "ho-live", "running", "sess-manager")
@@ -132,14 +134,7 @@ func TestSlotIsFreedWhenAWatcherExits(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if len(sup.Supervised()) == 0 {
-			started, err := sup.Reconcile(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if started != 1 {
-				t.Fatalf("a freed slot must be re-adopted, started %d", started)
-			}
-			return
+			return // slot freed, which is the invariant
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -165,3 +160,55 @@ func TestRunStopsOnContextCancel(t *testing.T) {
 }
 
 var _ = ports.PersistHandle{}
+
+// A watcher that exits immediately never got to work — usually because another
+// process owns the handoff. Restarting it every tick is a spin, not supervision.
+func TestFlappingWatcherIsBackedOff(t *testing.T) {
+	sup, reg := newSupervisorFixture(t)
+	putSupervisedHandoff(t, reg, "ho-flap", "running", "sess-manager")
+
+	first, err := sup.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != 1 {
+		t.Fatalf("want the first attempt, got %d", first)
+	}
+	// Let the watcher exit (it will, immediately, with no coord configured).
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && len(sup.Supervised()) > 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	again, err := sup.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != 0 {
+		t.Fatalf("a flapping handoff must be backed off, restarted %d", again)
+	}
+}
+
+// Backoff must not be permanent: once it expires the handoff is retried, so a
+// transient owner does not strand it forever.
+func TestBackoffExpiresAndTheHandoffIsRetried(t *testing.T) {
+	sup, reg := newSupervisorFixture(t)
+	putSupervisedHandoff(t, reg, "ho-retry", "running", "sess-manager")
+	if _, err := sup.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && len(sup.Supervised()) > 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	sup.mu.Lock()
+	sup.backoff["ho-retry"] = time.Now().Add(-time.Second) // expired
+	sup.mu.Unlock()
+
+	again, err := sup.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != 1 {
+		t.Fatalf("an expired backoff must retry, got %d", again)
+	}
+}

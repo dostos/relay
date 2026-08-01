@@ -34,7 +34,19 @@ type SupervisorService struct {
 
 	mu      sync.Mutex
 	running map[string]struct{}
+	backoff map[string]time.Time
+	started map[string]time.Time
 }
+
+// watcherFlapWindow is how quickly a watcher must exit to count as flapping.
+// A real watcher blocks on an event stream for minutes; one that returns almost
+// immediately did not get to work — usually because another process holds the
+// lock — and restarting it every tick is a spin, not supervision.
+const watcherFlapWindow = 5 * time.Second
+
+// watcherBackoff is how long to leave a flapping handoff alone. Long enough to
+// stop the spin, short enough that a genuinely free handoff is picked up fast.
+const watcherBackoff = 5 * time.Minute
 
 func (s *SupervisorService) interval() time.Duration {
 	if s.Interval > 0 {
@@ -139,13 +151,21 @@ func (s *SupervisorService) Reconcile(ctx context.Context) (int, error) {
 			s.mu.Unlock()
 			continue
 		}
-		// Another process may already be watching this handoff; starting a
-		// second one would just lose the flock race and burn a goroutine.
-		if WatcherRunning(ho.ID) {
+		// Do NOT probe the flock here: acquiring it to test it races with real
+		// watchers and can momentarily steal the lock being checked. Let Watch
+		// arbitrate, and back off from anything that flaps.
+		if s.backoff == nil {
+			s.backoff = map[string]time.Time{}
+		}
+		if s.started == nil {
+			s.started = map[string]time.Time{}
+		}
+		if until, ok := s.backoff[ho.ID]; ok && time.Now().Before(until) {
 			s.mu.Unlock()
 			continue
 		}
 		s.running[ho.ID] = struct{}{}
+		s.started[ho.ID] = time.Now()
 		s.mu.Unlock()
 
 		started++
@@ -157,7 +177,13 @@ func (s *SupervisorService) Reconcile(ctx context.Context) (int, error) {
 			// slot frees, so the next tick re-adopts it if it is still live.
 			err := s.Parents.Watch(ctx, id)
 			s.mu.Lock()
+			startedAt := s.started[id]
 			delete(s.running, id)
+			if !startedAt.IsZero() && time.Since(startedAt) < watcherFlapWindow {
+				// It never got to work. Something else owns this handoff, or it
+				// cannot start; retrying every tick just burns cycles.
+				s.backoff[id] = time.Now().Add(watcherBackoff)
+			}
 			s.mu.Unlock()
 			s.emit("watch_end", id, err)
 		}()
