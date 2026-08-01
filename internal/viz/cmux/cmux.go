@@ -301,9 +301,12 @@ func surfaceCommand(command, surface, workspace string, tail ...string) []string
 }
 
 func compactNotice(n core.ParentNotice) string {
+	// Share core's cap rather than keeping a second, smaller one here: two
+	// independent limits meant the body was truncated twice, so raising the
+	// core limit silently did nothing.
 	text := strings.Join(strings.Fields(n.Text), " ")
-	if len(text) > 320 {
-		text = text[:319] + "…"
+	if len(text) > core.ParentTextLimit {
+		text = text[:core.ParentTextLimit-1] + "…"
 	}
 	n.Text = text
 	return core.FormatParentNotice(n)

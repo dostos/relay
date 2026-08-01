@@ -20,7 +20,16 @@ import (
 	"github.com/dostos/relay/internal/shellquote"
 )
 
-const parentTextLimit = 320
+// parentTextLimit caps an escalation body.
+//
+// It is deliberately generous. The alternative to a fuller excerpt is not a
+// cheaper message — it is the manager running `relay agent capture -n 260` to
+// recover the context the notice dropped, which costs orders of magnitude more
+// than the characters saved here.
+const ParentTextLimit = 600
+
+// parentTextLimit is the unexported alias used throughout this file.
+const parentTextLimit = ParentTextLimit
 
 // deliveryAttemptTimeout bounds ONE delivery hop. SessionService.Send passes
 // the caller's context straight to the transport with no timeout of its own,
@@ -627,11 +636,11 @@ func (p *ParentService) childEventText(ctx context.Context, ho *Handoff, ev coor
 				if panePermissionPrompt(capture) {
 					kind = "permission_required"
 				}
-				return "remote child idle on " + ho.HostID + "; inspect handoff, not local paths; manager decide blocked/completed: " + excerpt, kind, true
+				return "child idle on " + ho.HostID + " (use the handoff, not local paths); decide: " + excerpt, kind, true
 			}
 		}
 	}
-	return "remote child idle on " + ho.HostID + "; inspect handoff, not local paths; manager decide blocked/completed/continue", kind, true
+	return "child idle on " + ho.HostID + " (use the handoff, not local paths); decide blocked/completed/continue", kind, true
 }
 
 func attentionMessage(kind string) bool {
@@ -790,16 +799,83 @@ func paneStillActive(capture string) bool {
 		strings.Contains(tail, "cerebrating") || strings.Contains(tail, "· thinking")
 }
 
+// chromeMarkers are fragments that only ever appear in an agent's UI furniture:
+// spinners, keybinding hints, transcript pointers, model/status footers, and the
+// empty composer placeholder.
+var chromeMarkers = []string{
+	"esc to interrupt",
+	"ctrl + t",
+	"shift + tab",
+	"esc dismiss",
+	"to view transcript",
+	"Improve documentation in @filename",
+	"Context left",
+	"tokens)",
+}
+
+// isFrameLine reports whether a line is mostly box-drawing glyphs — a table
+// border, a panel edge, a rule. Such a line has no prose in it.
+//
+// The old filter only dropped lines made *entirely* of "─━═-", so any real
+// table border survived: "└─────────┴──────────┘" contains corner and tee
+// glyphs and passed straight through to the manager.
+func isFrameLine(line string) bool {
+	frame, visible := 0, 0
+	for _, r := range line {
+		if r == ' ' || r == '\t' {
+			continue
+		}
+		visible++
+		// U+2500–U+257F box drawing, U+2580–U+259F block elements.
+		if (r >= 0x2500 && r <= 0x259F) || r == '-' || r == '=' || r == '_' {
+			frame++
+		}
+	}
+	if visible == 0 {
+		return true
+	}
+	return frame*2 >= visible
+}
+
+func isChromeLine(line string) bool {
+	for _, marker := range chromeMarkers {
+		if strings.Contains(line, marker) {
+			return true
+		}
+	}
+	// Status/footer bars: a model or path breadcrumb rather than a sentence.
+	if strings.HasPrefix(line, "|") && strings.Contains(line, "Auto") && strings.Contains(line, "~/") {
+		return true
+	}
+	// Agent footers are middle-dot separated breadcrumbs carrying a working
+	// directory — "<model> · ~/path · Main [branch]". Matched structurally
+	// rather than by model name, which changes with every release.
+	if strings.Contains(line, "·") && strings.Contains(line, "~/") {
+		return true
+	}
+	return false
+}
+
+// decisionExcerpt pulls the part of a child's screen a manager can actually
+// decide on.
+//
+// The tail of an agent pane is almost always furniture — a table the child
+// printed, a spinner, a hint bar, the composer. Sending that verbatim gave the
+// manager nothing to act on, so it answered by capturing a few hundred lines of
+// transcript instead, on every single escalation. Filtering the furniture is
+// what makes the escalation self-sufficient, and skipping that follow-up
+// capture is where the tokens are.
 func decisionExcerpt(capture string) string {
 	lines := strings.Split(capture, "\n")
 	useful := make([]string, 0, len(lines))
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		if line == "" || strings.Trim(line, "─━═- ") == "" {
+		if line == "" || isFrameLine(line) || isChromeLine(line) {
 			continue
 		}
-		// Common tmux/agent status bars carry no decision context.
-		if strings.HasPrefix(line, "|") && strings.Contains(line, "Auto") && strings.Contains(line, "~/") {
+		// A table row is data without its header; the prose around it carries
+		// the meaning, and the manager can capture the table if it needs it.
+		if strings.HasPrefix(line, "│") || strings.HasPrefix(line, "|") {
 			continue
 		}
 		useful = append(useful, line)
