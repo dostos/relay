@@ -46,6 +46,14 @@ Autonomy holds today when the control plane is not on the laptop — e.g. the op
 
 Option 4 is worth doing regardless of which of 1–3 is chosen, because today nothing tells the operator their "autonomous" subtree is only autonomous while the laptop is open.
 
+## Status: option 4 implemented
+
+`DescribeControlPlane` (`internal/core/root.go`) reports the host governance actually runs on, and `relay root enroll` / `relay root status` surface it. Relay never claims always-on on its own — it cannot detect whether a machine sleeps — so the caveat is stated unless `RELAY_CONTROL_PLANE_ALWAYS_ON=1` is declared explicitly on a host that does not sleep.
+
+This does not deliver away-from-desk autonomy. It removes the false impression of it, which was the more dangerous of the two problems.
+
+Options 1–3 remain open. The control plane currently stays on the Mac by choice, while `home` is being redesigned; revisit once that settles.
+
 ## Open question for the human
 
 Which host should own the durable control plane? That is the actual decision behind this gap, and it is an infrastructure choice rather than a code one.

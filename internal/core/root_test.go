@@ -218,3 +218,28 @@ func TestUnenrollLeavesTheApexOwnWorkersAlone(t *testing.T) {
 		t.Fatalf("an unenrolled worker must not appear as governed: %+v", governed)
 	}
 }
+
+// Enrolling must never imply autonomy the deployment cannot deliver: when the
+// control plane can sleep, governance pauses with it.
+func TestControlPlaneDisclosesWhenGovernancePauses(t *testing.T) {
+	t.Setenv("RELAY_CONTROL_PLANE_ALWAYS_ON", "")
+	cp := DescribeControlPlane()
+	if cp.AlwaysOn {
+		t.Fatal("must not claim always-on without an explicit declaration")
+	}
+	if cp.Warning == "" {
+		t.Fatal("a sleepable control plane must carry a warning")
+	}
+	if cp.Host == "" {
+		t.Fatal("the control plane must name its host")
+	}
+
+	t.Setenv("RELAY_CONTROL_PLANE_ALWAYS_ON", "1")
+	cp = DescribeControlPlane()
+	if !cp.AlwaysOn {
+		t.Fatal("an explicit declaration must be honoured")
+	}
+	if cp.Warning != "" {
+		t.Fatalf("a declared always-on plane needs no warning, got %q", cp.Warning)
+	}
+}

@@ -142,6 +142,16 @@ Relay stays model-free throughout. It owns enrollment, rule resolution, and the
 audit; the judgment lives in the portable role at
 [`share/roles/relay-conductor.md`](share/roles/relay-conductor.md).
 
+**Governance runs where the control plane runs.** The registry, the parent
+inboxes, and the watcher processes all live on the machine that started the
+work — so if that machine sleeps, the router sleeps with it and an escalation
+raised meanwhile is not routed until it wakes. `relay root enroll` and `relay
+root status` report this rather than let an enroll imply autonomy the
+deployment cannot deliver. For genuinely unattended operation, start governed
+work from a session on an always-on host and declare
+`RELAY_CONTROL_PLANE_ALWAYS_ON=1` there. See
+[`docs/superpowers/specs/2026-08-01-relay-autonomous-D-control-plane-locality.md`](docs/superpowers/specs/2026-08-01-relay-autonomous-D-control-plane-locality.md).
+
 Escalation is vertical, but peers often need to coordinate without asking
 anyone to decide anything. The children of one manager share a **board** — a
 categorized surface for status, resources, and artifacts:

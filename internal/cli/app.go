@@ -2242,7 +2242,16 @@ func (a *App) cmdRoot(args []string) int {
 		if err != nil {
 			return a.fail(err)
 		}
-		return a.errOut(a.out(map[string]any{"ok": true, "session_id": sess.ID, "governed": sub == "enroll"}))
+		out := map[string]any{"ok": true, "session_id": sess.ID, "governed": sub == "enroll"}
+		if sub == "enroll" {
+			// Never let an enroll imply autonomy the deployment cannot deliver.
+			cp := core.DescribeControlPlane()
+			out["control_plane"] = cp
+			if cp.Warning != "" {
+				out["warning"] = cp.Warning
+			}
+		}
+		return a.errOut(a.out(out))
 	case "status":
 		apex, err := a.Roots.Apex()
 		if err != nil {
@@ -2256,7 +2265,10 @@ func (a *App) cmdRoot(args []string) int {
 		for _, sess := range governed {
 			ids = append(ids, sess.ID)
 		}
-		return a.errOut(a.out(map[string]any{"ok": true, "apex": apex.ID, "governed": ids}))
+		return a.errOut(a.out(map[string]any{
+			"ok": true, "apex": apex.ID, "governed": ids,
+			"control_plane": core.DescribeControlPlane(),
+		}))
 	case "rules":
 		if positional == "" {
 			return a.fail(fmt.Errorf("usage: relay root rules PROJECT"))

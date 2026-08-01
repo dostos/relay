@@ -27,6 +27,38 @@ type RootService struct {
 	Reg *Registry
 }
 
+// ControlPlane describes where governance actually runs. Enrolling a root
+// makes its subtree governed, but governance only happens while the machine
+// holding the registry, the inboxes, and the watcher processes is awake — a
+// laptop that sleeps takes the router with it, and an escalation raised in the
+// meantime is not routed until it wakes. Relay cannot detect that on its own,
+// so it never claims always-on without being told.
+type ControlPlane struct {
+	Host     string `json:"host"`
+	AlwaysOn bool   `json:"always_on"`
+	Warning  string `json:"warning,omitempty"`
+}
+
+// DescribeControlPlane reports the locality caveat honestly. Declare
+// RELAY_CONTROL_PLANE_ALWAYS_ON=1 only on a host that does not sleep.
+func DescribeControlPlane() ControlPlane {
+	host, err := os.Hostname()
+	if err != nil || strings.TrimSpace(host) == "" {
+		host = "this machine"
+	}
+	cp := ControlPlane{Host: host}
+	switch strings.TrimSpace(os.Getenv("RELAY_CONTROL_PLANE_ALWAYS_ON")) {
+	case "1", "true", "yes":
+		cp.AlwaysOn = true
+	default:
+		cp.Warning = "governance runs on " + host +
+			"; enrolled subtrees are governed only while it is awake. An escalation raised" +
+			" while it sleeps is not routed until it wakes. Set RELAY_CONTROL_PLANE_ALWAYS_ON=1" +
+			" only on a host that does not sleep."
+	}
+	return cp
+}
+
 // RulesDir is where human-authored per-project rules live. It defaults inside
 // the relay config root, but RELAY_RULES_DIR lets it point at a versioned
 // workspace directory — rules are the human's delegation envelope, and keeping
