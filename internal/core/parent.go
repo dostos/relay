@@ -915,6 +915,9 @@ func (p *ParentService) Reply(ctx context.Context, messageID, text string) (*Par
 	if err := writeParentMessage(msg, false); err != nil {
 		return nil, err
 	}
+	ho.Status = StatusRunning
+	ho.UpdatedAt = now
+	_ = p.Reg.PutHandoff(ho)
 	_ = AppendCommunication(msg, "reply", text)
 	if p.Coord != nil && p.NewTransport != nil {
 		if child, getErr := p.Reg.GetSession(msg.ChildSessionID); getErr == nil {

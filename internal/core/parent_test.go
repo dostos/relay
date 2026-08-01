@@ -546,12 +546,16 @@ func TestReplyAndAckCloseInboxWithCorrelatedHistory(t *testing.T) {
 	child := &Session{ID: "sess-child", HostID: "c3", Persist: ports.PersistHandle{Kind: "tmux", Name: "child"}, CreatedAt: now}
 	_ = reg.PutSession(parent)
 	_ = reg.PutSession(child)
-	ho := &Handoff{ID: "ho-1", SessionID: child.ID, HostID: "c3", Kind: KindAgent, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
+	ho := &Handoff{ID: "ho-1", SessionID: child.ID, HostID: "c3", Kind: KindAgent, Status: StatusNeedsInput, SourceSessionID: parent.ID, CreatedAt: now}
 	_ = reg.PutHandoff(ho)
 	ask, _ := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "ask", Meta: map[string]any{"q": "deploy?"}})
 	replied, err := service.Reply(context.Background(), ask.ID, "yes")
 	if err != nil || replied.State != ParentMessageReplied {
 		t.Fatalf("reply=%+v err=%v", replied, err)
+	}
+	storedHandoff, err := reg.GetHandoff(ho.ID)
+	if err != nil || storedHandoff.Status != StatusRunning {
+		t.Fatalf("replied handoff=%+v err=%v", storedHandoff, err)
 	}
 	result, _ := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 2, Kind: "result", Meta: map[string]any{"text": "done"}})
 	acked, err := service.Ack(result.ID)
