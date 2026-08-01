@@ -59,6 +59,13 @@ type Persistence interface {
 	InstallSensors(ctx context.Context, t Transport, h PersistHandle, silenceSec int, emitCmd func(kind string) (string, error)) error
 }
 
+// SessionChrome is an optional persistence capability for applying durable
+// visual ownership cues. SessionService invokes it on create, adopt, and
+// named-session reuse so callers below the CLI layer receive the same chrome.
+type SessionChrome interface {
+	ApplyChrome(ctx context.Context, t Transport, h PersistHandle) error
+}
+
 // Layout describes how to present a session in a visual surface.
 type Layout struct {
 	Mode            string // "pair" | "remote" | "none"

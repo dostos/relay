@@ -26,6 +26,12 @@ type SessionService struct {
 	Persist      ports.Persistence
 }
 
+func (s *SessionService) applyChrome(ctx context.Context, t ports.Transport, h ports.PersistHandle) {
+	if chrome, ok := s.Persist.(ports.SessionChrome); ok {
+		_ = chrome.ApplyChrome(ctx, t, h)
+	}
+}
+
 func newID(prefix string) string {
 	var b [8]byte
 	_, _ = rand.Read(b[:])
@@ -73,6 +79,7 @@ func (s *SessionService) OpenNamed(ctx context.Context, opts CreateOpts) (*Sessi
 			continue
 		}
 		if exists {
+			s.applyChrome(ctx, t, sess.Persist)
 			RememberResume(sess)
 			return sess, false, nil
 		}
@@ -138,6 +145,7 @@ func (s *SessionService) Create(ctx context.Context, opts CreateOpts) (*Session,
 		forgetBridgeToken(sessionID)
 		return nil, err
 	}
+	s.applyChrome(ctx, t, h)
 	now := time.Now().UTC()
 	sess := &Session{
 		ID:                 sessionID,
@@ -205,6 +213,7 @@ func (s *SessionService) Adopt(ctx context.Context, opts CreateOpts) (*Session, 
 	if !ok {
 		return nil, fmt.Errorf("tmux session %q not found on %s", safe, opts.HostID)
 	}
+	s.applyChrome(ctx, t, h)
 	now := time.Now().UTC()
 	labels := opts.Labels
 	if labels == nil {

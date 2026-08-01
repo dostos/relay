@@ -2859,8 +2859,10 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 	if opts.Surface == "" {
 		opts.Surface, _ = core.CurrentSurface()
 	}
+	var resumeSession *core.Session
 	if opts.Surface != "" {
 		if sess, findErr := a.Reg.FindByPersistName(session, cwd); findErr == nil {
+			resumeSession = sess
 			if binder, ok := a.Viz.(interface {
 				BindSurface(context.Context, string, string, string) (string, error)
 			}); ok && a.Viz.Available(ctx) {
@@ -2877,6 +2879,7 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 	}
 	bridgeSessionID := ""
 	if sess, findErr := a.Reg.FindByPersistName(session, cwd); findErr == nil {
+		resumeSession = sess
 		bridgeSessionID = sess.ID
 	} else if entry, lookupErr := core.LookupResume(session); lookupErr == nil {
 		bridgeSessionID = entry.SessionID
@@ -2888,6 +2891,9 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 		}
 		opts.BridgeLocalSocket = localSocket
 		opts.BridgeRemoteSocket = core.BridgeRemoteSocket(bridgeSessionID)
+	}
+	if resumeSession != nil {
+		_ = a.applySessionChrome(ctx, resumeSession)
 	}
 	if err := a.Sessions.ResumeOpts(ctx, session, cwd, opts); err != nil {
 		msg := core.FormatResumeError(err)

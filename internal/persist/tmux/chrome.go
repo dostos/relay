@@ -34,3 +34,7 @@ tmux set-option -t "$SESS" message-style 'bg=#134e4a,fg=#ccfbf1'
 	}
 	return nil
 }
+
+func (p *Persist) ApplyChrome(ctx context.Context, t ports.Transport, h ports.PersistHandle) error {
+	return ApplyChrome(ctx, t, h)
+}
