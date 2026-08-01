@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/dostos/relay/internal/bridge"
+	"github.com/dostos/relay/internal/coord"
 	"github.com/dostos/relay/internal/coord/sshcoord"
 	"github.com/dostos/relay/internal/core"
 	"github.com/dostos/relay/internal/persist/tmux"
@@ -3480,6 +3481,23 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 			checks = append(checks, check{"coord", false, err.Error()})
 		} else {
 			checks = append(checks, check{"coord", true, "relayd ok on " + host})
+			// Ensure() only proves relayd answers, not that it is the relayd
+			// this relay was built against. Drift is silent otherwise.
+			if reporter, ok := a.Coord.(interface {
+				RemoteBuild(context.Context, ports.Transport) (string, error)
+			}); ok {
+				remote, err := reporter.RemoteBuild(ctx, t)
+				switch {
+				case err != nil:
+					checks = append(checks, check{"coord_build", false, err.Error()})
+				case remote != coord.Build:
+					checks = append(checks, check{"coord_build", false,
+						fmt.Sprintf("%s runs relayd build %s; local is %s — run: relay host init -H %s --apply",
+							host, remote, coord.Build, host)})
+				default:
+					checks = append(checks, check{"coord_build", true, "matches local build " + remote})
+				}
+			}
 		}
 	}
 	// A diagnostic that always exits 0 cannot be used in a script or a health

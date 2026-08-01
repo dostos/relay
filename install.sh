@@ -10,8 +10,16 @@ if ! command -v go >/dev/null 2>&1; then
 fi
 (
   cd "$ROOT"
-  go build -o "$INSTALL_DIR/relay" ./cmd/relay
-  go build -o "$INSTALL_DIR/relayd" ./cmd/relayd
+  # Stamp the commit so a relayd left behind by an older install is
+  # distinguishable from a current one. The protocol version is invariant
+  # across rebuilds, so without this nothing could detect fleet drift.
+  BUILD="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
+  if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+    BUILD="$BUILD-dirty"
+  fi
+  LDFLAGS="-X github.com/dostos/relay/internal/coord.Build=$BUILD"
+  go build -ldflags "$LDFLAGS" -o "$INSTALL_DIR/relay" ./cmd/relay
+  go build -ldflags "$LDFLAGS" -o "$INSTALL_DIR/relayd" ./cmd/relayd
 )
 echo "installed $INSTALL_DIR/relay $INSTALL_DIR/relayd"
 "$INSTALL_DIR/relay" version

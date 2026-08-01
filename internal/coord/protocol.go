@@ -13,6 +13,18 @@ const (
 	Version           = "0.1.0"
 )
 
+// Build identifies the binary that was installed, stamped at link time by
+// install.sh with the commit it was built from.
+//
+// Version above describes the wire format and so is deliberately invariant
+// across rebuilds — which meant nothing could tell a relayd installed months
+// ago from one installed minutes ago. Ensure() only checks that ping returns
+// ok, so a stale remote passes identically to a current one. That is the same
+// shape as the stale desktop bridge that silently rejected commands for hours:
+// a long-lived process reporting fine while running code nobody remembers
+// deploying.
+var Build = "dev"
+
 // Request is a single newline-delimited JSON request to relayd.
 type Request struct {
 	Op      string         `json:"op"` // ping|status|emit|subscribe
@@ -29,6 +41,7 @@ type Response struct {
 	Error   string         `json:"error,omitempty"`
 	Seq     int64          `json:"seq,omitempty"`
 	Version string         `json:"version,omitempty"`
+	Build   string         `json:"build,omitempty"`
 	Uptime  string         `json:"uptime,omitempty"`
 	Meta    map[string]any `json:"meta,omitempty"`
 }

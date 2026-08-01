@@ -82,3 +82,26 @@ func (c *Coord) SensorCommand(session, kind string) (string, error) {
 	return fmt.Sprintf("$HOME/.local/bin/relayd emit -s %s --kind %s >/dev/null 2>&1",
 		shellquote.Quote(session), shellquote.Quote(kind)), nil
 }
+
+// RemoteBuild reports which build of relayd is installed on a host.
+//
+// Ensure() deliberately stays permissive — a version mismatch is not a reason
+// to refuse work mid-flight — so drift needs somewhere else to become visible.
+// This is that somewhere: `relay doctor -H HOST` compares it against the local
+// build and says so when a host is running code from an older install.
+func (c *Coord) RemoteBuild(ctx context.Context, t ports.Transport) (string, error) {
+	stdout, stderr, err := t.Run(ctx, "", remoteBin+` ping`)
+	if err != nil {
+		return "", fmt.Errorf("relayd ping on %s: %w (%s)", t.ID(), err, strings.TrimSpace(stderr))
+	}
+	var resp coord.Response
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &resp); err != nil {
+		return "", fmt.Errorf("relayd ping on %s: %w", t.ID(), err)
+	}
+	if resp.Build == "" {
+		// Predates build stamping, which is itself the answer: this relayd was
+		// installed before the stamp existed, so it is certainly not current.
+		return "unstamped", nil
+	}
+	return resp.Build, nil
+}

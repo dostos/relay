@@ -83,11 +83,12 @@ func (s *Server) handle(c net.Conn) {
 	}
 	switch req.Op {
 	case "ping":
-		writeJSON(c, coord.Response{OK: true, Version: coord.Version})
+		writeJSON(c, coord.Response{OK: true, Version: coord.Version, Build: coord.Build})
 	case "status":
 		writeJSON(c, coord.Response{
 			OK:      true,
 			Version: coord.Version,
+			Build:   coord.Build,
 			Uptime:  time.Since(s.started).Round(time.Second).String(),
 		})
 	case "emit":
