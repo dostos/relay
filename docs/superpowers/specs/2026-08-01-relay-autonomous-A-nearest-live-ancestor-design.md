@@ -93,6 +93,19 @@ For the reconnect path, a skipped parent must see the question as **already reso
 - Depth bound / cycle guard.
 - Grace window: a parent that reconnects within the backoff window is *not* skipped.
 
+## Validated on real hardware (2026-08-01)
+
+Run against a real WSL host (`home-relay`, reached through a double ProxyJump) with real tmux, real `relayd`, and a real event emitted by `relayd emit` — driven by the real `relay parent watch`. Executed in an isolated `RELAY_STATE_DIR` so live work was never touched.
+
+- **The liveness premise holds.** `tmux send-keys` to a killed session exits 1 (`no server running`), so `Sessions.Send` genuinely errors and failover actually triggers. Had this silently succeeded, the whole design would have been inert — this was the single assumption most worth testing first.
+- **Failover works end to end.** With the manager's tmux killed, the escalation was delivered to the apex and the notice physically appeared in the apex's tmux pane. The envelope recorded `intended_parent_session_id` = the dead manager and listed it as skipped.
+- **No duplicate envelope.** The dead manager's inbox directory was left empty — the promote-after-success fix behaves in reality, not just against fakes.
+- **The invariant holds.** With the manager revived, a second escalation went to the manager's pane and the apex pane contained **zero** occurrences of it. A live manager is not skipped.
+- **Apex lifecycle works on real sessions.** `root adopt` + `root enroll` produced real lineage; `root status` reported it.
+- **Boards work over real relayd** (previously only exercised against a fake coord): latest-per-key fold, peers-only filtering, and the `--subtree` rollup all returned correct results, and a root was correctly refused a peer board.
+
+Not yet covered: a genuine laptop sleep/wake cycle, and an escalation raised by a real agent's hook rather than an injected `relayd emit`.
+
 ## Open questions / deferred
 
 - **Resolved during planning:** the reply path needs no CLI change. `authorizeParentCaller` (`internal/cli/app.go:2169`) compares the caller against `msg.ParentSessionID`, and because the resolved ancestor *is* `ParentSessionID`, it authorizes naturally. Decision 5's generalization is therefore a no-op — and `authorizeParentCaller` must **not** be widened, since that would weaken the strict-tree guarantee.
