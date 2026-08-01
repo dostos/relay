@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dostos/relay/internal/coord"
 	"github.com/dostos/relay/internal/ports"
 )
 
@@ -80,8 +81,14 @@ func (b *BootstrapService) Bootstrap(ctx context.Context, hostID string) (*Boots
 	tmpBase := filepath.Join(os.TempDir(), fmt.Sprintf("relay-bootstrap-%s-%d", goarch, time.Now().UnixNano()))
 	tmpRelayd := tmpBase + "-relayd"
 	tmpRelay := tmpBase + "-relay"
+	// Stamp the remote with the build of the relay doing the deploying, so
+	// "remote build == local build" means exactly "this host was deployed from
+	// the relay I am running". Without it every remote reports the default and
+	// doctor's drift check fails forever, which would train the reader to
+	// ignore it.
+	ldflags := "-X github.com/dostos/relay/internal/coord.Build=" + coord.Build
 	build := func(output, pkg string) error {
-		cmd := exec.CommandContext(ctx, "go", "build", "-o", output, pkg)
+		cmd := exec.CommandContext(ctx, "go", "build", "-ldflags", ldflags, "-o", output, pkg)
 		cmd.Dir = repo
 		cmd.Env = append(os.Environ(),
 			"CGO_ENABLED=0",
