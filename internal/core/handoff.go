@@ -98,7 +98,7 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 		silence = profile.Defaults.SilenceSec
 	}
 	if silence <= 0 {
-		silence = 45
+		silence = DefaultSilenceSec
 	}
 
 	kind := KindJob

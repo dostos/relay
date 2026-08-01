@@ -16,6 +16,14 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// DefaultSilenceSec is how long a pane must be quiet before relay checks
+// whether the agent is waiting. It used to be 45s purely to avoid false asks:
+// the "still working" test matched known UI strings, so an agent with an
+// unfamiliar UI (cursor-agent) looked idle the moment it paused. Now that an
+// idle is confirmed by re-sampling the pane, a much shorter window is safe and
+// attention is noticed several times sooner.
+const DefaultSilenceSec = 10
+
 // ErrMissingProfile means a host has no ~/.config/relay/host.yaml yet — it has
 // never been onboarded. Callers can offer `relay host init` as the fix.
 var ErrMissingProfile = errors.New("relay host profile missing")
@@ -593,7 +601,7 @@ path_map:
 
 defaults:
   preferred_agent: claude
-  silence_sec: 45
+  silence_sec: 10
   # Optional: usage-aware selection. relay runs this locally, expecting
   # {"agents":{"<name>":{"weekly_remaining":0-100}}} on stdout; the preferred
   # agent is used while it has headroom, else the highest-remaining one.

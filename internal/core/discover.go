@@ -252,13 +252,13 @@ func buildProposal(hostID string, card *DiscoverCard) *HostProfile {
 		HostID:  hostID,
 		Defaults: HostDefaults{
 			PreferredAgent: "claude",
-			SilenceSec:     45,
+			SilenceSec:     DefaultSilenceSec,
 		},
 	}
 	if card.Existing != nil {
 		p.Defaults = card.Existing.Defaults
 		if p.Defaults.SilenceSec == 0 {
-			p.Defaults.SilenceSec = 45
+			p.Defaults.SilenceSec = DefaultSilenceSec
 		}
 	}
 	// Agents: prefer detected present ones; fall back to existing configured.

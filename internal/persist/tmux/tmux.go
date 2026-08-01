@@ -177,7 +177,7 @@ func (p *Persist) DeadStatus(ctx context.Context, t ports.Transport, h ports.Per
 // InstallSensors wires idle/exit detection. emitCmd is supplied by Coord (no hard-coded relayd).
 func (p *Persist) InstallSensors(ctx context.Context, t ports.Transport, h ports.PersistHandle, silenceSec int, emitCmd func(kind string) (string, error)) error {
 	if silenceSec <= 0 {
-		silenceSec = 45
+		silenceSec = 10
 	}
 	if err := shellquote.ValidateSessionName(h.Name); err != nil {
 		return err

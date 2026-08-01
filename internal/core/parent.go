@@ -616,7 +616,7 @@ func (p *ParentService) childEventText(ctx context.Context, ho *Handoff, ev coor
 	}
 	if p.Sessions != nil {
 		if capture, err := p.Sessions.Capture(ctx, ho.SessionID, 80); err == nil {
-			if paneStillActive(capture) {
+			if paneStillActive(capture) || !p.paneSettled(ctx, ho, capture) {
 				return "", kind, false
 			}
 			excerpt := decisionExcerpt(capture)
@@ -736,6 +736,40 @@ func panePermissionPrompt(capture string) bool {
 		}
 	}
 	return false
+}
+
+// paneSettleDelay is how long to wait between the two samples that decide
+// whether a pane is genuinely waiting. Short enough to stay responsive, long
+// enough that a rendering agent visibly moves.
+const paneSettleDelay = 900 * time.Millisecond
+
+// paneSettled reports whether the pane has stopped changing.
+//
+// paneStillActive recognises "still working" by matching known UI strings
+// ("cerebrating", "· thinking", " running "+"tokens"), which only covers the
+// agents whose UI was studied. cursor-agent's status line matches none of
+// them, so string matching alone would call a busy pane idle — which is why
+// the silence threshold had to be set so high to compensate.
+//
+// Comparing two samples is UI-agnostic: a working pane redraws, a waiting one
+// does not. That lets the silence threshold drop without inventing false asks
+// for whichever agent is next to have an unfamiliar UI.
+func (p *ParentService) paneSettled(ctx context.Context, ho *Handoff, first string) bool {
+	if p.Sessions == nil {
+		return true
+	}
+	select {
+	case <-ctx.Done():
+		return true
+	case <-time.After(paneSettleDelay):
+	}
+	second, err := p.Sessions.Capture(ctx, ho.SessionID, 80)
+	if err != nil {
+		// Cannot re-sample; fall back to the string heuristics alone rather
+		// than swallowing a real ask.
+		return true
+	}
+	return strings.TrimRight(second, " \t\n") == strings.TrimRight(first, " \t\n")
 }
 
 func paneStillActive(capture string) bool {

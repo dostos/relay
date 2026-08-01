@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1145,5 +1146,71 @@ func TestUnreachableChainLeavesEnvelopeWithIntendedManager(t *testing.T) {
 	held, err := service.ListMessages(manager.ID, true)
 	if err != nil || len(held) != 1 {
 		t.Fatalf("intended manager must hold it for reconnect retry: %d (%v)", len(held), err)
+	}
+}
+
+// changingPersistence returns a different capture each call, as a working
+// agent's pane does while it redraws.
+type changingPersistence struct {
+	renamePersistence
+	calls int
+}
+
+func (p *changingPersistence) Capture(context.Context, ports.Transport, ports.PersistHandle, int) (string, error) {
+	p.calls++
+	return fmt.Sprintf("Cursor Grok 4.5 High Fast · %d%% · %d files edited", p.calls*7, p.calls), nil
+}
+
+// steadyPersistence returns the same waiting prompt every call.
+type steadyPersistence struct {
+	renamePersistence
+	calls int
+}
+
+func (p *steadyPersistence) Capture(context.Context, ports.Transport, ports.PersistHandle, int) (string, error) {
+	p.calls++
+	return "Should I delete the staging bucket?\n> _", nil
+}
+
+// A busy pane whose UI strings paneStillActive does not recognise must still
+// not raise an ask. This is the cursor-agent case: its status line matches
+// none of the known "working" markers.
+func TestIdleOnAChangingPaneRaisesNoAsk(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	changing := &changingPersistence{}
+	service.Sessions.Persist = changing
+	_, manager, _, ho := failoverTree(t, reg)
+
+	msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "idle"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg != nil {
+		t.Fatalf("a pane that is still redrawing must not raise an ask: %+v", msg)
+	}
+	if len(notifier.notices) != 0 {
+		t.Fatalf("nobody should have been interrupted, got %d notices", len(notifier.notices))
+	}
+	if changing.calls < 2 {
+		t.Fatalf("want two samples to compare, got %d", changing.calls)
+	}
+	_ = manager
+}
+
+// A pane that has stopped changing is genuinely waiting, so the ask goes up.
+func TestIdleOnASettledPaneRaisesAnAsk(t *testing.T) {
+	service, _, reg := newParentTestService(t)
+	service.Sessions.Persist = &steadyPersistence{}
+	_, manager, _, ho := failoverTree(t, reg)
+
+	msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "idle"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg == nil {
+		t.Fatal("a settled waiting pane must raise an ask")
+	}
+	if msg.ParentSessionID != manager.ID {
+		t.Fatalf("ask went to %s, want the manager", msg.ParentSessionID)
 	}
 }
