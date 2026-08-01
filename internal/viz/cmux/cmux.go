@@ -286,8 +286,7 @@ func (v *Viz) NotifyParent(ctx context.Context, sessionID string, notice core.Pa
 	if _, err := v.run(ctx, surfaceCommand("send", b.Surface, b.Workspace, "--", body)...); err != nil {
 		return err
 	}
-	_, err = v.run(ctx, surfaceCommand("send-key", b.Surface, b.Workspace, "ENTER")...)
-	return err
+	return v.submitInjected(ctx, sessionID, b, notice.MessageID)
 }
 
 // surfaceCommand keeps multi-step input directed at the same pane even when
