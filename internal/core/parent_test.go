@@ -1019,3 +1019,131 @@ func TestReplyRecordsTheResolvingSession(t *testing.T) {
 		t.Fatalf("want replied state, got %s", resolved.State)
 	}
 }
+
+// selectivePersistence fails only for the named tmux handles, so a test can
+// down one manager while leaving the rest of the tree reachable.
+type selectivePersistence struct {
+	renamePersistence
+	fail map[string]bool
+	sent []string
+}
+
+func (p *selectivePersistence) Send(_ context.Context, _ ports.Transport, handle ports.PersistHandle, text string, _ bool) error {
+	if p.fail[handle.Name] {
+		return errors.New("host unreachable")
+	}
+	p.sent = append(p.sent, handle.Name+"|"+text)
+	return nil
+}
+
+// flakyPersistence fails the first N sends to a handle, then succeeds.
+type flakyPersistence struct {
+	renamePersistence
+	remaining int
+	sent      []string
+}
+
+func (p *flakyPersistence) Send(_ context.Context, _ ports.Transport, handle ports.PersistHandle, text string, _ bool) error {
+	if p.remaining > 0 {
+		p.remaining--
+		return errors.New("transient hiccup")
+	}
+	p.sent = append(p.sent, handle.Name+"|"+text)
+	return nil
+}
+
+// A replayed event must never erase a decision the human already recorded.
+func TestReplayAfterFailoverDoesNotEraseRecordedDecision(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	service.Sessions.Persist = &selectivePersistence{fail: map[string]bool{"manager": true}}
+	_, _, _, ho := failoverTree(t, reg)
+	if err := reg.PutHandoff(ho); err != nil {
+		t.Fatal(err)
+	}
+	ev := coord.Event{Seq: 9, Kind: "permission_required", Meta: map[string]any{"text": "delete production bucket?"}}
+
+	msg, err := service.RouteChildEvent(context.Background(), ho, ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Reply(context.Background(), msg.ID, "DENY - do not delete"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The same event is routed again (Watch and AgentWait run on separate cursors).
+	replayed, err := service.RouteChildEvent(context.Background(), ho, ev)
+	if err != nil {
+		t.Fatalf("replay must be a no-op, got %v", err)
+	}
+	if replayed.State != ParentMessageReplied {
+		t.Fatalf("replay erased the decision: state=%s", replayed.State)
+	}
+	if replayed.Reply != "DENY - do not delete" {
+		t.Fatalf("replay erased the reply: %q", replayed.Reply)
+	}
+	if len(notifier.notices) != 1 {
+		t.Fatalf("replay re-asked the human: %d notices", len(notifier.notices))
+	}
+}
+
+// A routine receipt must not walk the tree and interrupt a human.
+func TestReceiptsDoNotFailOverToTheHuman(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	service.Sessions.Persist = &selectivePersistence{fail: map[string]bool{"manager": true}}
+	_, manager, _, ho := failoverTree(t, reg)
+
+	msg, _ := service.RouteChildEvent(context.Background(), ho,
+		coord.Event{Seq: 3, Kind: "result", Meta: map[string]any{"text": "build finished"}})
+
+	if len(notifier.notices) != 0 {
+		t.Fatalf("a receipt must never reach the human root, got %d notices", len(notifier.notices))
+	}
+	if msg != nil && msg.ParentSessionID != manager.ID {
+		t.Fatalf("a receipt must stay with its manager, went to %s", msg.ParentSessionID)
+	}
+}
+
+// A live manager having a transient hiccup must not be bypassed.
+func TestTransientFailureDoesNotBypassALiveManager(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	flaky := &flakyPersistence{remaining: 1}
+	service.Sessions.Persist = flaky
+	_, manager, _, ho := failoverTree(t, reg)
+
+	msg, err := service.RouteChildEvent(context.Background(), ho,
+		coord.Event{Seq: 1, Kind: "permission_required", Meta: map[string]any{"text": "approve?"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.ParentSessionID != manager.ID {
+		t.Fatalf("a transient error bypassed a live manager, went to %s", msg.ParentSessionID)
+	}
+	if len(notifier.notices) != 0 {
+		t.Fatalf("the human must not be interrupted, got %d notices", len(notifier.notices))
+	}
+	if len(flaky.sent) != 1 {
+		t.Fatalf("want the retry to reach the manager, got %d sends", len(flaky.sent))
+	}
+}
+
+// When nothing is reachable the envelope must stay with its intended manager,
+// not be parked on an ancestor that never saw it.
+func TestUnreachableChainLeavesEnvelopeWithIntendedManager(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	service.Sessions.Persist = &failingPersistence{}
+	notifier.notifyFail = true
+	_, manager, _, ho := failoverTree(t, reg)
+
+	msg, _ := service.RouteChildEvent(context.Background(), ho,
+		coord.Event{Seq: 1, Kind: "permission_required", Meta: map[string]any{"text": "approve?"}})
+	if msg == nil {
+		t.Fatal("the escalation must still be recorded")
+	}
+	if msg.ParentSessionID != manager.ID {
+		t.Fatalf("envelope parked on a session that never received it: %s", msg.ParentSessionID)
+	}
+	held, err := service.ListMessages(manager.ID, true)
+	if err != nil || len(held) != 1 {
+		t.Fatalf("intended manager must hold it for reconnect retry: %d (%v)", len(held), err)
+	}
+}
