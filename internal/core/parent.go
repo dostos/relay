@@ -630,14 +630,25 @@ func attentionMessage(kind string) bool {
 	return kind == "ask" || kind == "permission_required"
 }
 
+// pendingAttention finds an existing unresolved ask for this handoff. It scans
+// the given parent AND its ancestors, because an escalation raised while this
+// parent was disconnected is held by whichever ancestor received it. Without
+// the chain scan a reconnecting parent would raise a second ask for one
+// question, breaking the one-unresolved-ask-per-handoff invariant.
 func (p *ParentService) pendingAttention(parentID, handoffID string) *ParentMessage {
-	messages, err := p.ListMessages(parentID, true)
-	if err != nil {
-		return nil
+	holders := []string{parentID}
+	for _, ancestor := range AncestorChain(p.Reg, parentID) {
+		holders = append(holders, ancestor.ID)
 	}
-	for _, msg := range messages {
-		if msg.HandoffID == handoffID && attentionMessage(msg.Kind) {
-			return msg
+	for _, holder := range holders {
+		messages, err := p.ListMessages(holder, true)
+		if err != nil {
+			continue
+		}
+		for _, msg := range messages {
+			if msg.HandoffID == handoffID && attentionMessage(msg.Kind) {
+				return msg
+			}
 		}
 	}
 	return nil

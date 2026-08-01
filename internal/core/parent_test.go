@@ -965,3 +965,27 @@ func TestEscalationStaysPendingWhenNoAncestorIsLive(t *testing.T) {
 		t.Fatalf("want exactly one pending envelope, got %d", len(held))
 	}
 }
+
+func TestPendingAttentionFindsAskHeldByAnAncestor(t *testing.T) {
+	service, _, reg := newParentTestService(t)
+	now := time.Now().UTC()
+	root, manager, _, _ := failoverTree(t, reg)
+	// An unresolved ask for this handoff is already held by the ROOT,
+	// because the manager was disconnected when it was raised.
+	held := &ParentMessage{
+		V: 1, ID: "pm-held", ParentSessionID: root.ID, ChildSessionID: "sess-child",
+		HandoffID: "ho-worker", Kind: "ask", State: ParentMessagePending,
+		IntendedParentSessionID: manager.ID, CreatedAt: now,
+	}
+	if err := writeParentMessage(held, true); err != nil {
+		t.Fatal(err)
+	}
+
+	got := service.pendingAttention(manager.ID, "ho-worker")
+	if got == nil {
+		t.Fatal("want the ancestor-held ask to be found from the manager")
+	}
+	if got.ID != "pm-held" {
+		t.Fatalf("want pm-held, got %s", got.ID)
+	}
+}
