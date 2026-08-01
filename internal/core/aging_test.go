@@ -151,3 +151,36 @@ func TestStallIsReAnnouncedOnceItHasAgedFurther(t *testing.T) {
 		t.Fatal("a first stall must always be reported")
 	}
 }
+
+// A re-delivered envelope must not look brand new. deliverMessage stamps
+// DeliveredAt on every delivery, so measuring from it would let a reconnect or
+// a laptop wake erase a long-standing stall — exactly when detection matters.
+func TestRedeliveryDoesNotResetTheStallClock(t *testing.T) {
+	service, _, reg := newParentTestService(t)
+	_, manager, _, ho := failoverTree(t, reg)
+	if err := reg.PutHandoff(ho); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	asked := now.Add(-3 * time.Hour)      // the child asked 3h ago
+	redelivered := now.Add(-2 * time.Minute) // but it was re-handed 2m ago
+	msg := &ParentMessage{
+		V: 1, ID: "pm-redelivered", ParentSessionID: manager.ID,
+		ChildSessionID: "sess-child", HandoffID: ho.ID, Kind: "ask",
+		State: ParentMessagePending, CreatedAt: asked, DeliveredAt: &redelivered,
+	}
+	if err := writeParentMessage(msg, true); err != nil {
+		t.Fatal(err)
+	}
+
+	stale, err := service.FindStaleEscalations(15*time.Minute, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stale) != 1 {
+		t.Fatalf("a 3h-old question re-delivered 2m ago is still stalled, got %d", len(stale))
+	}
+	if stale[0].HeldFor < 2*time.Hour {
+		t.Fatalf("held time must reflect when it was asked, got %s", stale[0].HeldFor)
+	}
+}

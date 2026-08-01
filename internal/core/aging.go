@@ -72,7 +72,13 @@ func (p *ParentService) FindStaleEscalations(maxHold time.Duration, now time.Tim
 			if msg.DeliveredAt == nil {
 				continue
 			}
-			held := now.Sub(*msg.DeliveredAt)
+			// Measure from when the question was ASKED, not when it was last
+			// delivered. deliverMessage stamps DeliveredAt on every successful
+			// delivery, so a reconnect, a laptop wake, or a failover would reset
+			// the clock — erasing the evidence in exactly the situations where a
+			// stall most needs catching. The child has been waiting since it
+			// asked, regardless of how many times the envelope was re-handed.
+			held := now.Sub(msg.CreatedAt)
 			if held >= maxHold {
 				out = append(out, StaleEscalation{Message: msg, HeldFor: held})
 			}
