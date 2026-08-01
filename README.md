@@ -114,10 +114,14 @@ already-running agent can discover Relay from its tmux pane without receiving
 a secret in its prompt. Repair a session adopted by an older Relay release in
 place with `relay session bridge sess-…`; no agent or tmux restart is needed.
 
-Each child has one detached blocking event watcher. Agent hooks publish
-`permission_required`, `result`, and `exit`; the tmux-idle sensor supplies the
-`ask` fallback for agents without an input hook. Relay deduplicates by
-handoff/sequence, stores a bounded envelope, and wakes the exact parent pane.
+Each supported delegated CLI starts in its autonomous permission mode
+(`cursor-agent --force`, Codex approval bypass, or Claude permission bypass),
+so routine tool calls do not consume parent turns. Each child also has one
+detached blocking event watcher. Agent hooks publish `permission_required`,
+`result`, and `exit`; the tmux-idle sensor supplies the `ask` fallback for
+agents without an input hook. Relay deduplicates by handoff/sequence, collapses
+repeated idle samples of one unresolved prompt, stores a bounded envelope, and
+wakes the exact parent pane once.
 No transcript is forwarded and no Relay instruction is added to the child
 goal. Set `relay_hooks: off` only when an agent runtime cannot execute hooks.
 
@@ -125,8 +129,9 @@ The desktop policy gate removes redundant hook/fallback pings automatically
 and can answer stable CLI prompts with explicit literal-guarded rules. It
 normalizes bounded hook fields (`agent`, `host`, `text`, and `command`) so a
 provider can change its raw hook payload without changing the policy file.
-There is no blanket auto-approval rule: unmatched rules, malformed policy
-files, and failed replies continue one level up to the immediate manager.
+Unknown provider prompts and genuine goal decisions still continue one level
+up to the immediate manager; optional literal-guarded policy rules can handle
+stable fallback prompts.
 
 ```bash
 relay policy list
@@ -139,9 +144,10 @@ relay policy remove cursor-read
 
 All `--contains` literals must match, case-insensitively. Policies are
 desktop-local in `~/.config/relay/policy.yaml`; automatic decisions remain
-auditable with `relay parent inbox PARENT --all`. Built-ins only coalesce a
-tmux-idle fallback after an outstanding permission event and an `exit` shortly
-after a `result`; they never grant permission.
+auditable with `relay parent inbox PARENT --all`. Built-ins coalesce repeated
+idle samples while one ask/permission decision is pending, a tmux-idle
+fallback after an outstanding permission event, and an `exit` shortly after a
+`result`; they never grant permission themselves.
 
 Closing a local parent is deliberately gated:
 

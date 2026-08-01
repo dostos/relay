@@ -29,6 +29,15 @@ type recordingPersistence struct {
 	sent []string
 }
 
+type capturePersistence struct {
+	renamePersistence
+	capture string
+}
+
+func (p *capturePersistence) Capture(context.Context, ports.Transport, ports.PersistHandle, int) (string, error) {
+	return p.capture, nil
+}
+
 func (p *recordingPersistence) Send(_ context.Context, _ ports.Transport, _ ports.PersistHandle, text string, _ bool) error {
 	p.sent = append(p.sent, text)
 	return nil
@@ -264,6 +273,30 @@ func TestPaneStillActiveSuppressesOnlyNonActionableIdle(t *testing.T) {
 	}
 	if paneStillActive("Completed checkpoint\n› Add a follow-up\n") {
 		t.Fatal("completed pane was treated as active")
+	}
+}
+
+func TestIdlePermissionPromptIsClassifiedAndNotifiedOnce(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	service.Policies = &PolicyService{Path: filepath.Join(t.TempDir(), "missing-policy.yaml")}
+	service.Sessions.Persist = &capturePersistence{capture: "Run this command?\nNot in allowlist: echo, hostname, test\n"}
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "root"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c3", Persist: ports.PersistHandle{Kind: "tmux", Name: "worker"}, CreatedAt: now}
+	_ = reg.PutSession(parent)
+	_ = reg.PutSession(child)
+	ho := &Handoff{ID: "ho-1", SessionID: child.ID, HostID: child.HostID, Agent: "cursor-agent", Kind: KindAgent, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
+
+	first, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "idle"})
+	if err != nil || first.Kind != "permission_required" || first.State != ParentMessagePending || len(notifier.notices) != 1 {
+		t.Fatalf("first=%+v err=%v notices=%d", first, err, len(notifier.notices))
+	}
+	second, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 2, Kind: "idle"})
+	if err != nil || second.State != ParentMessageAcked || !second.AutoHandled || second.PolicyID != "builtin.coalesce_repeated_idle" {
+		t.Fatalf("second=%+v err=%v", second, err)
+	}
+	if len(notifier.notices) != 1 {
+		t.Fatalf("repeated prompt notices=%d", len(notifier.notices))
 	}
 }
 

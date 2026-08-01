@@ -212,6 +212,9 @@ func (p *PolicyService) Decide(ctx PolicyContext) (PolicyDecision, error) {
 	if ctx.Kind == "ask" && ctx.SourceKind == "idle" && containsKind(ctx.PendingKinds, "permission_required") {
 		return PolicyDecision{Matched: true, RuleID: "builtin.coalesce_permission_idle", Action: "ack", Builtin: true}, nil
 	}
+	if ctx.SourceKind == "idle" && (ctx.Kind == "ask" || ctx.Kind == "permission_required") && containsKind(ctx.PendingKinds, ctx.Kind) {
+		return PolicyDecision{Matched: true, RuleID: "builtin.coalesce_repeated_idle", Action: "ack", Builtin: true}, nil
+	}
 	if ctx.Kind == "exit" && containsKind(ctx.SeenKinds, "result") {
 		return PolicyDecision{Matched: true, RuleID: "builtin.coalesce_result_exit", Action: "ack", Builtin: true}, nil
 	}
@@ -251,6 +254,7 @@ func (p *PolicyService) Describe() (path string, builtins []PolicyRule, cfg *Pol
 	}
 	builtins = []PolicyRule{
 		{ID: "builtin.coalesce_permission_idle", Kind: "ask", SourceKind: "idle", PendingKind: "permission_required", Action: "ack"},
+		{ID: "builtin.coalesce_repeated_idle", Kind: "ask|permission_required", SourceKind: "idle", PendingKind: "same-kind", Action: "ack"},
 		{ID: "builtin.coalesce_result_exit", Kind: "exit", SeenKind: "result", Action: "ack"},
 	}
 	sort.Slice(builtins, func(i, j int) bool { return builtins[i].ID < builtins[j].ID })

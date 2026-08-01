@@ -590,25 +590,38 @@ func attentionKind(ev coord.Event) string {
 	}
 }
 
-func (p *ParentService) childEventText(ctx context.Context, ho *Handoff, ev coord.Event, kind string) (string, bool) {
+func (p *ParentService) childEventText(ctx context.Context, ho *Handoff, ev coord.Event, kind string) (string, string, bool) {
 	if text := eventString(ev.Meta, "text", "q", "question", "msg", "note"); text != "" {
-		return compactText(text), true
+		return compactText(text), kind, true
 	}
 	if ev.Kind != "idle" && ev.Kind != "needs_input" {
-		return compactText(kind + " from child on " + ho.HostID), true
+		return compactText(kind + " from child on " + ho.HostID), kind, true
 	}
 	if p.Sessions != nil {
 		if capture, err := p.Sessions.Capture(ctx, ho.SessionID, 80); err == nil {
 			if paneStillActive(capture) {
-				return "", false
+				return "", kind, false
 			}
 			excerpt := decisionExcerpt(capture)
 			if excerpt != "" {
-				return "remote child idle on " + ho.HostID + "; inspect handoff, not local paths; manager decide blocked/completed: " + excerpt, true
+				if panePermissionPrompt(capture) {
+					kind = "permission_required"
+				}
+				return "remote child idle on " + ho.HostID + "; inspect handoff, not local paths; manager decide blocked/completed: " + excerpt, kind, true
 			}
 		}
 	}
-	return "remote child idle on " + ho.HostID + "; inspect handoff, not local paths; manager decide blocked/completed/continue", true
+	return "remote child idle on " + ho.HostID + "; inspect handoff, not local paths; manager decide blocked/completed/continue", kind, true
+}
+
+func panePermissionPrompt(capture string) bool {
+	tail := strings.ToLower(capture)
+	for _, prompt := range []string{"run this command?", "not in allowlist", "permission", "approve", "confirm or esc"} {
+		if strings.Contains(tail, prompt) {
+			return true
+		}
+	}
+	return false
 }
 
 func paneStillActive(capture string) bool {
@@ -663,10 +676,11 @@ func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coo
 	if correlationID == "" {
 		correlationID = id
 	}
-	text, actionable := p.childEventText(ctx, ho, ev, kind)
+	text, detectedKind, actionable := p.childEventText(ctx, ho, ev, kind)
 	if !actionable {
 		return nil, nil
 	}
+	kind = detectedKind
 	msg := &ParentMessage{
 		V: 1, ID: id, CorrelationID: compactText(correlationID),
 		ParentSessionID: parent.ID, ChildSessionID: ho.SessionID, HandoffID: ho.ID,
@@ -795,31 +809,31 @@ func (p *ParentService) Watch(ctx context.Context, handoffID string) error {
 	if err != nil {
 		return err
 	}
-	if err := p.Coord.Ensure(ctx, t); err != nil {
-		return err
-	}
 	attempts := 0
 	windowStart := time.Now()
 	for {
 		ended := false
 		from := ho.ParentSeq
-		subErr := streamEvents(ctx, p.Coord, t, sess.Persist.Name, from, true, func(ev coord.Event) bool {
-			latest, getErr := p.Reg.GetHandoff(handoffID)
-			if getErr == nil {
-				ho = latest
-			}
-			if handoffTerminal(ho) {
-				ended = true
-				return false
-			}
-			_, _ = p.RouteChildEvent(ctx, ho, ev)
-			if ev.Seq > ho.ParentSeq {
-				ho.ParentSeq = ev.Seq
-				_ = p.Reg.PutHandoff(ho)
-			}
-			ended = ev.Kind == "exit"
-			return !ended
-		})
+		var subErr error
+		if subErr = p.Coord.Ensure(ctx, t); subErr == nil {
+			subErr = streamEvents(ctx, p.Coord, t, sess.Persist.Name, from, true, func(ev coord.Event) bool {
+				latest, getErr := p.Reg.GetHandoff(handoffID)
+				if getErr == nil {
+					ho = latest
+				}
+				if handoffTerminal(ho) {
+					ended = true
+					return false
+				}
+				_, _ = p.RouteChildEvent(ctx, ho, ev)
+				if ev.Seq > ho.ParentSeq {
+					ho.ParentSeq = ev.Seq
+					_ = p.Reg.PutHandoff(ho)
+				}
+				ended = ev.Kind == "exit"
+				return !ended
+			})
+		}
 		if ended {
 			return nil
 		}
@@ -830,12 +844,15 @@ func (p *ParentService) Watch(ctx context.Context, handoffID string) error {
 			attempts, windowStart = 0, time.Now()
 		}
 		attempts++
+		delay := time.Duration(1<<uint(min(attempts-1, 5))) * time.Second
 		if attempts > 6 {
-			return fmt.Errorf("parent watcher reconnect limit for %s: %w", handoffID, subErr)
-		}
-		delay := time.Duration(1<<uint(attempts-1)) * time.Second
-		if delay > time.Minute {
-			delay = time.Minute
+			// Keep the watcher durable without exceeding six SSH reconnects per
+			// ten-minute window. A transient startup failure must not silently
+			// sever the child's only path to its manager.
+			delay = 10*time.Minute - time.Since(windowStart)
+			if delay < time.Second {
+				delay = time.Second
+			}
 		}
 		timer := time.NewTimer(delay)
 		select {

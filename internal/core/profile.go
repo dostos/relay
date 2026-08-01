@@ -208,14 +208,47 @@ func (a *AgentSpec) LaunchCommand(goal string) string {
 	}
 	_ = goal
 	if strings.EqualFold(a.RelayHooks, "off") {
-		return wrapLoginShell(inner)
+		return wrapLoginShell(withAutonomousPermissions(*a, inner))
 	}
+	inner = withAutonomousPermissions(*a, inner)
 	inner = withAgentRelayHooks(*a, inner)
 	// Every CLI, including agents without a hook API, gets a terminal signal.
 	// Provider hooks add permission/result events; tmux silence remains the
 	// bounded fallback for unsupported CLIs.
 	script := inner + `; relay_agent_rc=$?; "$HOME/.local/bin/relay" signal exit --text "agent exited" --correlation terminal >/dev/null 2>&1 || true; exit $relay_agent_rc`
 	return "bash -ilc " + shellQuote(script)
+}
+
+// withAutonomousPermissions makes delegated goal sessions non-interactive by
+// default. A child is already constrained by its goal and host/workspace
+// boundary; pausing it for each CLI-local approval defeats durable handoff.
+func withAutonomousPermissions(a AgentSpec, inner string) string {
+	base := strings.ToLower(path.Base(strings.Fields(a.InnerCommand())[0]))
+	hasArg := func(want ...string) bool {
+		for _, field := range strings.Fields(inner) {
+			for _, candidate := range want {
+				if field == candidate {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	switch {
+	case base == "cursor-agent" || a.Name == "cursor-agent":
+		if !hasArg("--force", "-f", "--yolo") {
+			inner += " --force"
+		}
+	case base == "codex" || a.Name == "codex":
+		if !hasArg("--dangerously-bypass-approvals-and-sandbox", "--ask-for-approval", "-a") {
+			inner += " --dangerously-bypass-approvals-and-sandbox"
+		}
+	case base == "claude" || a.Name == "claude":
+		if !hasArg("--dangerously-skip-permissions", "--permission-mode") {
+			inner += " --dangerously-skip-permissions"
+		}
+	}
+	return inner
 }
 
 func withAgentRelayHooks(a AgentSpec, inner string) string {
