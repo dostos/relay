@@ -21,6 +21,7 @@ import (
 	"github.com/dostos/relay/internal/core"
 	"github.com/dostos/relay/internal/persist/tmux"
 	"github.com/dostos/relay/internal/ports"
+	localtransport "github.com/dostos/relay/internal/transport/local"
 	sshtransport "github.com/dostos/relay/internal/transport/ssh"
 	"github.com/dostos/relay/internal/ui"
 	"github.com/dostos/relay/internal/viz/cmux"
@@ -58,6 +59,12 @@ func New() *App {
 		if hostID == "" {
 			return nil, fmt.Errorf("host required")
 		}
+		// "local" is an identity, not a resolvable hostname. Sending it to ssh
+		// made every local session — including root manager panes — fail with
+		// "could not resolve hostname local".
+		if hostID == core.LocalHostID {
+			return localtransport.New(), nil
+		}
 		return sshtransport.New(hostID), nil
 	}
 	profiles := &core.ProfileService{NewTransport: tf}
@@ -66,6 +73,7 @@ func New() *App {
 		Profiles:     profiles,
 		NewTransport: tf,
 		Persist:      persist,
+		Viz:          viz,
 	}
 	handoffs := &core.HandoffService{
 		Sessions:     sessions,

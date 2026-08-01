@@ -24,6 +24,18 @@ type SessionService struct {
 	Profiles     *ProfileService
 	NewTransport TransportFactory
 	Persist      ports.Persistence
+	// Viz is the visualisation adapter. It is consulted only for sessions
+	// whose persistence is the viz itself (cmux panes), and may be nil.
+	Viz ports.Viz
+}
+
+// ScreenCapturer is an optional Viz capability: reading a pane's visible text.
+//
+// Most sessions are tmux-backed, so their text comes from the persistence
+// adapter. A cmux pane has no tmux server behind it — asking tmux for it fails
+// with "no server running", naming a subsystem that was never involved.
+type ScreenCapturer interface {
+	CaptureScreen(ctx context.Context, sessionID string, lines int) (string, error)
 }
 
 func (s *SessionService) applyChrome(ctx context.Context, t ports.Transport, h ports.PersistHandle) {
@@ -371,6 +383,13 @@ func (s *SessionService) Capture(ctx context.Context, id string, lines int) (str
 	}
 	if lines <= 0 {
 		lines = 50
+	}
+	if sess.Persist.Kind == LocalPersistKind {
+		capturer, ok := s.Viz.(ScreenCapturer)
+		if !ok {
+			return "", fmt.Errorf("capture %s: cmux pane text is not readable through this viz adapter", id)
+		}
+		return capturer.CaptureScreen(ctx, sess.ID, lines)
 	}
 	return s.Persist.Capture(ctx, t, sess.Persist, lines)
 }

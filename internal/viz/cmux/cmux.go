@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1339,4 +1340,28 @@ func (v *Viz) ManagedPanes(ctx context.Context) ([]ManagedPane, error) {
 		return panes[i].SessionID < panes[j].SessionID
 	})
 	return panes, nil
+}
+
+// CaptureScreen reads the visible text of the pane bound to a session,
+// implementing core.ScreenCapturer.
+//
+// A cmux-backed session has no tmux server behind it, so the persistence
+// adapter cannot read it — capture used to fail with "no server running",
+// naming a subsystem that was never involved. That left every local pane,
+// including root manager panes, unreadable.
+func (v *Viz) CaptureScreen(ctx context.Context, sessionID string, lines int) (string, error) {
+	b, err := v.lookup(sessionID)
+	if err != nil {
+		return "", err
+	}
+	if lines <= 0 {
+		lines = 50
+	}
+	args := surfaceCommand("read-screen", b.Surface, b.Workspace,
+		"--lines", strconv.Itoa(lines))
+	out, err := v.run(ctx, args...)
+	if err != nil {
+		return "", fmt.Errorf("read pane for %s: %w", sessionID, err)
+	}
+	return out, nil
 }
