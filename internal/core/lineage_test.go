@@ -45,6 +45,45 @@ func TestLoadAndFormatHistory(t *testing.T) {
 	}
 }
 
+func TestCommunicationPageIsCompactAndCursorBased(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	first := &ParentMessage{
+		ID: "pm-1", CorrelationID: "corr-1", ParentSessionID: "sess-parent",
+		ChildSessionID: "sess-child", HandoffID: "ho-1", Kind: "ask",
+		Text: strings.Repeat("inspect benchmark evidence ", 20),
+	}
+	if err := AppendCommunication(first, "request", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendCommunication(first, "reply", "continue with observability only"); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendCommunication(&ParentMessage{
+		ID: "pm-other", CorrelationID: "corr-other", ParentSessionID: "sess-other",
+		ChildSessionID: "sess-other-child", HandoffID: "ho-other", Kind: "result", Text: "done",
+	}, "request", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := LoadCommunicationPage("sess-parent", "", 0, 1)
+	if err != nil || len(page.Entries) != 1 || !page.HasMore || page.NextAfter != 1 {
+		t.Fatalf("first page=%+v err=%v", page, err)
+	}
+	entry := page.Entries[0]
+	if entry.MessageID != "pm-1" || entry.Action != "request" || entry.Summary == "" || len(entry.Summary) > 243 {
+		t.Fatalf("compact entry=%+v", entry)
+	}
+
+	next, err := LoadCommunicationPage("sess-parent", "ho-1", page.NextAfter, 20)
+	if err != nil || len(next.Entries) != 1 || next.Entries[0].Action != "reply" || next.NextAfter != 3 || next.HasMore {
+		t.Fatalf("next page=%+v err=%v", next, err)
+	}
+	empty, err := LoadCommunicationPage("sess-parent", "", next.NextAfter, 20)
+	if err != nil || len(empty.Entries) != 0 || empty.NextAfter != 3 {
+		t.Fatalf("empty page=%+v err=%v", empty, err)
+	}
+}
+
 func TestRelaySessionCommandCarriesBridgeIdentity(t *testing.T) {
 	got := relaySessionCommand("bash -l", "sess-123", "c3", "named", "br-secret")
 	for _, want := range []string{"RELAY_SESSION_ID='sess-123'", "RELAY_SESSION_HOST='c3'", "RELAY_SESSION_NAME='named'", "RELAY_SOURCE_TOKEN='br-secret'", BridgeRemoteSocket("sess-123")} {

@@ -94,6 +94,7 @@ relay parent bind sess-… --surface surface:…  # cmux restarted the root pane
 relay parent link sess-… ho-…        # adopt existing work
 relay parent move sess-… ho-…        # explicitly repair a wrong parent edge
 relay parent inbox sess-…            # compact, cursor-free durable inbox
+relay parent log sess-… --after 0    # append-only compact communication delta
 relay parent reply pm-… approve
 relay parent ack pm-…
 ```
@@ -126,6 +127,11 @@ once after delivery succeeds. Rebinding a parent retries its undelivered inbox;
 it never replays the sensor samples.
 No transcript is forwarded and no Relay instruction is added to the child
 goal. Set `relay_hooks: off` only when an agent runtime cannot execute hooks.
+
+Managers that need durable context use `relay parent log PARENT --after N` and
+persist the returned `next_after`. The log records only meaningful request,
+reply, acknowledgement, result, and policy transitions with a bounded summary;
+it never stores or replays a conversation transcript or idle sensor samples.
 
 The desktop policy gate removes redundant hook/fallback pings automatically
 and can answer stable CLI prompts with explicit literal-guarded rules. It

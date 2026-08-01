@@ -221,6 +221,7 @@ type HistoryEdge struct {
 }
 
 type HistoryCommunication struct {
+	Seq             int64     `json:"seq"`
 	MessageID       string    `json:"message_id"`
 	CorrelationID   string    `json:"correlation_id"`
 	ParentSessionID string    `json:"parent_session_id"`
@@ -230,7 +231,30 @@ type HistoryCommunication struct {
 	Action          string    `json:"action"`
 	PolicyID        string    `json:"policy_id,omitempty"`
 	AutoHandled     bool      `json:"auto_handled,omitempty"`
+	Summary         string    `json:"summary,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
+}
+
+// CommunicationPage is the compact cursor-based view consumed by managers.
+// The append-only ledger retains full routing metadata; this projection omits
+// graph nodes and transcripts so an agent reads only new goal transitions.
+type CommunicationEntry struct {
+	Seq           int64  `json:"seq"`
+	MessageID     string `json:"message_id"`
+	CorrelationID string `json:"correlation_id,omitempty"`
+	ChildSession  string `json:"child_session_id"`
+	HandoffID     string `json:"handoff_id,omitempty"`
+	Kind          string `json:"kind"`
+	Action        string `json:"action"`
+	Summary       string `json:"summary,omitempty"`
+	PolicyID      string `json:"policy_id,omitempty"`
+	AutoHandled   bool   `json:"auto_handled,omitempty"`
+}
+
+type CommunicationPage struct {
+	Entries   []CommunicationEntry `json:"entries"`
+	NextAfter int64                `json:"next_after"`
+	HasMore   bool                 `json:"has_more"`
 }
 
 type HistoryGraph struct {
@@ -253,6 +277,7 @@ func LoadHistory() (*HistoryGraph, error) {
 	nodes := map[string]HistoryNode{}
 	var edges []HistoryEdge
 	var communications []HistoryCommunication
+	var communicationSeq int64
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 2<<20)
 	for sc.Scan() {
@@ -275,12 +300,15 @@ func LoadHistory() (*HistoryGraph, error) {
 			continue
 		}
 		if typ == "communication" {
+			communicationSeq++
 			ts, _ := time.Parse(time.RFC3339, textField(raw, "ts"))
 			communications = append(communications, HistoryCommunication{
+				Seq:       communicationSeq,
 				MessageID: textField(raw, "message_id"), CorrelationID: textField(raw, "correlation_id"),
 				ParentSessionID: textField(raw, "parent_session_id"), ChildSessionID: textField(raw, "child_session_id"),
 				HandoffID: textField(raw, "handoff_id"), Kind: textField(raw, "kind"), Action: textField(raw, "action"),
-				PolicyID: textField(raw, "policy_id"), AutoHandled: boolField(raw, "auto_handled"), CreatedAt: ts,
+				PolicyID: textField(raw, "policy_id"), AutoHandled: boolField(raw, "auto_handled"),
+				Summary: firstTextField(raw, "summary", "text"), CreatedAt: ts,
 			})
 			continue
 		}
@@ -331,10 +359,57 @@ func LoadHistory() (*HistoryGraph, error) {
 	}
 	sort.Slice(graph.Nodes, func(i, j int) bool { return graph.Nodes[i].CreatedAt.Before(graph.Nodes[j].CreatedAt) })
 	sort.Slice(graph.Edges, func(i, j int) bool { return graph.Edges[i].CreatedAt.Before(graph.Edges[j].CreatedAt) })
-	sort.Slice(graph.Communications, func(i, j int) bool {
-		return graph.Communications[i].CreatedAt.Before(graph.Communications[j].CreatedAt)
-	})
+	sort.Slice(graph.Communications, func(i, j int) bool { return graph.Communications[i].Seq < graph.Communications[j].Seq })
 	return graph, nil
+}
+
+func firstTextField(raw map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value := textField(raw, key); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+// LoadCommunicationPage returns only new communication transitions for one
+// manager. Cursor values are stable append-only communication sequence IDs;
+// callers persist next_after and never reread prior history.
+func LoadCommunicationPage(parentID, handoffID string, after int64, limit int) (*CommunicationPage, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	graph, err := LoadHistory()
+	if err != nil {
+		return nil, err
+	}
+	page := &CommunicationPage{Entries: []CommunicationEntry{}, NextAfter: after}
+	for _, entry := range graph.Communications {
+		if entry.Seq <= after {
+			continue
+		}
+		if entry.ParentSessionID != parentID || (handoffID != "" && entry.HandoffID != handoffID) {
+			if entry.Seq > page.NextAfter {
+				page.NextAfter = entry.Seq
+			}
+			continue
+		}
+		if len(page.Entries) >= limit {
+			page.HasMore = true
+			break
+		}
+		page.Entries = append(page.Entries, CommunicationEntry{
+			Seq: entry.Seq, MessageID: entry.MessageID, CorrelationID: entry.CorrelationID,
+			ChildSession: entry.ChildSessionID, HandoffID: entry.HandoffID,
+			Kind: entry.Kind, Action: entry.Action, Summary: entry.Summary,
+			PolicyID: entry.PolicyID, AutoHandled: entry.AutoHandled,
+		})
+		page.NextAfter = entry.Seq
+	}
+	return page, nil
 }
 
 func textField(raw map[string]any, key string) string {

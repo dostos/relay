@@ -485,6 +485,8 @@ Long-lived goal orchestration (durable compact inbox + guarded local-pane cleanu
   relay parent move PARENT HANDOFF             # explicitly repair a wrong parent edge
   relay parent list
   relay parent inbox PARENT [--all]
+  relay parent log PARENT [--after CURSOR] [--limit N] [--handoff ID]
+                                      Read only new compact goal transitions.
   relay parent sweep PARENT                  # ack stale notices from terminal children
   relay parent reply MESSAGE [--] TEXT
   relay parent ack MESSAGE
@@ -1786,6 +1788,53 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 			items = append(items, core.CompactParentMessage(msg, all))
 		}
 		return a.errOut(a.out(map[string]any{"ok": true, "parent_session_id": parentID, "messages": items, "count": len(items)}))
+	case "log":
+		if len(args) < 2 || strings.HasPrefix(args[1], "-") {
+			return a.fail(fmt.Errorf("usage: relay parent log PARENT [--after CURSOR] [--limit N] [--handoff ID]"))
+		}
+		parentID, handoffID := args[1], ""
+		var after int64
+		limit := 20
+		for i := 2; i < len(args); i++ {
+			switch args[i] {
+			case "--after":
+				i++
+				if i >= len(args) {
+					return a.fail(fmt.Errorf("--after requires a cursor"))
+				}
+				var err error
+				after, err = strconv.ParseInt(args[i], 10, 64)
+				if err != nil || after < 0 {
+					return a.fail(fmt.Errorf("invalid --after cursor %q", args[i]))
+				}
+			case "--limit":
+				i++
+				if i >= len(args) {
+					return a.fail(fmt.Errorf("--limit requires a number"))
+				}
+				var err error
+				limit, err = strconv.Atoi(args[i])
+				if err != nil || limit < 1 || limit > 100 {
+					return a.fail(fmt.Errorf("--limit must be between 1 and 100"))
+				}
+			case "--handoff":
+				i++
+				if i >= len(args) || strings.HasPrefix(args[i], "-") {
+					return a.fail(fmt.Errorf("--handoff requires an ID"))
+				}
+				handoffID = args[i]
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
+			}
+		}
+		if err := authorizeParentCaller(parentID); err != nil {
+			return a.fail(err)
+		}
+		page, err := core.LoadCommunicationPage(parentID, handoffID, after, limit)
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "parent_session_id": parentID, "log": page}))
 	case "sweep":
 		if len(args) != 2 || strings.HasPrefix(args[1], "-") {
 			return a.fail(fmt.Errorf("usage: relay parent sweep PARENT"))
@@ -2297,13 +2346,13 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 			"start":   []string{"relay", "agent", "start", "HOST", "AGENT", "--", "GOAL"},
 			"restart": []string{"relay", "agent", "restart", "HANDOFF"},
 			"resume":  []string{"relay", "agent", "status", "HANDOFF"},
-			"inbox":   []string{"relay", "parent", "inbox", "PARENT"},
+			"log":     []string{"relay", "parent", "log", "PARENT", "--after", "CURSOR"},
 			"rules": []string{
-				"execute response.argv once",
-				"on wait timeout stop; never poll or attach",
-				"child talks only to manager; only local root asks human",
-				"use parent inbox for decisions and receipts; never send transcripts",
-				"hooks signal input/result/exit; policies handle guarded/redundant events, else escalate",
+				"run response.argv once",
+				"wait timeout means stop; never poll/attach",
+				"child->manager; only local root->human",
+				"inbox=decisions; log --after=delta context; no transcripts",
+				"hooks/policies handle routine events; otherwise escalate",
 			},
 		}))
 	case "pick":

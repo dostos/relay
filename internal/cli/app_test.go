@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -182,6 +183,28 @@ func TestParentMessageArgsArePositional(t *testing.T) {
 	}
 	if id, _ := parentMessageArgs([]string{"--message", "pm-1"}); id != "" {
 		t.Fatalf("removed --message syntax was accepted: %q", id)
+	}
+}
+
+func TestParentLogReturnsCursorDelta(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	msg := &core.ParentMessage{
+		ID: "pm-1", CorrelationID: "corr-1", ParentSessionID: "sess-parent",
+		ChildSessionID: "sess-child", HandoffID: "ho-1", Kind: "result", Text: "checkpoint complete",
+	}
+	if err := core.AppendCommunication(msg, "request", ""); err != nil {
+		t.Fatal(err)
+	}
+	a := New()
+	out := captureStdout(t, func() {
+		if code := a.Run([]string{"parent", "log", "sess-parent", "--after", "0", "--limit", "1"}); code != 0 {
+			t.Fatalf("parent log exit=%d", code)
+		}
+	})
+	for _, want := range []string{`"next_after":1`, `"summary":"checkpoint complete"`, `"message_id":"pm-1"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("parent log missing %s: %s", want, out)
+		}
 	}
 }
 

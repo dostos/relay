@@ -1179,12 +1179,23 @@ func AppendCommunication(msg *ParentMessage, action, text string) error {
 		"parent_session_id": msg.ParentSessionID, "child_session_id": msg.ChildSessionID,
 		"handoff_id": msg.HandoffID, "kind": msg.Kind, "event_seq": msg.EventSeq,
 	}
-	if text != "" {
-		record["text"] = compactText(text)
+	if text == "" && action == "request" {
+		text = msg.Text
+	}
+	if summary := communicationSummary(text); summary != "" {
+		record["summary"] = summary
 	}
 	if msg.PolicyID != "" {
 		record["policy_id"] = msg.PolicyID
 		record["auto_handled"] = true
 	}
 	return AppendLedger(record)
+}
+
+func communicationSummary(text string) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if len(text) > 240 {
+		text = text[:239] + "…"
+	}
+	return text
 }
