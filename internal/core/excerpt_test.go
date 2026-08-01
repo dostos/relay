@@ -88,3 +88,39 @@ func TestDecisionExcerptKeepsProseContainingPunctuation(t *testing.T) {
 		t.Fatalf("prose with punctuation must survive, got %q", got)
 	}
 }
+
+// Chrome is per-agent, and the first version of this filter only knew Claude
+// Code's. Run against a live Cursor pane it returned 269 characters of braille
+// spinner, token counter, product tip, keybinding hint and status bar — no
+// decision content at all. These are that pane's exact trailing lines.
+func TestDecisionExcerptSkipsCursorChrome(t *testing.T) {
+	capture := `
+▎+ Does not alter default table claims. Does not change Auth A / v2.1
+▎  seals.
+▎ … truncated (164 more lines) · ctrl+r to review
+
+⠀⠞ Editing  9.43k tokens
+Tip: Try Cursor Grok 4.5 via /model, frontier intelligence at a fraction of
+the cost.
+
+
+→ Add a follow-up — /plan to review and build                   ctrl+c to stop
+
+
+Cursor Grok 4.5 High Fast · 79.6% · 83 files edited             Run Everything
+~/gh/dostos-workspace
+`
+	got := decisionExcerpt(capture)
+	for _, noise := range []string{"⠀", "tokens", "Tip:", "the cost", "ctrl+", "truncated", "Run Everything", "~/gh"} {
+		if strings.Contains(got, noise) {
+			t.Errorf("chrome %q reached the manager: %q", noise, got)
+		}
+	}
+	if !strings.Contains(got, "Does not alter default table claims") {
+		t.Fatalf("the decidable statement must survive, got %q", got)
+	}
+	// The diff gutter is a rendering artefact, not content.
+	if strings.Contains(got, "▎") {
+		t.Errorf("gutter marker survived: %q", got)
+	}
+}

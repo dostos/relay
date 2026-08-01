@@ -843,6 +843,37 @@ func isChromeLine(line string) bool {
 			return true
 		}
 	}
+	// Braille glyphs are spinner frames in every TUI that uses them.
+	for _, r := range line {
+		if r >= 0x2800 && r <= 0x28FF {
+			return true
+		}
+	}
+	lower := strings.ToLower(line)
+	// Keybinding hints: "ctrl+c to stop", "ctrl+r to review".
+	if strings.Contains(lower, "ctrl+") || strings.Contains(lower, "ctrl +") {
+		return true
+	}
+	// Token/usage counters: a number next to the word tokens.
+	if strings.Contains(lower, "tokens") && strings.ContainsAny(line, "0123456789") {
+		return true
+	}
+	// Product nudges the agent prints between turns.
+	if strings.HasPrefix(line, "Tip:") {
+		return true
+	}
+	// Status bars: middle-dot separated with a percentage.
+	if strings.Contains(line, "·") && strings.Contains(line, "%") {
+		return true
+	}
+	// A bare working-directory line under a status bar.
+	if strings.HasPrefix(line, "~/") && !strings.ContainsAny(line, " \t") {
+		return true
+	}
+	// Scrollback pointers: "… truncated (164 more lines)".
+	if strings.Contains(lower, "truncated (") && strings.Contains(lower, "more lines") {
+		return true
+	}
 	// Status/footer bars: a model or path breadcrumb rather than a sentence.
 	if strings.HasPrefix(line, "|") && strings.Contains(line, "Auto") && strings.Contains(line, "~/") {
 		return true
@@ -854,6 +885,21 @@ func isChromeLine(line string) bool {
 		return true
 	}
 	return false
+}
+
+// stripGutter removes a diff/code-block gutter prefix ("▎+ ", "▎  ") so the
+// prose inside a diff reads as prose and does not spend characters on markers
+// the manager cannot act on.
+func stripGutter(line string) string {
+	trimmed := strings.TrimLeft(line, "▎▏│┃ ")
+	if trimmed == "" {
+		return trimmed
+	}
+	// Only drop a +/- that was acting as a diff marker, i.e. followed by space.
+	if len(trimmed) > 1 && (trimmed[0] == '+' || trimmed[0] == '-') && trimmed[1] == ' ' {
+		trimmed = strings.TrimSpace(trimmed[1:])
+	}
+	return trimmed
 }
 
 // decisionExcerpt pulls the part of a child's screen a manager can actually
@@ -868,9 +914,17 @@ func isChromeLine(line string) bool {
 func decisionExcerpt(capture string) string {
 	lines := strings.Split(capture, "\n")
 	useful := make([]string, 0, len(lines))
+	// A wrapped product nudge continues onto the next line with no marker of
+	// its own, so the tip's second half would otherwise read as prose.
+	afterTip := false
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
+		wasAfterTip := afterTip
+		afterTip = strings.HasPrefix(line, "Tip:")
 		if line == "" || isFrameLine(line) || isChromeLine(line) {
+			continue
+		}
+		if wasAfterTip {
 			continue
 		}
 		// A table row is data without its header; the prose around it carries
@@ -878,7 +932,7 @@ func decisionExcerpt(capture string) string {
 		if strings.HasPrefix(line, "│") || strings.HasPrefix(line, "|") {
 			continue
 		}
-		useful = append(useful, line)
+		useful = append(useful, stripGutter(line))
 	}
 	if len(useful) > 6 {
 		useful = useful[len(useful)-6:]
