@@ -127,6 +127,19 @@ type ProjectionInventory interface {
 	ProjectionSessions(context.Context) ([]ProjectedSession, error)
 }
 
+// ResumeTarget is an authority-projected session joined to owner-local SSH
+// policy. It lets a projection-only client attach without copying authority.
+type ResumeTarget struct {
+	Host     string
+	User     string
+	Port     int
+	Identity string
+}
+
+type ResumeResolver interface {
+	ResolveProjectedResume(context.Context, string) (ResumeTarget, error)
+}
+
 // Viz presents sessions to a human. cmux is the default; may be a no-op.
 type Viz interface {
 	Kind() string

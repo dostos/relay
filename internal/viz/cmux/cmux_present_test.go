@@ -32,6 +32,45 @@ func TestVizServiceUsesRelayManagedReconnect(t *testing.T) {
 	}
 }
 
+func TestControlSSHArgsPinsDedicatedNonMultiplexedIdentity(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	v := &Viz{Control: &targetConfig{Host: "home.example", User: "viz", Port: 2222, Identity: "~/.ssh/viz"}}
+	args, err := v.controlSSHArgs("viz-snapshot relay-viz-mac")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"IdentitiesOnly=yes", "ControlMaster=no", "ControlPath=none", "-i " + filepath.Join(os.Getenv("HOME"), ".ssh/viz")} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("control SSH args %q missing %q", joined, want)
+		}
+	}
+	if _, err := (&Viz{Control: &targetConfig{Host: "home.example"}}).controlSSHArgs("viz-snapshot relay-viz-mac"); err == nil {
+		t.Fatal("control connection without dedicated identity was accepted")
+	}
+}
+
+func TestProjectedResumeUsesAuthoritySnapshotAndLocalTargetPolicy(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("RELAY_STATE_DIR", state)
+	t.Setenv("HOME", t.TempDir())
+	v := &Viz{Targets: map[string]targetConfig{"home-relay": {Host: "home.example", User: "dostos", Port: 2222, Identity: "~/.ssh/viz"}}}
+	raw, _ := json.Marshal([]ports.Presentation{{SessionID: "sess-apex", Target: "home-relay", TmuxName: "apex-v4"}})
+	if err := saveBytes(v.authoritySnapshotPath(), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target, err := v.ResolveProjectedResume(context.Background(), "apex-v4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Host != "home.example" || target.User != "dostos" || target.Port != 2222 || target.Identity != filepath.Join(os.Getenv("HOME"), ".ssh/viz") {
+		t.Fatalf("resume target=%+v", target)
+	}
+	if _, err := v.ResolveProjectedResume(context.Background(), "missing"); err == nil {
+		t.Fatal("missing authoritative session was accepted")
+	}
+}
+
 func TestDuplicateSurfaceHasOneDeterministicLiveOwner(t *testing.T) {
 	now := time.Now().UTC()
 	old := binding{SessionID: "sess-old", Surface: "surface:1", Revision: 2, UpdatedAt: now}

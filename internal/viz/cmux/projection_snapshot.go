@@ -64,3 +64,36 @@ func saveBytes(path string, raw []byte, mode os.FileMode) error {
 	}
 	return os.Rename(tmp, path)
 }
+
+func (v *Viz) ResolveProjectedResume(_ context.Context, persistName string) (ports.ResumeTarget, error) {
+	raw, err := os.ReadFile(v.authoritySnapshotPath())
+	if err != nil {
+		return ports.ResumeTarget{}, fmt.Errorf("current visualization authority snapshot unavailable: %w", err)
+	}
+	var snapshot []ports.Presentation
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return ports.ResumeTarget{}, fmt.Errorf("invalid visualization authority snapshot: %w", err)
+	}
+	var matched *ports.Presentation
+	for i := range snapshot {
+		item := &snapshot[i]
+		if item.TmuxName != persistName {
+			continue
+		}
+		if matched != nil {
+			return ports.ResumeTarget{}, fmt.Errorf("multiple authoritative sessions use persist name %q", persistName)
+		}
+		matched = item
+	}
+	if matched == nil {
+		return ports.ResumeTarget{}, fmt.Errorf("session %q is absent from the current authoritative projection", persistName)
+	}
+	mapped, ok := v.Targets[matched.Target]
+	if !ok {
+		return ports.ResumeTarget{}, fmt.Errorf("no visualization target policy for authority host %q", matched.Target)
+	}
+	if !vizTargetRE.MatchString(mapped.Host) || (mapped.User != "" && !vizTargetRE.MatchString(mapped.User)) || mapped.Port < 0 || mapped.Port > 65535 || strings.ContainsAny(mapped.Identity, "\r\n\x00") {
+		return ports.ResumeTarget{}, fmt.Errorf("invalid visualization target mapping for %q", matched.Target)
+	}
+	return ports.ResumeTarget{Host: mapped.Host, User: mapped.User, Port: mapped.Port, Identity: expandServicePath(mapped.Identity)}, nil
+}

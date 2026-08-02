@@ -143,10 +143,14 @@ func (v *Viz) controlSSHArgs(remoteCommand string) ([]string, error) {
 	if v.Control == nil || !vizTargetRE.MatchString(v.Control.Host) || (v.Control.User != "" && !vizTargetRE.MatchString(v.Control.User)) || v.Control.Port < 0 || v.Control.Port > 65535 {
 		return nil, fmt.Errorf("valid visualization control target required")
 	}
-	args := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5"}
-	if v.Control.Identity != "" {
-		args = append(args, "-i", expandServicePath(v.Control.Identity))
+	if strings.TrimSpace(v.Control.Identity) == "" {
+		return nil, fmt.Errorf("dedicated visualization control identity required")
 	}
+	args := []string{
+		"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5",
+		"-o", "IdentitiesOnly=yes", "-o", "ControlMaster=no", "-o", "ControlPath=none",
+	}
+	args = append(args, "-i", expandServicePath(v.Control.Identity))
 	if v.Control.Port > 0 {
 		args = append(args, "-p", strconv.Itoa(v.Control.Port))
 	}

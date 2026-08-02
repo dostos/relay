@@ -3490,6 +3490,25 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 	if targetHost == "" && (opts.TargetUser != "" || opts.TargetPort != 0 || opts.TargetIdentity != "") {
 		return a.fail(fmt.Errorf("--user, --port, and --identity require --host"))
 	}
+	if targetHost == "" {
+		authorityErr := core.EnsureAuthorityReadable()
+		if authorityErr != nil && !errors.Is(authorityErr, core.ErrProjectionOnlyAuthority) {
+			return a.fail(authorityErr)
+		}
+		if errors.Is(authorityErr, core.ErrProjectionOnlyAuthority) {
+			resolver, ok := a.Viz.(ports.ResumeResolver)
+			if !ok {
+				return a.fail(core.ErrProjectionOnlyAuthority)
+			}
+			target, err := resolver.ResolveProjectedResume(ctx, session)
+			if err != nil {
+				return a.fail(err)
+			}
+			opts.TargetHost, opts.TargetUser = target.Host, target.User
+			opts.TargetPort, opts.TargetIdentity = target.Port, target.Identity
+			targetHost = target.Host
+		}
+	}
 	if opts.Surface == "" {
 		opts.Surface, _ = core.CurrentSurface()
 	}
