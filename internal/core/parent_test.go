@@ -714,7 +714,7 @@ func TestRetirementGateRequiresStateChildrenInboxAndPushedRepos(t *testing.T) {
 	_ = reg.PutHandoff(ho)
 	viz := &fakeRetirementViz{}
 	service.Viz = viz
-	retired, err := service.Retire(context.Background(), parent.ID, false)
+	retired, err := service.Retire(context.Background(), parent.ID, false, false, false)
 	if err != nil || !retired.Eligible || !retired.Closed {
 		t.Fatalf("retire=%+v err=%v", retired, err)
 	}

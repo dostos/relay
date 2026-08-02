@@ -1939,10 +1939,15 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		}
 		sessionID := args[1]
 		dryRun := args[0] == "status"
+		force, keepViz := false, false
 		for i := 2; i < len(args); i++ {
 			switch args[i] {
 			case "--dry-run":
 				dryRun = true
+			case "--force":
+				force = true
+			case "--keep-viz":
+				keepViz = true
 			default:
 				return a.fail(rejectUnknownFlag(args[i]))
 			}
@@ -1952,7 +1957,7 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 				return a.fail(err)
 			}
 		}
-		gate, err := a.Parents.Retire(ctx, sessionID, dryRun)
+		gate, err := a.Parents.Retire(ctx, sessionID, dryRun, force, keepViz)
 		if err != nil {
 			return a.fail(err)
 		}

@@ -1447,12 +1447,12 @@ func (p *ParentService) RetirementStatus(ctx context.Context, sessionID string) 
 	return gate, nil
 }
 
-func (p *ParentService) Retire(ctx context.Context, sessionID string, dryRun bool) (*RetirementGate, error) {
+func (p *ParentService) Retire(ctx context.Context, sessionID string, dryRun, force, keepViz bool) (*RetirementGate, error) {
 	gate, err := p.RetirementStatus(ctx, sessionID)
-	if err != nil || !gate.Eligible || dryRun {
+	if err != nil || (!gate.Eligible && !force) || dryRun {
 		return gate, err
 	}
-	if p.Viz != nil {
+	if p.Viz != nil && !keepViz {
 		if err := p.Viz.Close(ctx, sessionID); err != nil {
 			return gate, err
 		}
@@ -1461,7 +1461,7 @@ func (p *ParentService) Retire(ctx context.Context, sessionID string, dryRun boo
 		return gate, err
 	}
 	gate.Closed = true
-	_ = AppendLedger(map[string]any{"v": 1, "type": "parent_retire", "ts": time.Now().UTC().Format(time.RFC3339), "session_id": sessionID})
+	_ = AppendLedger(map[string]any{"v": 1, "type": "parent_retire", "ts": time.Now().UTC().Format(time.RFC3339), "session_id": sessionID, "forced": force, "keep_viz": keepViz, "bypassed_reasons": gate.Reasons})
 	return gate, nil
 }
 
