@@ -356,6 +356,11 @@ the optional Mac `relayd viz` service through a durable local queue. The Mac
 owns SSH attachment and placement policy, and consumes that queue using its own
 outbound SSH connection. Configure home's `~/.config/relay/viz.json`:
 
+The command server also follows the Viz acknowledgement stream and replaces a
+queued reference only after the Mac reports the actual surface. This protocol
+contains no agent/provider field: interactive sessions, jobs, and any agent CLI
+use the same request, receipt, and cursor path.
+
 ```json
 {
   "service_id": "mac"

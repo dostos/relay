@@ -15,6 +15,7 @@ func TestApplyPresentationAckReplacesQueuedReference(t *testing.T) {
 	reg := &core.Registry{}
 	sess := &core.Session{
 		ID: "sess-child", HostID: "c3", Persist: ports.PersistHandle{Kind: "tmux", Name: "engram"},
+		Labels:        map[string]string{"agent": "future-agent-cli"},
 		VizSurfaceRef: "viz:queued:17", CreatedAt: time.Now().UTC(),
 	}
 	if err := reg.PutSession(sess); err != nil {
@@ -33,6 +34,9 @@ func TestApplyPresentationAckReplacesQueuedReference(t *testing.T) {
 	}
 	if got.VizSurfaceRef != "surface:42" {
 		t.Fatalf("viz ref = %q", got.VizSurfaceRef)
+	}
+	if got.Labels["agent"] != "future-agent-cli" {
+		t.Fatalf("agent-agnostic metadata changed: %+v", got.Labels)
 	}
 }
 
