@@ -3077,6 +3077,17 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 		}
 		a.JSON = true
 		return a.errOut(a.out(map[string]any{"ok": true, "seq": seq, "kind": "migrate_control"}))
+	case "retire-control":
+		retirer, ok := a.Viz.(interface{ QueueControlRetirement() (int64, error) })
+		if !ok {
+			return a.fail(fmt.Errorf("viz adapter does not expose control retirement"))
+		}
+		seq, err := retirer.QueueControlRetirement()
+		if err != nil {
+			return a.fail(err)
+		}
+		a.JSON = true
+		return a.errOut(a.out(map[string]any{"ok": true, "seq": seq, "kind": "retire_control"}))
 	case "update":
 		updater, ok := a.Viz.(interface{ QueueUpdate() (int64, error) })
 		if !ok {

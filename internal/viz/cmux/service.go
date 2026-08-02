@@ -9,8 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/dostos/relay/internal/controlstate"
 	"github.com/dostos/relay/internal/coord"
@@ -72,6 +74,19 @@ func (v *Viz) QueueControlMigration() (int64, error) {
 		return 0, fmt.Errorf("control migration is requested by the destination control host")
 	}
 	resp, err := coordrelayd.EmitLocal(localRelaydSocket(), v.serviceChannel(), "migrate_control", nil)
+	if err != nil {
+		return 0, err
+	}
+	return resp.Seq, nil
+}
+
+// QueueControlRetirement asks the optional display host to remove its legacy
+// control processes after the authoritative host has been verified.
+func (v *Viz) QueueControlRetirement() (int64, error) {
+	if v.ServiceID == "" || v.Control != nil {
+		return 0, fmt.Errorf("control retirement is requested by the control host")
+	}
+	resp, err := coordrelayd.EmitLocal(localRelaydSocket(), v.serviceChannel(), "retire_control", nil)
 	if err != nil {
 		return 0, err
 	}
@@ -204,11 +219,73 @@ func (v *Viz) handleServiceEvent(ctx context.Context, event coord.Event) (string
 		return v.updateRelayd(ctx)
 	case "migrate_control":
 		return v.migrateControl(ctx)
+	case "retire_control":
+		return v.retireControl(ctx)
 	case "viz_ack":
 		return "ignored", nil
 	default:
 		return "", fmt.Errorf("unsupported visualization event %q", event.Kind)
 	}
+}
+
+func (v *Viz) retireControl(ctx context.Context) (string, error) {
+	if runtime.GOOS != "darwin" {
+		return "", fmt.Errorf("legacy visualization control retirement is macOS-only")
+	}
+	uid := strconv.Itoa(os.Getuid())
+	label := "com.dostos.relay-supervisor"
+	domain := "gui/" + uid + "/" + label
+	if err := exec.CommandContext(ctx, "launchctl", "print", domain).Run(); err == nil {
+		var stderr bytes.Buffer
+		cmd := exec.CommandContext(ctx, "launchctl", "bootout", domain)
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			return "", fmt.Errorf("disable legacy supervisor: %w (%s)", err, strings.TrimSpace(stderr.String()))
+		}
+	}
+	home, _ := os.UserHomeDir()
+	plist := filepath.Join(home, "Library", "LaunchAgents", label+".plist")
+	removedPlist := false
+	if err := os.Remove(plist); err == nil {
+		removedPlist = true
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("remove legacy supervisor registration: %w", err)
+	}
+
+	stoppedBridge := false
+	socket := core.DesktopBridgeSocketPath()
+	out, err := exec.CommandContext(ctx, "lsof", "-t", socket).Output()
+	if err == nil {
+		for _, field := range strings.Fields(string(out)) {
+			pid, parseErr := strconv.Atoi(field)
+			if parseErr != nil || pid == os.Getpid() {
+				continue
+			}
+			command, commandErr := exec.CommandContext(ctx, "ps", "-p", field, "-o", "command=").Output()
+			if commandErr != nil || !isLegacyBridgeCommand(string(command)) {
+				return "", fmt.Errorf("refuse to stop unrecognized desktop socket owner pid %s", field)
+			}
+			process, findErr := os.FindProcess(pid)
+			if findErr != nil {
+				return "", findErr
+			}
+			if signalErr := process.Signal(syscall.SIGTERM); signalErr != nil {
+				return "", fmt.Errorf("stop legacy desktop bridge pid %d: %w", pid, signalErr)
+			}
+			stoppedBridge = true
+		}
+	}
+	result, _ := json.Marshal(map[string]any{
+		"supervisor_plist_removed": removedPlist,
+		"bridge_stopped":           stoppedBridge,
+		"viz_preserved":            true,
+	})
+	return string(result), nil
+}
+
+func isLegacyBridgeCommand(command string) bool {
+	fields := strings.Fields(strings.TrimSpace(command))
+	return len(fields) >= 2 && filepath.Base(fields[0]) == "relayd" && fields[1] == "bridge"
 }
 
 func (v *Viz) migrateControl(ctx context.Context) (string, error) {

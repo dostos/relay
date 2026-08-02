@@ -390,6 +390,11 @@ worktree, verifies their stamped build, fast-forwards the checkout, and swaps
 the pair on the destination filesystem with rollback copies. It then
 acknowledges with the installed commit in `result`, advances its cursor, and
 lets launchd restart the follower.
+After the home bridge has been verified for local and worker sessions,
+`relay viz retire-control` durably asks the Mac to boot out and unregister the
+legacy supervisor and stop only a verified `relayd bridge` socket owner. The
+Viz follower and cmux restoration remain installed, and the Mac acknowledges
+the exact retirement result before advancing its cursor.
 `install.sh` is only for initial binary/service bootstrap. Both outbound control and target attachment are
 batch-only with strict host-key checking. If the Mac is asleep, requests wait
 durably while control work continues on home.
