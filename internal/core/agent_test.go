@@ -16,6 +16,41 @@ type agentPanePersistence struct {
 	sent    []string
 }
 
+func TestAuthorizeHandoffManagerFailover(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	reg := &Registry{}
+	now := time.Now().UTC()
+	for _, s := range []*Session{
+		{ID: "sess-apex", CreatedAt: now},
+		{ID: "sess-parent", SourceSessionID: "sess-apex", CreatedAt: now},
+		{ID: "sess-child", SourceSessionID: "sess-parent", CreatedAt: now},
+	} {
+		if err := reg.PutSession(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := reg.PutHandoff(&Handoff{ID: "ho-child", SessionID: "sess-child", SourceSessionID: "sess-parent", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	if skipped, err := AuthorizeHandoffManager(reg, "ho-child", "sess-parent", nil); err != nil || len(skipped) != 0 {
+		t.Fatalf("direct manager skipped=%v err=%v", skipped, err)
+	}
+	if _, err := AuthorizeHandoffManager(reg, "ho-child", "sess-apex", func(string) (bool, error) { return true, nil }); err == nil || !strings.Contains(err.Error(), "is live") {
+		t.Fatalf("live parent bypass err=%v", err)
+	}
+	skipped, err := AuthorizeHandoffManager(reg, "ho-child", "sess-apex", func(string) (bool, error) { return false, nil })
+	if err != nil || len(skipped) != 1 || skipped[0] != "sess-parent" {
+		t.Fatalf("absent parent failover skipped=%v err=%v", skipped, err)
+	}
+	if _, err := AuthorizeHandoffManager(reg, "ho-child", "sess-apex", func(string) (bool, error) { return false, context.DeadlineExceeded }); err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("unknown parent liveness err=%v", err)
+	}
+	if _, err := AuthorizeHandoffManager(reg, "ho-child", "sess-stranger", func(string) (bool, error) { return false, nil }); err == nil || !strings.Contains(err.Error(), "not a manager ancestor") {
+		t.Fatalf("stranger err=%v", err)
+	}
+}
+
 func (p *agentPanePersistence) Capture(context.Context, ports.Transport, ports.PersistHandle, int) (string, error) {
 	return p.capture, nil
 }

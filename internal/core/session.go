@@ -394,6 +394,28 @@ func (s *SessionService) Capture(ctx context.Context, id string, lines int) (str
 	return s.Persist.Capture(ctx, t, sess.Persist, lines)
 }
 
+// Exists confirms the backing surface/process, rather than trusting the
+// registry record. An error is unknown, not absent, and must fail closed when
+// used to authorize an ancestor skipping a manager.
+func (s *SessionService) Exists(ctx context.Context, id string) (bool, error) {
+	sess, err := s.Reg.GetSession(id)
+	if err != nil {
+		return false, err
+	}
+	if sess.Persist.Kind == LocalPersistKind {
+		_, err := s.Capture(ctx, id, 1)
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	t, err := s.transportFor(sess)
+	if err != nil {
+		return false, err
+	}
+	return s.Persist.Exists(ctx, t, sess.Persist)
+}
+
 func (s *SessionService) Send(ctx context.Context, id, text string, enter bool) error {
 	sess, err := s.Reg.GetSession(id)
 	if err != nil {

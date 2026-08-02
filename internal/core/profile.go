@@ -245,52 +245,9 @@ func (a *AgentSpec) LaunchCommand(goal string) string {
 	return "bash -ilc " + shellQuote(script)
 }
 
-// withAutonomousPermissions makes delegated goal sessions non-interactive by
-// default. A child is already constrained by its goal and host/workspace
-// boundary; pausing it for each CLI-local approval defeats durable handoff.
-// PermissionPosture records what a launch actually granted, so "what can this
-// agent do unattended" is answerable without reading config on a remote host.
-type PermissionPosture struct {
-	Autonomous bool   `json:"autonomous"`
-	Flag       string `json:"flag,omitempty"`
-	Rationale  string `json:"rationale"`
-}
-
-// withAutonomousPermissions grants a delegated child the blanket bypass: a
-// child cannot answer a permission prompt, so its manager decides via
-// escalation instead.
-//
-// An APEX must not get this. It has nobody above it, so bypassing its prompts
-// removes the last check rather than deferring it — pass autonomous=false and
-// let it escalate to the human.
-func withAutonomousPermissionsMode(a AgentSpec, inner string, autonomous bool) (string, PermissionPosture) {
-	if !autonomous {
-		return inner, PermissionPosture{
-			Autonomous: false,
-			Rationale:  "apex: prompts are NOT bypassed; it has no manager above it, so it escalates to the human",
-		}
-	}
-	return withAutonomousPermissions(a, inner), PermissionPosture{
-		Autonomous: true,
-		Flag:       autonomousFlagFor(a),
-		Rationale:  "delegated child: prompts bypassed because its manager decides via escalation",
-	}
-}
-
-// autonomousFlagFor reports which bypass flag a given agent receives.
-func autonomousFlagFor(a AgentSpec) string {
-	base := strings.ToLower(path.Base(strings.Fields(a.InnerCommand())[0]))
-	switch {
-	case base == "cursor-agent" || a.Name == "cursor-agent":
-		return "--force"
-	case base == "codex" || a.Name == "codex":
-		return "--dangerously-bypass-approvals-and-sandbox"
-	case base == "claude" || a.Name == "claude":
-		return "--dangerously-skip-permissions"
-	}
-	return ""
-}
-
+// withAutonomousPermissions gives every managed agent the provider's
+// full-access mode. Trust, login, and security gates remain separately
+// classified and are never answered by Relay.
 func withAutonomousPermissions(a AgentSpec, inner string) string {
 	base := strings.ToLower(path.Base(strings.Fields(a.InnerCommand())[0]))
 	hasArg := func(want ...string) bool {

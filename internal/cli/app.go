@@ -2769,7 +2769,7 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 			"rules": []string{
 				"managed start has no follow-up; hooks wake manager",
 				"run argv only when returned; wait timeout means stop",
-				"child->manager; only local root->human",
+				"dead parent->ancestor; root->human",
 				"blocked: relay ask QUESTION; security gates stop",
 				"log is optional cursor delta; no transcripts/polling",
 				"board=peer state; post -k KEY -- TEXT; query folds latest",
@@ -2888,6 +2888,9 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 		if len(args) < 2 || strings.HasPrefix(args[1], "-") {
 			return a.fail(fmt.Errorf("usage: relay agent restart HANDOFF [--repo DIR] [--cwd REMOTE] [--name NAME] [--no-pane]"))
 		}
+		if err := a.authorizeAgentHandoff(ctx, args[1]); err != nil {
+			return a.fail(err)
+		}
 		opts, err := a.Handoffs.AgentRestartOptions(args[1])
 		if err != nil {
 			return a.fail(err)
@@ -2934,6 +2937,9 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 			return a.fail(fmt.Errorf("usage: relay agent wait HANDOFF [--from SEQ] [--timeout SEC]"))
 		}
 		handoffID := args[1]
+		if err := a.authorizeAgentHandoff(ctx, handoffID); err != nil {
+			return a.fail(err)
+		}
 		var from int64
 		timeoutSec := 120
 		for i := 2; i < len(args); i++ {
@@ -2965,6 +2971,9 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 			return a.fail(fmt.Errorf("usage: relay agent send HANDOFF [--] TEXT"))
 		}
 		handoffID, rest := args[1], args[2:]
+		if err := a.authorizeAgentHandoff(ctx, handoffID); err != nil {
+			return a.fail(err)
+		}
 		if rest[0] == "--" {
 			rest = rest[1:]
 		}
@@ -2985,6 +2994,9 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 			return a.fail(fmt.Errorf("usage: relay agent capture HANDOFF [-n LINES]"))
 		}
 		handoffID := args[1]
+		if err := a.authorizeAgentHandoff(ctx, handoffID); err != nil {
+			return a.fail(err)
+		}
 		n := 80
 		for i := 2; i < len(args); i++ {
 			switch args[i] {
@@ -3010,6 +3022,9 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 			return a.fail(fmt.Errorf("usage: relay agent done HANDOFF [--outcome done|failed|abandoned]"))
 		}
 		handoffID := args[1]
+		if err := a.authorizeAgentHandoff(ctx, handoffID); err != nil {
+			return a.fail(err)
+		}
 		outcome := core.OutcomeDone
 		keep := false
 		closeViz := true
@@ -3041,6 +3056,9 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 			return a.fail(fmt.Errorf("usage: relay agent status HANDOFF"))
 		}
 		handoffID := args[1]
+		if err := a.authorizeAgentHandoff(ctx, handoffID); err != nil {
+			return a.fail(err)
+		}
 		resp, err := a.Handoffs.AgentStatus(ctx, handoffID)
 		if resp != nil {
 			_ = a.out(resp)
@@ -3052,6 +3070,17 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 	default:
 		return a.fail(fmt.Errorf("unknown agent subcommand %q", args[0]))
 	}
+}
+
+func (a *App) authorizeAgentHandoff(ctx context.Context, handoffID string) error {
+	caller := strings.TrimSpace(os.Getenv(bridge.SourceSessionEnv))
+	if caller == "" {
+		return nil // local human/control-plane invocation
+	}
+	_, err := core.AuthorizeHandoffManager(a.Reg, handoffID, caller, func(sessionID string) (bool, error) {
+		return a.Sessions.Exists(ctx, sessionID)
+	})
+	return err
 }
 
 func (a *App) cmdViz(ctx context.Context, args []string) int {

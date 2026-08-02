@@ -40,6 +40,43 @@ type AgentEvent struct {
 	Meta map[string]any `json:"meta,omitempty"`
 }
 
+// AuthorizeHandoffManager preserves the durable tree while allowing failover.
+// A direct manager is always authorized. A farther ancestor is authorized only
+// after every intermediate manager is conclusively absent; probe errors are
+// unknown and fail closed. The handoff's parent edge is never rewritten.
+func AuthorizeHandoffManager(reg *Registry, handoffID, caller string, exists func(string) (bool, error)) ([]string, error) {
+	ho, err := reg.GetHandoff(handoffID)
+	if err != nil {
+		return nil, err
+	}
+	if caller == "" || ho.SourceSessionID == caller {
+		return nil, nil
+	}
+	immediate, err := reg.GetSession(ho.SourceSessionID)
+	if err != nil {
+		return nil, fmt.Errorf("cannot verify immediate manager: %w", err)
+	}
+	chain := append([]*Session{immediate}, AncestorChain(reg, immediate.ID)...)
+	var skipped []string
+	for _, manager := range chain {
+		if manager.ID == caller {
+			return skipped, nil
+		}
+		if exists == nil {
+			return nil, fmt.Errorf("cannot verify manager %s liveness", manager.ID)
+		}
+		live, probeErr := exists(manager.ID)
+		if probeErr != nil {
+			return nil, fmt.Errorf("manager %s liveness is unknown: %w", manager.ID, probeErr)
+		}
+		if live {
+			return nil, fmt.Errorf("manager %s is live; ancestor %s may not bypass it", manager.ID, caller)
+		}
+		skipped = append(skipped, manager.ID)
+	}
+	return nil, fmt.Errorf("session %s is not a manager ancestor of handoff %s", caller, handoffID)
+}
+
 // DecideNext picks the single next verb after an event or timeout.
 // Pure policy — unit-tested without SSH.
 func DecideNext(kind HandoffKind, evKind string, timedOut bool) string {

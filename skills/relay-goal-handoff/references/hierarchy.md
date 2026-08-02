@@ -5,6 +5,10 @@ Relay is a strict management tree, not a role system.
 - A handoff has zero or one immediate parent. Zero means an intentional root.
 - A manager communicates with immediate children only. Never reach into a
   child's descendants or confiscate its work.
+- When an immediate manager is conclusively absent, Relay may connect the
+  nearest live ancestor to that manager's child for operational verbs and
+  escalation resolution. This is audited failover, not re-parenting: the
+  durable lineage edge stays unchanged. Unknown/unreachable is not absent.
 - A child reports progress, asks, and results to its immediate parent. It does
   not contact higher ancestors directly.
 - An unresolved decision moves through Relay's durable routing; do not manually
