@@ -382,13 +382,11 @@ func stringMeta(meta map[string]any, key string) string {
 }
 
 func (v *Viz) emitAck(ctx context.Context, event coord.Event, result string) error {
-	if event.Kind != "project" || stringMeta(event.Meta, "op") != string(ports.ProjectionUpsert) {
+	metaMap, ok := vizAckMeta(event, result)
+	if !ok {
 		return nil
 	}
-	meta, _ := json.Marshal(map[string]any{
-		"request_seq": event.Seq, "request_kind": event.Kind, "result": result, "build": coord.Build,
-		"session_id": stringMeta(event.Meta, "session_id"), "op": stringMeta(event.Meta, "op"),
-	})
+	meta, _ := json.Marshal(metaMap)
 	command := "viz-ack " + v.serviceChannel() + " " + base64.RawURLEncoding.EncodeToString(meta)
 	args, err := v.controlSSHArgs(command)
 	if err != nil {
@@ -401,6 +399,27 @@ func (v *Viz) emitAck(ctx context.Context, event coord.Event, result string) err
 		return fmt.Errorf("visualization ack: %w (%s)", err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+func vizAckMeta(event coord.Event, result string) (map[string]any, bool) {
+	switch event.Kind {
+	case "update_relayd", "retire_control":
+		return map[string]any{
+			"request_seq": event.Seq, "request_kind": event.Kind,
+			"result": result, "build": coord.Build,
+		}, true
+	case "project":
+		if stringMeta(event.Meta, "op") != string(ports.ProjectionUpsert) {
+			return nil, false
+		}
+		return map[string]any{
+			"request_seq": event.Seq, "request_kind": event.Kind,
+			"result": result, "build": coord.Build,
+			"session_id": stringMeta(event.Meta, "session_id"), "op": stringMeta(event.Meta, "op"),
+		}, true
+	default:
+		return nil, false
+	}
 }
 
 func (v *Viz) updateRelayd(ctx context.Context) (string, error) {

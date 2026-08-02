@@ -40,6 +40,14 @@ func TestApplyPresentationAckReplacesQueuedReference(t *testing.T) {
 	}
 }
 
+func TestUpdateAckReportsInstalledBuildBeforeRestart(t *testing.T) {
+	event := coord.Event{Seq: 46, Kind: "update_relayd"}
+	meta, ok := vizAckMeta(event, "d894f9f")
+	if !ok || meta["request_seq"] != int64(46) || meta["request_kind"] != "update_relayd" || meta["result"] != "d894f9f" || meta["build"] != coord.Build {
+		t.Fatalf("update ack=%+v ok=%v", meta, ok)
+	}
+}
+
 func TestApplyPresentationAckIgnoresRetiredSession(t *testing.T) {
 	t.Setenv("RELAY_STATE_DIR", t.TempDir())
 	reg := &core.Registry{}
