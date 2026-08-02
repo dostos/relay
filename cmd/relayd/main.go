@@ -73,6 +73,8 @@ Usage:
                                Optional visualization service (local policy)
   relayd viz sync             Consume queued requests from the control host
   relayd viz follow           Keep consuming while the Mac is awake
+  relayd viz authorize --service NAME --public-key-file FILE
+                               Explicitly enroll a restricted Viz SSH key
   relayd viz-broker --service NAME
                                Forced-command endpoint for a Viz-only SSH key
   relayd control export|serve
@@ -255,6 +257,9 @@ func cmdViz(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "relayd viz: ping or present required")
 		return 2
+	}
+	if args[0] == "authorize" {
+		return cmdVizAuthorize(args[1:])
 	}
 	viz := cmuxviz.New()
 	switch args[0] {

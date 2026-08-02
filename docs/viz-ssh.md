@@ -18,3 +18,15 @@ accepts only these protocol operations for the configured service:
 Use a separate key from interactive administration. Installing or changing
 this entry is an explicit owner permission decision; Relay does not edit
 `authorized_keys` automatically.
+
+The owner can perform that explicit enrollment with:
+
+```bash
+relayd viz authorize --service relay-viz-mac --public-key-file ./viz.pub
+```
+
+The command validates the key fingerprint, locks and atomically updates
+`~/.ssh/authorized_keys`, and installs only the restricted broker command. It
+refuses symlinks, unsafe permissions, malformed keys, and any existing copy of
+the key with different or unrestricted authorization. It is idempotent when
+the exact restricted entry already exists; it never guesses which key to use.
