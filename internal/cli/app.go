@@ -179,7 +179,7 @@ func (a *App) forwardThroughDesktopBridge(args []string) (int, bool) {
 		}
 		// Signals are host-local hook events. Sending them through the desktop
 		// bridge would add latency and break if the pane's attach is reconnecting.
-		if arg == "signal" || arg == "hook" {
+		if arg == "signal" || arg == "hook" || arg == "ask" {
 			return 0, false
 		}
 		break
@@ -203,6 +203,11 @@ func (a *App) forwardThroughDesktopBridge(args []string) (int, bool) {
 	resp, err := (bridge.Client{SockPath: sock}).Invoke(context.Background(), args, source)
 	if err != nil {
 		return a.fail(err), true
+	}
+	if resp.Build == "" {
+		ui.Warn("desktop bridge build is unknown; upgrade/restart the control-plane bridge")
+	} else if resp.Build != coord.Build {
+		ui.Warn(fmt.Sprintf("desktop bridge build drift: bridge=%s client=%s; upgrade/restart the control-plane bridge", resp.Build, coord.Build))
 	}
 	if resp.Stdout != "" {
 		fmt.Fprint(os.Stdout, resp.Stdout)
@@ -403,6 +408,8 @@ func (a *App) Run(args []string) int {
 		return a.cmdPolicy(filtered[1:])
 	case "signal", "hook":
 		return a.cmdSignal(ctx, filtered[0], filtered[1:])
+	case "ask":
+		return a.cmdAsk(ctx, filtered[1:])
 	case "gc":
 		return a.cmdGC(ctx, filtered[1:])
 	case "events":
@@ -498,6 +505,7 @@ Agent surface (token-efficient; always JSON; NO poll loops):
   relay agent capture ID [-n LINES]
   relay agent done ID [--outcome done|failed|abandoned] [--keep-session]
   relay agent status ID
+  relay ask [--] QUESTION                                  # declare blocked input explicitly
   relay resolve MESSAGE [--] DECISION                        # the only response handshake
   relay log [CURSOR]                                         # new compact manager context
   # Managed starts have no follow-up; execute response.argv only when present.
@@ -2347,6 +2355,7 @@ func (a *App) cmdBoard(ctx context.Context, args []string) int {
 	sub, rest := args[0], args[1:]
 	var session, category, key, text string
 	var fromSeq int64
+	var fromSet bool
 	var subtree bool
 	timeoutSec := 120
 	for i := 0; i < len(rest); i++ {
@@ -2372,6 +2381,7 @@ func (a *App) cmdBoard(ctx context.Context, args []string) int {
 			i++
 			if i < len(rest) {
 				fromSeq, _ = strconv.ParseInt(rest[i], 10, 64)
+				fromSet = true
 			}
 		case "--timeout":
 			i++
@@ -2415,6 +2425,12 @@ func (a *App) cmdBoard(ctx context.Context, args []string) int {
 		}
 		return a.errOut(a.out(map[string]any{"ok": true, "entries": entries, "count": len(entries)}))
 	case "watch":
+		if !fromSet {
+			fromSeq, err = a.Boards.CurrentSeq(ctx, caller, category)
+			if err != nil {
+				return a.fail(err)
+			}
+		}
 		entry, timedOut, err := a.Boards.Watch(ctx, caller, category, fromSeq, time.Duration(timeoutSec)*time.Second)
 		if err != nil {
 			return a.fail(err)
@@ -2641,6 +2657,17 @@ func (a *App) cmdSignal(ctx context.Context, mode string, args []string) int {
 	return a.errOut(a.out(response))
 }
 
+func (a *App) cmdAsk(ctx context.Context, args []string) int {
+	if len(args) > 0 && args[0] == "--" {
+		args = args[1:]
+	}
+	question := strings.TrimSpace(strings.Join(args, " "))
+	if question == "" {
+		return a.fail(fmt.Errorf("usage: relay ask [--] QUESTION"))
+	}
+	return a.cmdSignal(ctx, "signal", []string{"ask", "--text", question})
+}
+
 func compactHookField(value string, limit int) string {
 	value = strings.Join(strings.Fields(value), " ")
 	runes := []rune(value)
@@ -2739,7 +2766,7 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 				"managed start has no follow-up; hooks wake manager",
 				"run argv only when returned; wait timeout means stop",
 				"child->manager; only local root->human",
-				"hooks wake on input/result; result needs no ack",
+				"blocked: relay ask QUESTION; security gates stop",
 				"log is optional cursor delta; no transcripts/polling",
 				"board=peer state; post -k KEY -- TEXT; query folds latest",
 			},

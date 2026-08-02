@@ -80,6 +80,44 @@ func TestBoardQueryPeersOnlyDropsCallersOwnEntries(t *testing.T) {
 	}
 }
 
+func TestBoardBareWatchStartsAfterCurrentState(t *testing.T) {
+	board, _ := newBoardTestService(t)
+	ctx := context.Background()
+	if _, err := board.Post(ctx, "sess-a", "status", "phase", "old state"); err != nil {
+		t.Fatal(err)
+	}
+	cursor, err := board.CurrentSeq(ctx, "sess-a", "status")
+	if err != nil || cursor != 1 {
+		t.Fatalf("current cursor=%d err=%v", cursor, err)
+	}
+	entry, timedOut, err := board.Watch(ctx, "sess-a", "status", cursor, 30*time.Millisecond)
+	if err != nil || !timedOut || entry != nil {
+		t.Fatalf("old state woke watch: entry=%+v timedOut=%v err=%v", entry, timedOut, err)
+	}
+	if _, err := board.Post(ctx, "sess-b", "status", "phase", "new state"); err != nil {
+		t.Fatal(err)
+	}
+	entry, timedOut, err = board.Watch(ctx, "sess-a", "status", cursor, time.Second)
+	if err != nil || timedOut || entry == nil || entry.Text != "new state" || entry.Seq != 2 {
+		t.Fatalf("watch entry=%+v timedOut=%v err=%v", entry, timedOut, err)
+	}
+}
+
+func TestBoardWatchSkipsCallersOwnEvents(t *testing.T) {
+	board, _ := newBoardTestService(t)
+	ctx := context.Background()
+	if _, err := board.Post(ctx, "sess-a", "status", "phase", "mine"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := board.Post(ctx, "sess-b", "status", "phase", "peer"); err != nil {
+		t.Fatal(err)
+	}
+	entry, timedOut, err := board.Watch(ctx, "sess-a", "status", 0, time.Second)
+	if err != nil || timedOut || entry == nil || entry.Node != "sess-b" || entry.Text != "peer" {
+		t.Fatalf("watch entry=%+v timedOut=%v err=%v", entry, timedOut, err)
+	}
+}
+
 // Scope is structural: a board id is derived from the caller's own manager, so
 // siblings share one board and there is no way to name another subtree's.
 func TestBoardIsSharedBySiblingsAndSeparatePerManager(t *testing.T) {

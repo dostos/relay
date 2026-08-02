@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/dostos/relay/internal/coord"
@@ -18,6 +19,7 @@ type Server struct {
 	Store    *Store
 	started  time.Time
 	ln       net.Listener
+	lock     *os.File
 }
 
 // DefaultPaths returns socket and events dir under $HOME.
@@ -39,7 +41,27 @@ func (s *Server) Serve() error {
 	if err := os.MkdirAll(filepath.Dir(s.SockPath), 0o700); err != nil {
 		return err
 	}
-	_ = os.Remove(s.SockPath)
+	lock, err := os.OpenFile(s.SockPath+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = lock.Close()
+		return fmt.Errorf("relayd already owns %s", s.SockPath)
+	}
+	s.lock = lock
+	defer func() {
+		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		_ = lock.Close()
+		s.lock = nil
+	}()
+	if conn, dialErr := net.DialTimeout("unix", s.SockPath, 300*time.Millisecond); dialErr == nil {
+		_ = conn.Close()
+		return fmt.Errorf("relayd already listening at %s", s.SockPath)
+	}
+	if err := os.Remove(s.SockPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	ln, err := net.Listen("unix", s.SockPath)
 	if err != nil {
 		return err

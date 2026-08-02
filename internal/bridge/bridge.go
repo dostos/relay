@@ -52,6 +52,7 @@ type Request struct {
 // Response is one newline-delimited bridge response.
 type Response struct {
 	OK       bool   `json:"ok"`
+	Build    string `json:"build,omitempty"`
 	ExitCode int    `json:"exit_code,omitempty"`
 	Stdout   string `json:"stdout,omitempty"`
 	Stderr   string `json:"stderr,omitempty"`
@@ -117,6 +118,7 @@ func (c Client) call(ctx context.Context, req Request) (*Response, error) {
 type Server struct {
 	SockPath  string
 	RelayBin  string
+	Build     string
 	Authorize func(Source) error
 	ln        net.Listener
 	invokeMu  sync.Mutex
@@ -165,17 +167,22 @@ func (s *Server) handle(conn net.Conn) {
 	}
 	var req Request
 	if err := json.Unmarshal(sc.Bytes(), &req); err != nil {
-		writeResponse(conn, Response{OK: false, ExitCode: 2, Error: "bad bridge request"})
+		s.writeResponse(conn, Response{OK: false, ExitCode: 2, Error: "bad bridge request"})
 		return
 	}
 	switch req.Op {
 	case "ping":
-		writeResponse(conn, Response{OK: true})
+		s.writeResponse(conn, Response{OK: true})
 	case "invoke":
-		writeResponse(conn, s.invoke(req))
+		s.writeResponse(conn, s.invoke(req))
 	default:
-		writeResponse(conn, Response{OK: false, ExitCode: 2, Error: "unknown bridge operation"})
+		s.writeResponse(conn, Response{OK: false, ExitCode: 2, Error: "unknown bridge operation"})
 	}
+}
+
+func (s *Server) writeResponse(conn net.Conn, resp Response) {
+	resp.Build = s.Build
+	writeResponse(conn, resp)
 }
 
 func (s *Server) invoke(req Request) Response {

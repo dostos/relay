@@ -1104,6 +1104,64 @@ func TestReceiptsDoNotFailOverToTheHuman(t *testing.T) {
 	}
 }
 
+func TestNoteAndProgressReachOnlyTheirImmediateManagerWithoutReply(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	_, manager, _, ho := failoverTree(t, reg)
+	persist := &selectivePersistence{}
+	service.Sessions.Persist = persist
+
+	for seq, kind := range []string{"note", "progress"} {
+		msg, err := service.RouteChildEvent(context.Background(), ho,
+			coord.Event{Seq: int64(seq + 1), Kind: kind, Meta: map[string]any{"text": kind + " update"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if msg == nil || msg.Kind != kind || msg.ParentSessionID != manager.ID {
+			t.Fatalf("%s envelope = %+v", kind, msg)
+		}
+		if msg.State != ParentMessageAcked || msg.AckedAt == nil {
+			t.Fatalf("%s must acknowledge on delivery: %+v", kind, msg)
+		}
+	}
+	if len(persist.sent) != 2 {
+		t.Fatalf("manager deliveries = %v", persist.sent)
+	}
+	for _, sent := range persist.sent {
+		if strings.Contains(sent, "relay resolve") {
+			t.Fatalf("informational update requested a reply: %q", sent)
+		}
+	}
+	if len(notifier.notices) != 0 {
+		t.Fatalf("informational updates reached the human root: %d", len(notifier.notices))
+	}
+}
+
+func TestAbsentManagerCannotAcknowledgeInjectedEnvelope(t *testing.T) {
+	service, _, reg := newParentTestService(t)
+	parent := &Session{ID: "sess-manager", HostID: "self", Persist: ports.PersistHandle{Kind: "tmux", Name: "manager"}, CreatedAt: time.Now().UTC()}
+	child := &Session{ID: "sess-child", HostID: "self", Persist: ports.PersistHandle{Kind: "tmux", Name: "child"}, SourceSessionID: parent.ID, CreatedAt: time.Now().UTC()}
+	for _, sess := range []*Session{parent, child} {
+		if err := reg.PutSession(sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ho := &Handoff{ID: "ho-child", SessionID: child.ID, HostID: "self", SourceSessionID: parent.ID, Kind: KindAgent, Status: StatusRunning, CreatedAt: time.Now().UTC()}
+	if err := reg.PutHandoff(ho); err != nil {
+		t.Fatal(err)
+	}
+	persist := &selectivePersistence{}
+	service.Sessions.Persist = &capturePersistence{renamePersistence: persist.renamePersistence, capture: "dostos@home:~/dev/relay$ "}
+
+	msg, err := service.RouteChildEvent(context.Background(), ho,
+		coord.Event{Seq: 1, Kind: "note", Meta: map[string]any{"text": "must not execute in shell"}})
+	if err == nil {
+		t.Fatal("absent manager delivery reported success")
+	}
+	if msg == nil || msg.State != ParentMessagePending || msg.DeliveredAt != nil || msg.AckedAt != nil {
+		t.Fatalf("absent manager acknowledged envelope: %+v", msg)
+	}
+}
+
 // A live manager having a transient hiccup must not be bypassed.
 func TestTransientFailureDoesNotBypassALiveManager(t *testing.T) {
 	service, notifier, reg := newParentTestService(t)

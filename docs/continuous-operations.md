@@ -64,16 +64,13 @@ was *asked*; make diagnostics fail loudly rather than default to passing.
 
 ## Known open items
 
-- **Escalation excerpts are still screen-scraped.** The chrome filter is
-  structural now, but it is still parsing a TUI and the next agent UI may
-  defeat it. The real fix is upstream: relay already prefers explicit `text`
-  in a child's event meta and only scrapes as a fallback, so teaching child
-  agents to call `relay ask "<question>"` would let the scrape path be
-  *deleted* rather than maintained. This is the highest-value next change.
-- **`relay session rename` does not reinstall tmux sensors.** Currently benign
-  — sensors and the handoff's `EventsPath` both stay pinned to the original
-  name, so they agree. It breaks the moment `ReinstallSensors` runs after a
-  rename: sensors move to the new name while the watcher still reads the old
-  path, and events stop with everything reporting healthy.
+- **Escalation excerpts still have a screen-scrape fallback.** As of 2026-08-02,
+  `relay ask "<question>"` exists, is advertised in the compact protocol, and
+  every new child goal teaches it. Relay prefers that explicit event text.
+  Keep measuring live adoption; delete the scrape fallback once new children
+  reliably declare their questions instead of maintaining another TUI parser.
+- **Resolved 2026-08-02 — rename/sensor stream split.** Reinstalled sensors now
+  attach to the renamed tmux handle while continuing to emit to the active
+  handoff's original watcher stream. Verified on a real disposable tmux edge.
 - **`engram-main` has no live handoff**, so there is nothing to manage there.
   Starting that work is the human's decision.

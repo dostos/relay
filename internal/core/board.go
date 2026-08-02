@@ -237,6 +237,20 @@ func (b *BoardService) readBoard(ctx context.Context, manager *Session, category
 	return out, nil
 }
 
+// CurrentSeq returns the board's current tail cursor. Bare `board watch` uses
+// it before subscribing so old state cannot masquerade as a new update and
+// turn a blocking operator into a hot loop. Subscribing from this cursor is
+// race-safe because relayd replays any event appended between the read and the
+// follow subscription.
+func (b *BoardService) CurrentSeq(ctx context.Context, sessionID, category string) (int64, error) {
+	manager, channel, err := b.resolveBoard(sessionID, category)
+	if err != nil {
+		return 0, err
+	}
+	_, seq, err := b.Msg.Read(ctx, manager.HostID, channel, 0, false, 0)
+	return seq, err
+}
+
 // Watch blocks until a peer posts to the board, then returns that entry. It is
 // a zero-token wait on the existing relayd subscribe stream — never a poll.
 func (b *BoardService) Watch(ctx context.Context, sessionID, category string, fromSeq int64, timeout time.Duration) (*BoardEntry, bool, error) {
@@ -244,15 +258,29 @@ func (b *BoardService) Watch(ctx context.Context, sessionID, category string, fr
 	if err != nil {
 		return nil, false, err
 	}
-	m, timedOut, err := b.Msg.WaitOne(ctx, manager.HostID, []string{channel}, map[string]int64{channel: fromSeq}, timeout)
-	if err != nil || timedOut || m == nil {
-		return nil, timedOut, err
+	if timeout <= 0 {
+		timeout = 120 * time.Second
 	}
-	entry := &BoardEntry{Node: m.From, Category: category, Text: m.Text, Seq: m.Seq, TS: m.TS}
-	if m.Meta != nil {
-		if k, ok := m.Meta["key"].(string); ok {
-			entry.Key = k
+	deadline := time.Now().Add(timeout)
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, true, nil
 		}
+		m, timedOut, err := b.Msg.WaitOne(ctx, manager.HostID, []string{channel}, map[string]int64{channel: fromSeq}, remaining)
+		if err != nil || timedOut || m == nil {
+			return nil, timedOut, err
+		}
+		fromSeq = m.Seq
+		if m.From == sessionID {
+			continue
+		}
+		entry := &BoardEntry{Node: m.From, Category: category, Text: m.Text, Seq: m.Seq, TS: m.TS}
+		if m.Meta != nil {
+			if k, ok := m.Meta["key"].(string); ok {
+				entry.Key = k
+			}
+		}
+		return entry, false, nil
 	}
-	return entry, false, nil
 }

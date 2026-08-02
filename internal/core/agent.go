@@ -148,6 +148,13 @@ func (h *HandoffService) agentBase(ho *Handoff) AgentResponse {
 	}
 }
 
+func (h *HandoffService) absentAgentResponse(ho *Handoff) *AgentResponse {
+	resp := h.agentBase(ho)
+	resp.Next = "done"
+	resp.Argv = argvFor("done", ho.ID)
+	return &resp
+}
+
 // AgentStart launches a handoff. Hierarchical children are owned by the
 // detached parent watcher, so their manager gets no duplicate wait command.
 // Unmanaged callers retain the one-shot wait continuation.
@@ -355,6 +362,29 @@ func (h *HandoffService) AgentSend(ctx context.Context, handoffID, text string) 
 		resp.Argv = append(argvFor("wait", ho.ID), "--from", fmt.Sprintf("%d", ho.LastSeq))
 		return &resp, fmt.Errorf("refuse send on job handoff")
 	}
+	if handoffTerminal(ho) {
+		resp := h.agentBase(ho)
+		resp.OK = false
+		resp.Error = "refuse send on terminal handoff"
+		resp.Next = "null"
+		return &resp, fmt.Errorf("refuse send on terminal handoff")
+	}
+	if _, err := h.Sessions.Get(ho.SessionID); err != nil {
+		resp := h.absentAgentResponse(ho)
+		resp.OK = false
+		resp.Error = "refuse send: target session is absent"
+		return resp, fmt.Errorf("%s", resp.Error)
+	}
+	pane, err := h.Sessions.Capture(ctx, ho.SessionID, 40)
+	if err != nil {
+		return &AgentResponse{OK: false, V: 1, Error: "refuse unverified send: " + err.Error(), HandoffID: ho.ID}, err
+	}
+	if readiness := ClassifyAgentPane(pane); readiness.State == AgentAbsent {
+		resp := h.absentAgentResponse(ho)
+		resp.OK = false
+		resp.Error = "refuse send: " + readiness.Reason
+		return resp, fmt.Errorf("%s", resp.Error)
+	}
 	if err := h.Sessions.Send(ctx, ho.SessionID, text, true); err != nil {
 		return &AgentResponse{OK: false, V: 1, Error: err.Error(), HandoffID: ho.ID}, err
 	}
@@ -373,13 +403,21 @@ func (h *HandoffService) AgentCapture(ctx context.Context, handoffID string, lin
 	if err != nil {
 		return &AgentResponse{OK: false, V: 1, Error: err.Error()}, err
 	}
+	if _, err := h.Sessions.Get(ho.SessionID); err != nil {
+		return h.absentAgentResponse(ho), nil
+	}
 	text, err := h.Sessions.Capture(ctx, ho.SessionID, lines)
 	if err != nil {
 		return &AgentResponse{OK: false, V: 1, Error: err.Error(), HandoffID: ho.ID}, err
 	}
 	resp := h.agentBase(ho)
 	resp.Text = text
-	if ho.Kind == KindAgent && (ho.Status == StatusNeedsInput || ho.Status == StatusRunning) {
+	readiness := ClassifyAgentPane(text)
+	if handoffTerminal(ho) {
+		resp.Next = "null"
+	} else if readiness.State == AgentAbsent {
+		return h.absentAgentResponse(ho), nil
+	} else if ho.Kind == KindAgent && (ho.Status == StatusNeedsInput || ho.Status == StatusRunning) {
 		resp.Next = "send"
 		resp.Argv = argvFor("send", ho.ID)
 	} else {

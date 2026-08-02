@@ -27,7 +27,9 @@ func newFakeCoord() *fakeCoord {
 func (f *fakeCoord) Kind() string                                        { return "fake" }
 func (f *fakeCoord) Ensure(ctx context.Context, t ports.Transport) error { return nil }
 func (f *fakeCoord) EventsPath(name string) string                       { return name }
-func (f *fakeCoord) SensorCommand(session, kind string) (string, error)  { return "", nil }
+func (f *fakeCoord) SensorCommand(session, kind string) (string, error) {
+	return session + ":" + kind, nil
+}
 func (f *fakeCoord) Emit(ctx context.Context, t ports.Transport, session, kind string, meta map[string]any) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -55,3 +55,9 @@ func TestComposerHoldsRequiresTheMarker(t *testing.T) {
 		t.Fatal("a different message in the composer is not ours")
 	}
 }
+
+func TestComposerHoldsIgnoresOutputBelowOldComposer(t *testing.T) {
+	if composerHolds("❯ pm-ca9bdc17\nACCEPTED:pm-ca9bdc17\n", "pm-ca9bdc17") {
+		t.Fatal("output below the old composer proves submission")
+	}
+}

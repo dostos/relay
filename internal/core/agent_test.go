@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -8,6 +9,21 @@ import (
 
 	"github.com/dostos/relay/internal/ports"
 )
+
+type agentPanePersistence struct {
+	renamePersistence
+	capture string
+	sent    []string
+}
+
+func (p *agentPanePersistence) Capture(context.Context, ports.Transport, ports.PersistHandle, int) (string, error) {
+	return p.capture, nil
+}
+
+func (p *agentPanePersistence) Send(_ context.Context, _ ports.Transport, _ ports.PersistHandle, text string, _ bool) error {
+	p.sent = append(p.sent, text)
+	return nil
+}
 
 func TestDecideNextMatrix(t *testing.T) {
 	cases := []struct {
@@ -89,6 +105,57 @@ func TestManagedStartHasNoDuplicateWait(t *testing.T) {
 	setStartContinuation(&unmanaged, "ho-2", false)
 	if unmanaged.Managed || unmanaged.Next != "wait" || strings.Join(unmanaged.Argv, " ") != "relay agent wait ho-2" {
 		t.Fatalf("unmanaged continuation = %+v", unmanaged)
+	}
+}
+
+func TestAbsentAgentCannotAdvertiseOrAcceptSend(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	reg := &Registry{}
+	now := time.Now().UTC()
+	sess := &Session{ID: "sess-exited", HostID: "self", Persist: ports.PersistHandle{Kind: "tmux", Name: "exited"}, CreatedAt: now}
+	ho := &Handoff{ID: "ho-exited", SessionID: sess.ID, HostID: "self", Kind: KindAgent, Status: StatusRunning, CreatedAt: now}
+	if err := reg.PutSession(sess); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.PutHandoff(ho); err != nil {
+		t.Fatal(err)
+	}
+	persist := &agentPanePersistence{capture: "dostos@home:~/dev/relay$ "}
+	sessions := &SessionService{
+		Reg: reg, Persist: persist,
+		NewTransport: func(string) (ports.Transport, error) { return &fakeTransport{id: "self"}, nil },
+	}
+	service := &HandoffService{Reg: reg, Sessions: sessions}
+
+	captured, err := service.AgentCapture(context.Background(), ho.ID, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if captured.Next != "done" || strings.Contains(strings.Join(captured.Argv, " "), " send ") {
+		t.Fatalf("absent capture continuation = %+v", captured)
+	}
+	sent, err := service.AgentSend(context.Background(), ho.ID, "this must not reach bash")
+	if err == nil || sent.Next != "done" || len(persist.sent) != 0 {
+		t.Fatalf("absent send response=%+v err=%v sent=%v", sent, err, persist.sent)
+	}
+}
+
+func TestMissingAgentSessionReturnsDoneContinuation(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	reg := &Registry{}
+	ho := &Handoff{ID: "ho-orphan", SessionID: "sess-gone", HostID: "self", Kind: KindAgent, Status: StatusRunning, CreatedAt: time.Now().UTC()}
+	if err := reg.PutHandoff(ho); err != nil {
+		t.Fatal(err)
+	}
+	service := &HandoffService{Reg: reg, Sessions: &SessionService{Reg: reg}}
+
+	captured, err := service.AgentCapture(context.Background(), ho.ID, 40)
+	if err != nil || !captured.OK || captured.Next != "done" || strings.Join(captured.Argv, " ") != "relay agent done ho-orphan" {
+		t.Fatalf("capture=%+v err=%v", captured, err)
+	}
+	sent, err := service.AgentSend(context.Background(), ho.ID, "must not send")
+	if err == nil || sent.OK || sent.Next != "done" || strings.Join(sent.Argv, " ") != "relay agent done ho-orphan" {
+		t.Fatalf("send=%+v err=%v", sent, err)
 	}
 }
 

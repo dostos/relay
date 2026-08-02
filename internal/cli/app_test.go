@@ -15,6 +15,14 @@ import (
 	"github.com/dostos/relay/internal/ports"
 )
 
+func TestMain(m *testing.M) {
+	// Tests run inside relay-managed tmux panes too. Keep App.Run calls local so
+	// test commands cannot leak through the pane's authenticated desktop bridge
+	// into the live control plane.
+	_ = os.Setenv(bridge.LocalInvokeEnv, "1")
+	os.Exit(m.Run())
+}
+
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 	r, w, err := os.Pipe()

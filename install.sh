@@ -8,27 +8,68 @@ if ! command -v go >/dev/null 2>&1; then
   echo "relay: go is required to build (brew install go)" >&2
   exit 1
 fi
+BUILD="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)"
+if ! git -C "$ROOT" diff --quiet 2>/dev/null || ! git -C "$ROOT" diff --cached --quiet 2>/dev/null; then
+  DIRTY_HASH="$(git -C "$ROOT" diff --binary HEAD 2>/dev/null | git hash-object --stdin | cut -c1-12)"
+  BUILD="$BUILD-dirty.$DIRTY_HASH"
+fi
 (
   cd "$ROOT"
   # Stamp the commit so a relayd left behind by an older install is
   # distinguishable from a current one. The protocol version is invariant
   # across rebuilds, so without this nothing could detect fleet drift.
-  BUILD="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
-  if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
-    BUILD="$BUILD-dirty"
-  fi
   LDFLAGS="-X github.com/dostos/relay/internal/coord.Build=$BUILD"
   go build -ldflags "$LDFLAGS" -o "$INSTALL_DIR/relay" ./cmd/relay
   go build -ldflags "$LDFLAGS" -o "$INSTALL_DIR/relayd" ./cmd/relayd
 )
 echo "installed $INSTALL_DIR/relay $INSTALL_DIR/relayd"
-"$INSTALL_DIR/relay" version
+RELAY_BRIDGE_LOCAL_INVOKE=1 "$INSTALL_DIR/relay" version
 "$INSTALL_DIR/relayd" version
 
 # Running watcher processes keep the old executable image after an upgrade.
 # Recycle them so inbox deduplication and reconnect behavior change atomically
 # with the installed CLI instead of only after the next handoff.
 STATE_ROOT="${RELAY_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/relay}"
+RELAYD_SOCK_PATH="${RELAYD_SOCK:-$STATE_ROOT/relayd.sock}"
+
+# Replacing relayd on disk does not replace a running daemon. Worse, Unix
+# listeners can survive an unlinked socket while a second daemon binds the new
+# path, leaving two healthy-looking process trees split across event buses.
+# Restart the existing service through its owner when possible; otherwise
+# preserve an already-running unmanaged daemon as one new process.
+relayd_pids="$(pgrep -f -x "$INSTALL_DIR/relayd serve" 2>/dev/null || true)"
+if [[ -n "$relayd_pids" ]]; then
+  if systemctl --user is-active --quiet relayd.service >/dev/null 2>&1; then
+    systemctl --user restart relayd.service
+  else
+    kill $relayd_pids 2>/dev/null || true
+    for _ in {1..20}; do
+      live_relayd=""
+      for pid in $relayd_pids; do
+        kill -0 "$pid" 2>/dev/null && live_relayd=1
+      done
+      [[ -z "$live_relayd" ]] && break
+      sleep 0.25
+    done
+    nohup env RELAYD_SOCK="$RELAYD_SOCK_PATH" "$INSTALL_DIR/relayd" serve >> "$STATE_ROOT/relayd.log" 2>&1 &
+    disown 2>/dev/null || true
+  fi
+  daemon_ok=""
+  for _ in {1..20}; do
+    daemon_status="$(RELAYD_SOCK="$RELAYD_SOCK_PATH" "$INSTALL_DIR/relayd" status 2>/dev/null || true)"
+    if [[ "$daemon_status" == *"\"build\":\"$BUILD\""* ]]; then
+      daemon_ok=1
+      break
+    fi
+    sleep 0.25
+  done
+  if [[ -n "$daemon_ok" ]]; then
+    echo "relayd: restarted on build $BUILD"
+  else
+    echo "relay: WARNING - live relayd did not report installed build $BUILD" >&2
+  fi
+fi
+
 # The desktop bridge is a long-lived relayd process that keeps running the OLD
 # executable image after an upgrade, so its command allowlist silently lags the
 # installed CLI. That is how a remote agent gets "relay command X is not allowed
@@ -72,10 +113,38 @@ if [[ -f "$SUPERVISOR_PLIST" ]]; then
     && echo "relay supervisor: restarted on the new binary" \
     || echo "relay: WARNING - could not restart $SUPERVISOR_LABEL; run: relay supervise --check" >&2
 else
-  if ! "$INSTALL_DIR/relay" supervise --check >/dev/null 2>&1; then
-    echo "relay: WARNING - live handoffs have no watcher and no supervisor is installed." >&2
-    echo "relay:   install it:  cp share/launchd/$SUPERVISOR_LABEL.plist ..." >&2
-    echo "relay:   or inspect:  relay supervise --check" >&2
+  # Linux/WSL deployments commonly keep the supervisor alive from systemd or
+  # a boot script rather than launchd. Preserve that lifecycle across upgrades:
+  # an old process keeps its deleted executable image and can look alive while
+  # running pre-upgrade watcher logic indefinitely.
+  supervisor_pids="$(pgrep -f -x "$INSTALL_DIR/relay supervise" 2>/dev/null || true)"
+  if [[ -n "$supervisor_pids" ]]; then
+    kill $supervisor_pids 2>/dev/null || true
+    for _ in {1..20}; do
+      live_supervisor=""
+      for pid in $supervisor_pids; do
+        kill -0 "$pid" 2>/dev/null && live_supervisor=1
+      done
+      [[ -z "$live_supervisor" ]] && break
+      sleep 0.25
+    done
+    nohup env RELAY_BRIDGE_LOCAL_INVOKE=1 "$INSTALL_DIR/relay" supervise >> "$STATE_ROOT/supervisor.log" 2>&1 &
+    supervisor_pid=$!
+    disown 2>/dev/null || true
+    for _ in {1..20}; do
+      if kill -0 "$supervisor_pid" 2>/dev/null && RELAY_BRIDGE_LOCAL_INVOKE=1 "$INSTALL_DIR/relay" supervise --check >/dev/null 2>&1; then
+        break
+      fi
+      sleep 0.25
+    done
+    if kill -0 "$supervisor_pid" 2>/dev/null && RELAY_BRIDGE_LOCAL_INVOKE=1 "$INSTALL_DIR/relay" supervise --check >/dev/null 2>&1; then
+      echo "relay supervisor: restarted on the new binary"
+    else
+      echo "relay: WARNING - supervisor restart did not restore all watchers; run: relay supervise --check" >&2
+    fi
+  elif ! RELAY_BRIDGE_LOCAL_INVOKE=1 "$INSTALL_DIR/relay" supervise --check >/dev/null 2>&1; then
+    echo "relay: WARNING - live handoffs have no watcher and no supervisor installation was detected." >&2
+    echo "relay:   inspect: relay supervise --check" >&2
   fi
 fi
 

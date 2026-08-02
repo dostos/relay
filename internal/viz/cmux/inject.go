@@ -45,17 +45,29 @@ func composerHolds(screen, marker string) bool {
 	if marker == "" {
 		return false
 	}
-	composer, found := "", false
-	for _, line := range strings.Split(screen, "\n") {
+	lines := strings.Split(screen, "\n")
+	composer, composerLine := "", -1
+	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		for _, prefix := range composerPrefixes {
 			if strings.HasPrefix(trimmed, prefix) {
-				composer, found = trimmed, true
+				composer, composerLine = trimmed, i
 				break
 			}
 		}
 	}
-	return found && strings.Contains(composer, marker)
+	if !strings.Contains(composer, marker) {
+		return false
+	}
+	// Indented lines below a composer are wrapped input or UI hints. A new
+	// column-zero line is output produced after submission, so the older
+	// composer line is transcript, not live input.
+	for _, line := range lines[composerLine+1:] {
+		if strings.TrimSpace(line) != "" && len(line) == len(strings.TrimLeft(line, " \t")) {
+			return false
+		}
+	}
+	return true
 }
 
 // submitInjected presses ENTER and confirms the message left the composer,

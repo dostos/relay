@@ -6,12 +6,20 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dostos/relay/internal/ports"
 	"github.com/dostos/relay/internal/shellquote"
 )
 
 const kind = "tmux"
+
+const (
+	sendConfirmAttempts = 3
+	sendConfirmLines    = 14
+)
+
+var sendConfirmDelay = 600 * time.Millisecond
 
 // Persist is a tmux-backed persistence adapter.
 type Persist struct{}
@@ -119,14 +127,60 @@ func (p *Persist) Capture(ctx context.Context, t ports.Transport, h ports.Persis
 
 func (p *Persist) Send(ctx context.Context, t ports.Transport, h ports.PersistHandle, text string, enter bool) error {
 	cmd := fmt.Sprintf("tmux send-keys -t %s -l -- %s", shellquote.Quote(h.Name), shellquote.Quote(text))
-	if enter {
-		cmd += fmt.Sprintf("; sleep 0.15; tmux send-keys -t %s Enter", shellquote.Quote(h.Name))
-	}
 	_, stderr, err := t.Run(ctx, "", cmd)
 	if err != nil {
 		return fmt.Errorf("send: %w (%s)", err, strings.TrimSpace(stderr))
 	}
-	return nil
+	if !enter {
+		return nil
+	}
+	marker := text
+	if len(marker) > 48 {
+		marker = marker[:48]
+	}
+	for attempt := 0; attempt < sendConfirmAttempts; attempt++ {
+		_, stderr, err = t.Run(ctx, "", fmt.Sprintf("tmux send-keys -t %s Enter", shellquote.Quote(h.Name)))
+		if err != nil {
+			return fmt.Errorf("submit: %w (%s)", err, strings.TrimSpace(stderr))
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(sendConfirmDelay):
+		}
+		screen, captureErr := p.Capture(ctx, t, h, sendConfirmLines)
+		if captureErr != nil {
+			return fmt.Errorf("confirm send: %w", captureErr)
+		}
+		if !composerHolds(screen, marker) {
+			return nil
+		}
+	}
+	return fmt.Errorf("message is still unsent in %s's composer after %d attempts", h.Name, sendConfirmAttempts)
+}
+
+func composerHolds(screen, marker string) bool {
+	if marker == "" {
+		return false
+	}
+	lines := strings.Split(screen, "\n")
+	composer, composerLine := "", -1
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "›") || strings.HasPrefix(trimmed, ">") || strings.HasPrefix(trimmed, "❯") {
+			composer = trimmed
+			composerLine = i
+		}
+	}
+	if !strings.Contains(composer, marker) {
+		return false
+	}
+	for _, line := range lines[composerLine+1:] {
+		if strings.TrimSpace(line) != "" && len(line) == len(strings.TrimLeft(line, " \t")) {
+			return false
+		}
+	}
+	return true
 }
 
 func (p *Persist) Resize(ctx context.Context, t ports.Transport, h ports.PersistHandle) error {

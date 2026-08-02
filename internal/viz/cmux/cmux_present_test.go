@@ -103,6 +103,15 @@ func TestChildLayoutBuildsRightHandStack(t *testing.T) {
 	}
 }
 
+func TestFirstChildInheritsPersistedParentLocation(t *testing.T) {
+	layout := ports.Layout{Workspace: "workspace:wrong-active", SourceSessionID: "sess-parent"}
+	layout = parentChildLayout(layout, binding{Workspace: "workspace:parent", Pane: "pane:parent"})
+	layout = childLayout(layout, binding{})
+	if layout.Workspace != "workspace:parent" || layout.Pane != "pane:parent" || layout.SplitDirection != "right" {
+		t.Fatalf("first child layout = %+v", layout)
+	}
+}
+
 func TestChildLayoutPreservesExplicitPlacement(t *testing.T) {
 	explicit := ports.Layout{
 		Workspace: "workspace:custom", Pane: "pane:custom", SourceSessionID: "sess-parent", ExplicitPlace: true,

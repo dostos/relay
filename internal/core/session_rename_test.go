@@ -28,7 +28,7 @@ func (p *renamePersistence) Destroy(context.Context, ports.Transport, ports.Pers
 	return nil
 }
 func (p *renamePersistence) Capture(context.Context, ports.Transport, ports.PersistHandle, int) (string, error) {
-	return "", nil
+	return "agent ready\n❯ ", nil
 }
 func (p *renamePersistence) Send(context.Context, ports.Transport, ports.PersistHandle, string, bool) error {
 	return nil

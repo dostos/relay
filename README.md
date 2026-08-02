@@ -194,16 +194,22 @@ place with `relay session bridge sess-…`; no agent or tmux restart is needed.
 
 Each supported delegated CLI starts in its autonomous permission mode
 (`cursor-agent --force`, Codex approval bypass, or Claude permission bypass),
-so routine tool calls do not consume parent turns. Each child also has one
-detached blocking event watcher. Agent hooks publish `permission_required`,
+so routine tool calls do not consume parent turns. This does not bypass login,
+folder-trust, onboarding, or confirmation gates: launch readiness classifies
+those panes, emits `permission_required`, and sends neither the goal nor Enter.
+Each child also has one detached blocking event watcher. Agent hooks publish
+`permission_required`,
 `result`, and `exit`; the tmux-idle sensor supplies the `ask` fallback for
 agents without an input hook. Relay deduplicates by handoff/sequence, collapses
 repeated idle samples into one unresolved attention envelope per child, stores
 it durably while the parent is disconnected, and wakes the exact parent pane
 once after delivery succeeds. Rebinding a parent retries its undelivered inbox;
 it never replays the sensor samples.
-No transcript is forwarded and no Relay instruction is added to the child
-goal. Set `relay_hooks: off` only when an agent runtime cannot execute hooks.
+No transcript is forwarded. Relay adds one compact instruction to the child
+goal: when blocked on manager input, declare the question with `relay ask
+"<question>"`. This emits explicit event text; tmux scraping remains only the
+fallback for agents that ignore it. Set `relay_hooks: off` only when an agent
+runtime cannot execute hooks.
 
 Managers that need durable context use `relay log N` and persist the returned
 `next` cursor. The authenticated session supplies the parent identity. The log
@@ -211,8 +217,9 @@ records only meaningful request, resolution, result, and policy transitions
 with a bounded summary; it never stores or replays a conversation transcript or
 idle sensor samples.
 
-Informational `result` and `exit` events acknowledge themselves after successful
-delivery. Only unresolved input reaches a manager, and it takes one
+Informational `note`, `progress`, `result`, and `exit` events acknowledge
+themselves after verified delivery to a ready manager. Only unresolved input
+reaches a manager, and it takes one
 `relay resolve` call to continue the child; there is no receipt acknowledgement
 round trip.
 

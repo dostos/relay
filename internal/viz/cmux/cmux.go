@@ -134,7 +134,16 @@ func (v *Viz) Present(ctx context.Context, sessionID, attachCmd string, layout p
 		layout.Workspace = v.activeWorkspace(ctx)
 	}
 	if layout.SourceSessionID != "" {
-		layout = childLayout(layout, v.latestLiveChild(ctx, layout.SourceSessionID))
+		sibling := v.latestLiveChild(ctx, layout.SourceSessionID)
+		if sibling.Pane == "" && !layout.ExplicitPlace {
+			if parent, err := v.lookup(layout.SourceSessionID); err == nil {
+				if loc := v.locationOfSurface(ctx, parent.Surface); loc.Pane != "" {
+					parent.Workspace, parent.Pane = loc.Workspace, loc.Pane
+				}
+				layout = parentChildLayout(layout, parent)
+			}
+		}
+		layout = childLayout(layout, sibling)
 	}
 
 	before, _ := v.listSurfaces(ctx)
@@ -683,6 +692,15 @@ func childLayout(layout ports.Layout, sibling binding) ports.Layout {
 		layout.Pane = sibling.Pane
 		layout.SplitDirection = "down"
 	}
+	return layout
+}
+
+func parentChildLayout(layout ports.Layout, parent binding) ports.Layout {
+	if layout.ExplicitPlace || parent.Pane == "" {
+		return layout
+	}
+	layout.Workspace = parent.Workspace
+	layout.Pane = parent.Pane
 	return layout
 }
 

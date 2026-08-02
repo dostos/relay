@@ -10,7 +10,7 @@ import (
 
 func TestServerInvoke(t *testing.T) {
 	sock := filepath.Join(t.TempDir(), "bridge.sock")
-	srv := &Server{SockPath: sock, RelayBin: "/bin/echo"}
+	srv := &Server{SockPath: sock, RelayBin: "/bin/echo", Build: "test-build"}
 	done := make(chan error, 1)
 	go func() { done <- srv.Serve() }()
 	t.Cleanup(func() { _ = srv.Close() })
@@ -30,7 +30,7 @@ func TestServerInvoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !resp.OK || resp.ExitCode != 0 || strings.TrimSpace(resp.Stdout) != "c1 named" {
+	if !resp.OK || resp.Build != "test-build" || resp.ExitCode != 0 || strings.TrimSpace(resp.Stdout) != "c1 named" {
 		t.Fatalf("unexpected response: %+v", resp)
 	}
 }

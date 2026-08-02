@@ -243,8 +243,9 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 
 	// Inject goal for agent mode after a short readiness wait.
 	if kind == KindAgent && opts.Goal != "" {
-		_ = waitReady(ctx, h.Persist, t, sess.Persist, 20*time.Second)
-		_ = h.Persist.Send(ctx, t, sess.Persist, opts.Goal, true)
+		if err := h.injectAgentGoal(ctx, t, sess, ho, opts.Goal); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	pane := false
@@ -285,6 +286,12 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 	return b, ho, nil
 }
 
+func agentGoalPrompt(goal string) string {
+	return goal + `
+
+If blocked on manager input, run relay ask "<question>" and stop.`
+}
+
 // verifyContainerAgent runs the agent's --version inside the container and maps
 // known failure signatures to an actionable error. Returns nil when the agent
 // appears runnable.
@@ -301,7 +308,7 @@ func (h *HandoffService) verifyContainerAgent(ctx context.Context, t ports.Trans
 	return nil
 }
 
-func waitReady(ctx context.Context, p ports.Persistence, t ports.Transport, h ports.PersistHandle, timeout time.Duration) error {
+func waitAgentReady(ctx context.Context, p ports.Persistence, t ports.Transport, h ports.PersistHandle, timeout time.Duration) AgentReadiness {
 	deadline := time.Now().Add(timeout)
 	var last string
 	stable := 0
@@ -310,16 +317,20 @@ func waitReady(ctx context.Context, p ports.Persistence, t ports.Transport, h po
 	for time.Now().Before(deadline) && attempts < maxAttempts {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return AgentReadiness{State: AgentAbsent, Reason: ctx.Err().Error()}
 		default:
 		}
 		attempts++
 		text, err := p.Capture(ctx, t, h, 30)
 		if err == nil {
+			readiness := ClassifyAgentPane(text)
+			if readiness.State == AgentBlocked {
+				return readiness
+			}
 			if text == last && text != "" {
 				stable++
 				if stable >= 2 {
-					return nil
+					return readiness
 				}
 			} else {
 				stable = 0
@@ -328,7 +339,28 @@ func waitReady(ctx context.Context, p ports.Persistence, t ports.Transport, h po
 		}
 		time.Sleep(2500 * time.Millisecond)
 	}
-	return nil
+	if last == "" {
+		return AgentReadiness{State: AgentAbsent, Reason: "could not read agent pane"}
+	}
+	return ClassifyAgentPane(last)
+}
+
+func (h *HandoffService) injectAgentGoal(ctx context.Context, t ports.Transport, sess *Session, ho *Handoff, goal string) error {
+	readiness := waitAgentReady(ctx, h.Persist, t, sess.Persist, 20*time.Second)
+	switch readiness.State {
+	case AgentBlocked:
+		ho.Status = StatusNeedsInput
+		if err := h.Reg.PutHandoff(ho); err != nil {
+			return err
+		}
+		_, err := h.Coord.Emit(ctx, t, sess.Persist.Name, "permission_required", map[string]any{"text": readiness.Reason})
+		return err
+	case AgentAbsent:
+		_, err := h.Coord.Emit(ctx, t, sess.Persist.Name, "exit", map[string]any{"text": readiness.Reason})
+		return err
+	default:
+		return h.Persist.Send(ctx, t, sess.Persist, agentGoalPrompt(goal), true)
+	}
 }
 
 // TailEvents streams events via Coord (relayd). follow mode uses one SSH stream;
@@ -479,8 +511,19 @@ func (h *HandoffService) ReinstallSensors(ctx context.Context, sessionID string,
 	if err := h.Coord.Ensure(ctx, t); err != nil {
 		return err
 	}
+	stream := sess.Persist.Name
+	if handoffs, err := h.Reg.ListHandoffs(); err != nil {
+		return err
+	} else {
+		var newest time.Time
+		for _, ho := range handoffs {
+			if ho.SessionID == sessionID && !handoffTerminal(ho) && ho.Name != "" && (newest.IsZero() || ho.CreatedAt.After(newest)) {
+				stream, newest = ho.Name, ho.CreatedAt
+			}
+		}
+	}
 	emitFactory := func(kind string) (string, error) {
-		return h.Coord.SensorCommand(sess.Persist.Name, kind)
+		return h.Coord.SensorCommand(stream, kind)
 	}
 	return h.Persist.InstallSensors(ctx, t, sess.Persist, silence, emitFactory)
 }

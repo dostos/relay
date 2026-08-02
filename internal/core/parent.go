@@ -609,7 +609,7 @@ func attentionKind(ev coord.Event) string {
 	switch ev.Kind {
 	case "ask", "needs_input", "idle":
 		return "ask"
-	case "result", "exit":
+	case "note", "progress", "result", "exit":
 		return ev.Kind
 	default:
 		return ""
@@ -688,7 +688,14 @@ func (p *ParentService) deliverMessage(ctx context.Context, parent *Session, ho 
 		cancel()
 	} else if !isLocalParent(parent) && p.Sessions != nil {
 		attemptCtx, cancel := context.WithTimeout(ctx, deliveryAttemptTimeout)
-		err = p.Sessions.Send(attemptCtx, parent.ID, FormatParentNotice(notice), true)
+		capture, captureErr := p.Sessions.Capture(attemptCtx, parent.ID, 40)
+		if captureErr != nil {
+			err = fmt.Errorf("verify parent readiness: %w", captureErr)
+		} else if readiness := ClassifyAgentPane(capture); readiness.State != AgentReady {
+			err = fmt.Errorf("parent is %s: %s", readiness.State, readiness.Reason)
+		} else {
+			err = p.Sessions.Send(attemptCtx, parent.ID, FormatParentNotice(notice), true)
+		}
 		cancel()
 	} else {
 		err = fmt.Errorf("no delivery path for parent %s", parent.ID)

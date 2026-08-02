@@ -1,0 +1,44 @@
+package relayd
+
+import (
+	"net"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestSecondServerCannotUnlinkLiveSocket(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "relayd.sock")
+	store, err := NewStore(filepath.Join(dir, "events"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := &Server{SockPath: sock, Store: store}
+	done := make(chan error, 1)
+	go func() { done <- first.Serve() }()
+	t.Cleanup(func() { _ = first.Close() })
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		conn, dialErr := net.DialTimeout("unix", sock, 20*time.Millisecond)
+		if dialErr == nil {
+			_ = conn.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first server did not listen")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	second := &Server{SockPath: sock, Store: store}
+	if err := second.Serve(); err == nil {
+		t.Fatal("second server replaced the live listener")
+	}
+	conn, err := net.DialTimeout("unix", sock, 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("first listener was detached: %v", err)
+	}
+	_ = conn.Close()
+}

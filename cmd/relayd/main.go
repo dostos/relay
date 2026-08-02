@@ -76,7 +76,7 @@ func cmdBridge(args []string) int {
 	if v := os.Getenv("RELAY_BRIDGE_LOCAL_SOCK"); v != "" {
 		sock = v
 	}
-	srv := &bridge.Server{SockPath: sock, RelayBin: relayBin, Authorize: core.AuthorizeBridgeSource}
+	srv := &bridge.Server{SockPath: sock, RelayBin: relayBin, Build: coord.Build, Authorize: core.AuthorizeBridgeSource}
 	fmt.Fprintf(os.Stderr, "relayd desktop bridge listening on unix:%s\n", sock)
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -118,7 +118,7 @@ func cmdServe() int {
 		return 1
 	}
 	srv := &relayd.Server{SockPath: sock, Store: store}
-	fmt.Fprintf(os.Stderr, "relayd %s listening on unix:%s (no TCP)\n", coord.Version, sock)
+	fmt.Fprintf(os.Stderr, "relayd %s starting unix:%s (no TCP; verify with relayd status)\n", coord.Version, sock)
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
