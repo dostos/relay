@@ -1632,7 +1632,7 @@ func (v *Viz) ProjectionSessions(ctx context.Context) ([]ports.ProjectedSession,
 		return nil, err
 	}
 	snapshot := envelope.Items
-	authority := make(map[string]ports.Presentation, len(snapshot))
+	authority := make(map[string]struct{}, len(snapshot))
 	for _, item := range snapshot {
 		if _, duplicate := authority[item.SessionID]; duplicate {
 			return nil, fmt.Errorf("duplicate session %s in visualization authority snapshot", item.SessionID)
@@ -1640,24 +1640,27 @@ func (v *Viz) ProjectionSessions(ctx context.Context) ([]ports.ProjectedSession,
 		if err := validatePresentation(item); err != nil {
 			return nil, err
 		}
-		authority[item.SessionID] = item
+		authority[item.SessionID] = struct{}{}
 	}
 	panes, err := v.ManagedPanes(ctx)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]ports.ProjectedSession, 0, len(panes))
-	for _, pane := range panes {
-		item, ok := authority[pane.SessionID]
-		if !ok || pane.State != "live" {
-			continue
+	liveSurfaces := make(map[string]ManagedPane, len(panes))
+	if err == nil {
+		for _, pane := range panes {
+			if pane.State == "live" {
+				liveSurfaces[pane.SessionID] = pane
+			}
 		}
+	}
+	out := make([]ports.ProjectedSession, 0, len(snapshot))
+	for _, item := range snapshot {
+		pane := liveSurfaces[item.SessionID]
 		out = append(out, ports.ProjectedSession{
 			SessionID: item.SessionID, ParentSessionID: item.ParentSessionID,
 			Target: item.Target, TmuxName: item.TmuxName, Surface: pane.Surface,
 			CreatedAt: pane.CreatedAt, UpdatedAt: pane.UpdatedAt,
 		})
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].SessionID < out[j].SessionID })
 	return out, nil
 }
 

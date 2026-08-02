@@ -199,18 +199,38 @@ func TestProjectionSessionsUsesAuthoritySnapshotNotBindingLineage(t *testing.T) 
 	if err := v.persistBinding("sess-engram", binding{SessionID: "sess-engram", SourceSessionID: "sess-dead", Surface: "surface:1"}); err != nil {
 		t.Fatal(err)
 	}
-	items := []ports.Presentation{{SessionID: "sess-engram", ParentSessionID: "sess-apex", Target: "c3", TmuxName: "engram"}}
+	items := []ports.Presentation{
+		{SessionID: "sess-engram", ParentSessionID: "sess-apex", Target: "c3", TmuxName: "engram"},
+		{SessionID: "sess-apex", Target: "home", TmuxName: "apex-v4"},
+	}
 	raw, _ := json.Marshal(items)
 	if err := saveBytes(v.authoritySnapshotPath(), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	projected, err := v.ProjectionSessions(context.Background())
-	if err != nil || len(projected) != 1 {
+	if err != nil || len(projected) != 2 {
 		t.Fatalf("projection=%+v err=%v", projected, err)
 	}
-	got := projected[0]
+	if got := projected[0]; got.SessionID != "sess-apex" || got.Surface != "" {
+		t.Fatalf("authority session without a pane was erased or given a surface: %+v", got)
+	}
+	got := projected[1]
 	if got.ParentSessionID != "sess-apex" || got.Target != "c3" || got.TmuxName != "engram" {
 		t.Fatalf("stale binding leaked into projection: %+v", got)
+	}
+}
+
+func TestProjectionSessionsSurvivesUnavailableVisualization(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	v := &Viz{Bin: filepath.Join(t.TempDir(), "missing-cmux")}
+	items := []ports.Presentation{{SessionID: "sess-apex", Target: "home", TmuxName: "apex-v4"}}
+	raw, _ := json.Marshal(items)
+	if err := saveBytes(v.authoritySnapshotPath(), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projected, err := v.ProjectionSessions(context.Background())
+	if err != nil || len(projected) != 1 || projected[0].SessionID != "sess-apex" || projected[0].Surface != "" {
+		t.Fatalf("authority inventory depended on visualization: projection=%+v err=%v", projected, err)
 	}
 }
 
