@@ -194,7 +194,11 @@ func (v *Viz) Present(ctx context.Context, sessionID, attachCmd string, layout p
 	// `viz present` repeatedly (e.g. to keep a handoff visible) without piling
 	// up panes.
 	if b, err := v.lookup(sessionID); err == nil && b.Surface != "" {
-		if loc := v.locationOfSurface(ctx, b.Surface); loc.Workspace != "" {
+		locations, locationsErr := v.liveSurfaceLocations(ctx)
+		if locationsErr != nil {
+			return "", locationsErr
+		}
+		if loc := locations[b.Surface]; loc.Workspace != "" {
 			if layout.SourceSessionID != "" && !layout.ExplicitPlace {
 				if parent, parentErr := v.lookup(layout.SourceSessionID); parentErr == nil {
 					parentLoc := v.locationOfSurface(ctx, parent.Surface)
@@ -225,13 +229,17 @@ func (v *Viz) Present(ctx context.Context, sessionID, attachCmd string, layout p
 			return b.Surface, nil
 		}
 		// Bound surface is gone — drop the stale binding and open a fresh one.
-		v.mu.Lock()
-		delete(v.bindings, sessionID)
-		v.mu.Unlock()
-		_ = os.Remove(bindPath(sessionID))
+		v.invalidateBinding(sessionID, b)
 	}
 
 openFresh:
+	// A live cmux pane can outlast its binding file (upgrade, crash, or manual
+	// cleanup). Reclaim an exact checkpoint before creating a duplicate pane.
+	if sessName != "" {
+		if surface := v.surfaceForPersist(ctx, sessName); surface != "" {
+			return v.BindSurface(ctx, sessionID, attachCmd, surface)
+		}
+	}
 	// Blind-usage default: when the caller omits --workspace, land the split in
 	// whatever workspace cmux currently has focused. Without this, cmux
 	// new-split fails "Surface not found" and present is unusable unless the
@@ -476,6 +484,12 @@ func (v *Viz) BindSurface(ctx context.Context, sessionID, attachCmd, surface str
 	v.mu.Unlock()
 	if err := v.persistBinding(sessionID, b); err != nil {
 		return "", err
+	}
+	reg := &core.Registry{}
+	if sess, err := reg.GetSession(sessionID); err == nil {
+		sess.VizSurfaceRef = surface
+		sess.UpdatedAt = time.Now().UTC()
+		_ = reg.PutSession(sess)
 	}
 	v.rememberPane(sessionID, surface, sessName)
 	return surface, nil
@@ -891,10 +905,60 @@ func extractSessionFlag(cmd string) string {
 
 func (v *Viz) Focus(ctx context.Context, sessionID string) error {
 	b, err := v.lookup(sessionID)
-	if err != nil {
-		return err
+	if err == nil {
+		locations, locationsErr := v.liveSurfaceLocations(ctx)
+		if locationsErr != nil {
+			return locationsErr
+		}
+		if locations[b.Surface].Workspace != "" {
+			return v.focusSurface(ctx, b)
+		}
+		v.invalidateBinding(sessionID, b)
 	}
+	sess, findErr := (&core.Registry{}).GetSession(sessionID)
+	if findErr != nil {
+		return findErr
+	}
+	surface := v.surfaceForPersist(ctx, sess.Persist.Name)
+	if surface == "" {
+		return fmt.Errorf("no live viz surface for session %s", sessionID)
+	}
+	if _, bindErr := v.BindSurface(ctx, sessionID, core.ResumeLaunchCmd(sess.Persist.Name), surface); bindErr != nil {
+		return bindErr
+	}
+	b, _ = v.lookup(sessionID)
 	return v.focusSurface(ctx, b)
+}
+
+func (v *Viz) invalidateBinding(sessionID string, b binding) {
+	v.mu.Lock()
+	delete(v.bindings, sessionID)
+	v.mu.Unlock()
+	_ = os.Remove(bindPath(sessionID))
+	_ = core.RemovePaneBinding(b.Surface)
+	reg := &core.Registry{}
+	if sess, err := reg.GetSession(sessionID); err == nil && sess.VizSurfaceRef == b.Surface {
+		sess.VizSurfaceRef = ""
+		sess.UpdatedAt = time.Now().UTC()
+		_ = reg.PutSession(sess)
+	}
+}
+
+// surfaceForPersist returns a live relay surface only for an exact checkpoint
+// identity. Version suffixes are ordinary tmux names, never aliases.
+func (v *Viz) surfaceForPersist(ctx context.Context, persistName string) string {
+	refs := v.relayBoundSurfaces(ctx)
+	ordered := make([]string, 0, len(refs))
+	for ref := range refs {
+		ordered = append(ordered, ref)
+	}
+	sort.Strings(ordered)
+	for _, ref := range ordered {
+		if name, _, _ := v.relayCheckpoint(ctx, ref); name == persistName {
+			return ref
+		}
+	}
+	return ""
 }
 
 func (v *Viz) focusSurface(ctx context.Context, b binding) error {
@@ -1412,7 +1476,16 @@ func (v *Viz) ManagedPanes(ctx context.Context) ([]ManagedPane, error) {
 		}
 		return nil, err
 	}
-	locations := v.surfaceLocations(ctx)
+	locations, locationsErr := v.liveSurfaceLocations(ctx)
+	if locationsErr == nil {
+		v.adoptUnboundSurfaces(ctx, locations)
+		entries, err = os.ReadDir(dir)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		locations = map[string]surfaceLocation{}
+	}
 	panes := make([]ManagedPane, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
@@ -1448,6 +1521,9 @@ func (v *Viz) ManagedPanes(ctx context.Context) ([]ManagedPane, error) {
 				b.Workspace, b.Pane, b.UpdatedAt = loc.Workspace, loc.Pane, time.Now().UTC()
 				migrated = true
 			}
+		} else if locationsErr == nil {
+			v.invalidateBinding(b.SessionID, b)
+			continue
 		}
 		if migrated {
 			_ = v.persistBinding(b.SessionID, b)
@@ -1469,6 +1545,42 @@ func (v *Viz) ManagedPanes(ctx context.Context) ([]ManagedPane, error) {
 		return panes[i].SessionID < panes[j].SessionID
 	})
 	return panes, nil
+}
+
+func (v *Viz) liveSurfaceLocations(ctx context.Context) (map[string]surfaceLocation, error) {
+	out, err := v.run(ctx, "tree", "--all", "--json")
+	if err != nil {
+		return nil, err
+	}
+	return parseSurfaceLocations([]byte(out)), nil
+}
+
+func (v *Viz) adoptUnboundSurfaces(ctx context.Context, locations map[string]surfaceLocation) {
+	refs := make([]string, 0, len(locations))
+	for ref := range locations {
+		refs = append(refs, ref)
+	}
+	sort.Strings(refs)
+	reg := &core.Registry{}
+	for _, ref := range refs {
+		name, _, cwd := v.relayCheckpoint(ctx, ref)
+		if name == "" {
+			continue
+		}
+		sess, err := reg.FindByPersistName(name, cwd)
+		if err != nil {
+			continue
+		}
+		if current, lookupErr := v.lookup(sess.ID); lookupErr == nil {
+			if locations[current.Surface].Workspace != "" {
+				continue
+			}
+			v.invalidateBinding(sess.ID, current)
+		}
+		if _, err := v.BindSurface(ctx, sess.ID, core.ResumeLaunchCmd(name), ref); err != nil {
+			continue
+		}
+	}
 }
 
 // CaptureScreen reads the visible text of the pane bound to a session,

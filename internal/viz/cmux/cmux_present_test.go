@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dostos/relay/internal/coord"
+	"github.com/dostos/relay/internal/core"
 	"github.com/dostos/relay/internal/ports"
 )
 
@@ -266,5 +267,51 @@ func TestCloseServiceEventRemovesLocalBinding(t *testing.T) {
 	}
 	if _, err := os.Stat(bindPath("sess-old")); !os.IsNotExist(err) {
 		t.Fatalf("binding still exists: %v", err)
+	}
+}
+
+func TestPresentInvalidatesDeadBindingAndAdoptsExactCheckpoint(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("RELAY_STATE_DIR", stateDir)
+	logPath := filepath.Join(t.TempDir(), "cmux.log")
+	t.Setenv("CMUX_TEST_LOG", logPath)
+	bin := filepath.Join(t.TempDir(), "cmux")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$CMUX_TEST_LOG"
+if [ "$1 $2" = "tree --all" ]; then
+  printf '%s\n' '{"windows":[{"workspaces":[{"ref":"workspace:1","panes":[{"ref":"pane:2","surfaces":[{"ref":"surface:7"}]}]}]}]}'
+elif [ "$1 $2 $3" = "surface resume get" ]; then
+  printf '%s\n' '{"resume_binding":{"kind":"relay","checkpoint_id":"apex-v3","command":"relay resume --session apex-v3","cwd":"/repo"}}'
+fi
+`
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	sess := &core.Session{ID: "sess-apex", HostID: "home", Persist: ports.PersistHandle{Kind: "tmux", Name: "apex-v3"}, VizSurfaceRef: "surface:243", CreatedAt: now, UpdatedAt: now}
+	if err := (&core.Registry{}).PutSession(sess); err != nil {
+		t.Fatal(err)
+	}
+	v := &Viz{Bin: bin, bindings: map[string]binding{}}
+	if err := v.persistBinding(sess.ID, binding{SessionID: sess.ID, Surface: "surface:243", Attach: core.ResumeLaunchCmd("apex-v3")}); err != nil {
+		t.Fatal(err)
+	}
+	surface, err := v.Present(context.Background(), sess.ID, core.ResumeLaunchCmd("apex-v3"), ports.Layout{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if surface != "surface:7" {
+		t.Fatalf("surface = %q", surface)
+	}
+	logRaw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logRaw), "new-split") {
+		t.Fatalf("present created a duplicate pane:\n%s", logRaw)
+	}
+	stored, err := (&core.Registry{}).GetSession(sess.ID)
+	if err != nil || stored.VizSurfaceRef != surface {
+		t.Fatalf("registry surface=%q err=%v", stored.VizSurfaceRef, err)
 	}
 }
