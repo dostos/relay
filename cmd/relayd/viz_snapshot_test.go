@@ -14,6 +14,11 @@ func TestVisualizationAuthoritySnapshotCarriesCurrentLineageAndContext(t *testin
 	t.Setenv("RELAY_STATE_DIR", t.TempDir())
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	bin := t.TempDir()
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := os.WriteFile(filepath.Join(bin, "ssh"), []byte("#!/bin/sh\nprintf '%s\\n' 'hostname 10.0.0.3' 'user worker' 'port 22' 'proxyjump none' 'proxycommand none'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -35,6 +40,9 @@ func TestVisualizationAuthoritySnapshotCarriesCurrentLineageAndContext(t *testin
 	}
 	if items[1].SessionID != "sess-engram" || items[1].ParentSessionID != "sess-apex" || items[1].Target != "c3" || items[1].TmuxName != "engram" {
 		t.Fatalf("current authority fields lost: %+v", items[1])
+	}
+	if items[1].SSHUser != "worker" || items[1].SSHPort != 22 {
+		t.Fatalf("effective SSH options missing from snapshot: %+v", items[1])
 	}
 	resolution, err := visualizationAuthorityResume("apex")
 	if err != nil {

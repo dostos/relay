@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -73,20 +74,52 @@ func ResolveTarget(hostID string) (*Target, error) {
 		wanted = append(wanted, "self")
 	}
 	for _, alias := range wanted {
+		configured := false
 		for i := range targets {
-			if targets[i].HostID != alias {
-				continue
-			}
-			if targets[i].ProxyJump {
-				return nil, fmt.Errorf("SSH target %q requires unsupported proxy routing", hostID)
-			}
-			if targets[i].Hostname == "" {
-				targets[i].Hostname = alias
-			}
-			return &targets[i], nil
+			configured = configured || targets[i].HostID == alias
 		}
+		if !configured {
+			continue
+		}
+		resolved, err := resolveEffectiveSSHTarget(alias)
+		if err != nil {
+			return nil, err
+		}
+		resolved.HostID = hostID
+		return resolved, nil
 	}
 	return nil, fmt.Errorf("SSH target %q is absent from authority config", hostID)
+}
+
+func resolveEffectiveSSHTarget(alias string) (*Target, error) {
+	out, err := exec.Command("ssh", "-G", "--", alias).Output()
+	if err != nil {
+		return nil, fmt.Errorf("resolve SSH target %q: %w", alias, err)
+	}
+	resolved := &Target{HostID: alias}
+	for _, line := range strings.Split(string(out), "\n") {
+		key, value := splitSSHKeyword(line)
+		switch strings.ToLower(key) {
+		case "hostname":
+			resolved.Hostname = value
+		case "user":
+			resolved.User = value
+		case "port":
+			port, parseErr := strconv.Atoi(value)
+			if parseErr != nil || port <= 0 || port > 65535 {
+				return nil, fmt.Errorf("SSH target %q has invalid port", alias)
+			}
+			resolved.Port = port
+		case "proxyjump", "proxycommand":
+			if value != "" && !strings.EqualFold(value, "none") {
+				return nil, fmt.Errorf("SSH target %q requires unsupported proxy routing", alias)
+			}
+		}
+	}
+	if resolved.Hostname == "" || resolved.Port == 0 {
+		return nil, fmt.Errorf("SSH target %q resolved incompletely", alias)
+	}
+	return resolved, nil
 }
 
 type sshHostBlock struct {

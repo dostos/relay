@@ -133,7 +133,12 @@ func TestCoveredProjectionSkipsRetiredHistoricalSession(t *testing.T) {
 
 func TestCoveredHistoricalDeleteConvergesToCurrentSnapshot(t *testing.T) {
 	t.Setenv("RELAY_STATE_DIR", t.TempDir())
-	v := &Viz{}
+	bin := filepath.Join(t.TempDir(), "cmux")
+	tree := `{"windows":[{"workspaces":[{"ref":"workspace:1","panes":[{"ref":"pane:1","surfaces":[{"ref":"surface:1"}]}]}]}]}`
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s\\n' '"+tree+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	v := &Viz{Bin: bin}
 	if err := v.persistBinding("sess-current", binding{V: 2, Revision: 52, SessionID: "sess-current", Surface: "surface:1"}); err != nil {
 		t.Fatal(err)
 	}
@@ -148,6 +153,49 @@ func TestCoveredHistoricalDeleteConvergesToCurrentSnapshot(t *testing.T) {
 	b, err := v.loadBinding("sess-current")
 	if err != nil || b.Deleted {
 		t.Fatalf("historical delete retired current binding: %+v err=%v", b, err)
+	}
+}
+
+func TestPresentationMetadataKeepsIntegerSSHPort(t *testing.T) {
+	got := presentationFromMeta(map[string]any{"ssh_user": "jingyulee", "ssh_port": 7777})
+	if got.SSHUser != "jingyulee" || got.SSHPort != 7777 {
+		t.Fatalf("presentation metadata lost SSH endpoint: %+v", got)
+	}
+}
+
+func TestProjectionFocusReplaysAgainstLiveEqualRevision(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	dir := t.TempDir()
+	bin, logPath := filepath.Join(dir, "cmux"), filepath.Join(dir, "calls")
+	tree := `{"windows":[{"workspaces":[{"ref":"workspace:1","panes":[{"ref":"pane:1","surfaces":[{"ref":"surface:1"}]}]}]}]}`
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '" + logPath + "'\nif [ \"$1\" = tree ]; then printf '%s\\n' '" + tree + "'; fi\n"
+	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	v := &Viz{Bin: bin}
+	if err := v.persistBinding("sess-current", binding{V: 2, Revision: 9, SessionID: "sess-current", Surface: "surface:1", Pane: "pane:1"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := v.ApplyProjection(context.Background(), ports.ProjectionEvent{V: 1, Revision: 9, Op: ports.ProjectionFocus, Item: ports.Presentation{SessionID: "sess-current"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(logPath)
+	if !strings.Contains(string(raw), "focus-pane --pane pane:1") {
+		t.Fatalf("equal-revision focus was dropped:\n%s", raw)
+	}
+	if err := os.WriteFile(logPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.persistBinding("sess-current", binding{V: 2, Revision: 10, SessionID: "sess-current", Surface: "surface:1", Pane: "pane:1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.ApplyProjection(context.Background(), ports.ProjectionEvent{V: 1, Revision: 9, Op: ports.ProjectionFocus, Item: ports.Presentation{SessionID: "sess-current"}}); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = os.ReadFile(logPath)
+	if strings.Contains(string(raw), "focus-pane") || strings.Contains(string(raw), "focus-panel") {
+		t.Fatalf("superseded focus stole focus:\n%s", raw)
 	}
 }
 

@@ -383,8 +383,19 @@ func presentationFromMeta(meta map[string]any) ports.Presentation {
 }
 
 func intMeta(meta map[string]any, key string) int {
-	value, _ := meta[key].(float64)
-	return int(value)
+	switch value := meta[key].(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	case json.Number:
+		parsed, _ := strconv.Atoi(value.String())
+		return parsed
+	default:
+		return 0
+	}
 }
 
 func (v *Viz) retireControl(ctx context.Context) (string, error) {

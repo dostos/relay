@@ -167,8 +167,19 @@ func (v *Viz) ApplyProjection(ctx context.Context, event ports.ProjectionEvent) 
 			return "", fmt.Errorf("unsupported visualization projection operation %q", event.Op)
 		}
 	}
-	if current, err := v.loadBinding(event.Item.SessionID); err == nil && current.Revision >= event.Revision {
-		return current.Surface, nil
+	if current, err := v.loadBinding(event.Item.SessionID); err == nil && current.Revision >= event.Revision && current.Deleted {
+		return "", nil
+	} else if err == nil && current.Revision >= event.Revision && current.Surface != "" {
+		locations, locationsErr := v.liveSurfaceLocations(ctx)
+		if locationsErr != nil {
+			return "", locationsErr
+		}
+		if locations[current.Surface].Workspace != "" {
+			if event.Op == ports.ProjectionFocus && current.Revision == event.Revision {
+				return current.Surface, v.focusSurface(ctx, current)
+			}
+			return current.Surface, nil
+		}
 	}
 	switch event.Op {
 	case ports.ProjectionUpsert, ports.ProjectionFocus:
