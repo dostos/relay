@@ -1,0 +1,13 @@
+[Unit]
+Description=Relay authoritative control bridge (Unix sockets and outbound SSH)
+After=network-online.target relayd.service
+Wants=network-online.target relayd.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/relayd control serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
