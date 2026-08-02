@@ -37,7 +37,7 @@ func TestSendRetriesEnterUntilComposerClears(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(transport.commands, "\n")
-	if strings.Count(joined, "send-keys -t '=agent' Enter") != 2 || strings.Count(joined, "-l -- 'relay marker'") != 1 {
+	if strings.Count(joined, "send-keys -t '=agent:' Enter") != 2 || strings.Count(joined, "-l -- 'relay marker'") != 1 {
 		t.Fatalf("expected one type and two enters, commands=%v", transport.commands)
 	}
 }
