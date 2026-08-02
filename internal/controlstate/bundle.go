@@ -118,7 +118,12 @@ func Import(reg *core.Registry, bundle *Bundle) (*Summary, error) {
 		summary.Handoffs++
 	}
 	for name, token := range bundle.Tokens {
-		if filepath.Base(name) != name || filepath.Ext(name) != ".token" || len(token) == 0 || len(token) > 4096 {
+		if len(token) == 0 {
+			// Revoked/partially cleaned identities sometimes leave an empty token
+			// placeholder. It grants no authority and must not block migration.
+			continue
+		}
+		if filepath.Base(name) != name || filepath.Ext(name) != ".token" || len(token) > 4096 {
 			return nil, fmt.Errorf("invalid bridge token entry %q", name)
 		}
 		if err := os.WriteFile(filepath.Join(core.BridgeTokensDir(), name), token, 0o600); err != nil {
