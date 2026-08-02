@@ -311,16 +311,13 @@ func (p *ParentService) BindLocal(ctx context.Context, parentID, surface string)
 	return sess, nil
 }
 
-// LinkChild adopts an already-running handoff into a local parent's durable
+// LinkChild adopts an already-running handoff into a manager's durable
 // goal tree. This is intentionally a one-time lineage operation: moving a
 // child between parents would make request routing and history ambiguous.
 func (p *ParentService) LinkChild(parentID, handoffID string) (*Handoff, error) {
 	parent, err := p.Reg.GetSession(parentID)
 	if err != nil {
 		return nil, err
-	}
-	if !isLocalParent(parent) {
-		return nil, fmt.Errorf("session %s is not a local parent", parentID)
 	}
 	ho, err := p.Reg.GetHandoff(handoffID)
 	if err != nil {
@@ -334,6 +331,9 @@ func (p *ParentService) LinkChild(parentID, handoffID string) (*Handoff, error) 
 	}
 	child, err := p.Reg.GetSession(ho.SessionID)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateManagerEdge(p.Reg, parent, child); err != nil {
 		return nil, err
 	}
 	ho.SourceSessionID = parent.ID
@@ -358,7 +358,7 @@ func (p *ParentService) LinkChild(parentID, handoffID string) (*Handoff, error) 
 	return ho, nil
 }
 
-// ReparentChild explicitly repairs an incorrect local management edge. Unlike
+// ReparentChild explicitly repairs an incorrect management edge. Unlike
 // LinkChild, this operation is intentionally named and audited: pending inbox
 // items move with the child, while answered history remains with the manager
 // that actually handled it.
@@ -366,9 +366,6 @@ func (p *ParentService) ReparentChild(parentID, handoffID string) (*Handoff, str
 	parent, err := p.Reg.GetSession(parentID)
 	if err != nil {
 		return nil, "", err
-	}
-	if !isLocalParent(parent) {
-		return nil, "", fmt.Errorf("session %s is not a local parent", parentID)
 	}
 	ho, err := p.Reg.GetHandoff(handoffID)
 	if err != nil {
@@ -388,6 +385,9 @@ func (p *ParentService) ReparentChild(parentID, handoffID string) (*Handoff, str
 	}
 	child, err := p.Reg.GetSession(ho.SessionID)
 	if err != nil {
+		return nil, oldParentID, err
+	}
+	if err := validateManagerEdge(p.Reg, parent, child); err != nil {
 		return nil, oldParentID, err
 	}
 	ho.SourceSessionID, ho.SourceHostID, ho.SourcePersistName = parent.ID, parent.HostID, parent.Persist.Name
@@ -421,6 +421,21 @@ func (p *ParentService) ReparentChild(parentID, handoffID string) (*Handoff, str
 		"child_session_id": child.ID, "handoff_id": ho.ID,
 	})
 	return ho, oldParentID, nil
+}
+
+func validateManagerEdge(reg *Registry, parent, child *Session) error {
+	if parent == nil || child == nil {
+		return fmt.Errorf("parent and child sessions are required")
+	}
+	if parent.ID == child.ID {
+		return fmt.Errorf("session %s cannot manage itself", child.ID)
+	}
+	for _, ancestor := range AncestorChain(reg, parent.ID) {
+		if ancestor.ID == child.ID {
+			return fmt.Errorf("parenting %s under %s would create a cycle", child.ID, parent.ID)
+		}
+	}
+	return nil
 }
 
 func (p *ParentService) reparentPaneBinding(childSessionID, parentSessionID string) {

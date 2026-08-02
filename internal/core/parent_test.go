@@ -351,7 +351,7 @@ func TestReparentChildMovesPendingInboxAndHistoryEdge(t *testing.T) {
 	service.Viz = viz
 	now := time.Now().UTC()
 	oldParent := &Session{ID: "sess-old-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "beholder"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
-	newParent := &Session{ID: "sess-new-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "beholder-pdf"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	newParent := &Session{ID: "sess-new-parent", HostID: "home-relay", Persist: ports.PersistHandle{Kind: "tmux", Name: "apex-v2"}, Labels: map[string]string{"agent": "future-agent"}, CreatedAt: now}
 	child := &Session{ID: "sess-child", HostID: "cancun", Persist: ports.PersistHandle{Kind: "tmux", Name: "folio-cycle"}, SourceSessionID: oldParent.ID, CreatedAt: now}
 	for _, sess := range []*Session{oldParent, newParent, child} {
 		if err := reg.PutSession(sess); err != nil {
@@ -407,6 +407,26 @@ func TestReparentChildRefreshesPaneBindingWhenLineageAlreadyCorrect(t *testing.T
 	}
 	if viz.reparents[child.ID] != parent.ID {
 		t.Fatalf("pane binding not refreshed: %v", viz.reparents)
+	}
+}
+
+func TestReparentChildRejectsManagerCycle(t *testing.T) {
+	service, _, reg := newParentTestService(t)
+	now := time.Now().UTC()
+	child := &Session{ID: "sess-child", SourceSessionID: "sess-parent", CreatedAt: now}
+	parent := &Session{ID: "sess-parent", CreatedAt: now}
+	descendant := &Session{ID: "sess-descendant", SourceSessionID: child.ID, CreatedAt: now}
+	for _, sess := range []*Session{child, parent, descendant} {
+		if err := reg.PutSession(sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ho := &Handoff{ID: "ho-child", SessionID: child.ID, SourceSessionID: parent.ID, Status: StatusRunning, CreatedAt: now}
+	if err := reg.PutHandoff(ho); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.ReparentChild(descendant.ID, ho.ID); err == nil || !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("cycle err=%v", err)
 	}
 }
 
