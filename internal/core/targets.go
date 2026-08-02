@@ -5,18 +5,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
 // Target is one usable SSH Host alias from the user's OpenSSH config.
 type Target struct {
-	HostID       string `json:"host_id"`
-	Hostname     string `json:"hostname,omitempty"`
-	User         string `json:"user,omitempty"`
-	ProxyJump    bool   `json:"proxy_jump"`
-	IdentityFile bool   `json:"identity_file"`
-	HasRelayCache bool  `json:"has_relay_cache"`
-	ConfigFile   string `json:"config_file,omitempty"`
+	HostID        string `json:"host_id"`
+	Hostname      string `json:"hostname,omitempty"`
+	User          string `json:"user,omitempty"`
+	Port          int    `json:"port,omitempty"`
+	ProxyJump     bool   `json:"proxy_jump"`
+	IdentityFile  bool   `json:"identity_file"`
+	HasRelayCache bool   `json:"has_relay_cache"`
+	ConfigFile    string `json:"config_file,omitempty"`
 }
 
 // ListTargets parses OpenSSH config (default ~/.ssh/config + Include) and
@@ -44,6 +46,7 @@ func ListTargets() ([]Target, error) {
 				HostID:        alias,
 				Hostname:      b.hostname,
 				User:          b.user,
+				Port:          b.port,
 				ProxyJump:     b.proxyJump,
 				IdentityFile:  b.identityFile,
 				HasRelayCache: fileExists(ProfileCachePath(alias)),
@@ -55,10 +58,42 @@ func ListTargets() ([]Target, error) {
 	return out, nil
 }
 
+// ResolveTarget expands one exact authority-side SSH alias into public
+// connection coordinates. Credentials and identity paths remain client-local.
+func ResolveTarget(hostID string) (*Target, error) {
+	if !usableHostAlias(hostID) {
+		return nil, fmt.Errorf("invalid SSH target alias %q", hostID)
+	}
+	targets, err := ListTargets()
+	if err != nil {
+		return nil, err
+	}
+	wanted := []string{hostID}
+	if hostID == LocalHostIDFromProfile() {
+		wanted = append(wanted, "self")
+	}
+	for _, alias := range wanted {
+		for i := range targets {
+			if targets[i].HostID != alias {
+				continue
+			}
+			if targets[i].ProxyJump {
+				return nil, fmt.Errorf("SSH target %q requires unsupported proxy routing", hostID)
+			}
+			if targets[i].Hostname == "" {
+				targets[i].Hostname = alias
+			}
+			return &targets[i], nil
+		}
+	}
+	return nil, fmt.Errorf("SSH target %q is absent from authority config", hostID)
+}
+
 type sshHostBlock struct {
 	aliases      []string
 	hostname     string
 	user         string
+	port         int
 	proxyJump    bool
 	identityFile bool
 	source       string
@@ -152,6 +187,12 @@ func parseOneSSHConfig(path string) (blocks []sshHostBlock, includes []string, e
 				cur.hostname = val
 			case "user":
 				cur.user = val
+			case "port":
+				if port, err := strconv.Atoi(strings.TrimSpace(val)); err == nil && port > 0 && port <= 65535 {
+					cur.port = port
+				} else {
+					cur.port = -1
+				}
 			case "proxyjump", "proxycommand":
 				if strings.TrimSpace(val) != "" && !strings.EqualFold(val, "none") {
 					cur.proxyJump = true

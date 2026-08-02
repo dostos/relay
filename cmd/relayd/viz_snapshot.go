@@ -20,9 +20,14 @@ func visualizationAuthoritySnapshot() ([]ports.Presentation, error) {
 		if session == nil || session.ID == "" || session.HostID == "" || session.Persist.Name == "" {
 			return nil, fmt.Errorf("session registry contains incomplete visualization identity")
 		}
+		target, err := core.ResolveTarget(session.HostID)
+		if err != nil {
+			return nil, err
+		}
 		items = append(items, ports.Presentation{
 			SessionID: session.ID, ParentSessionID: session.SourceSessionID,
 			Target: session.HostID, TmuxName: session.Persist.Name,
+			SSHHost: target.Hostname, SSHUser: target.User, SSHPort: target.Port,
 		})
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].SessionID < items[j].SessionID })
@@ -92,5 +97,32 @@ func visualizationAuthorityResume(persistName string) (*ports.ResumeResolution, 
 	if matched.ID == "" || matched.HostID == "" {
 		return nil, fmt.Errorf("authoritative resume identity incomplete for %q", persistName)
 	}
-	return &ports.ResumeResolution{SessionID: matched.ID, Target: matched.HostID, TmuxName: matched.Persist.Name}, nil
+	resolution := &ports.ResumeResolution{SessionID: matched.ID, Target: matched.HostID, TmuxName: matched.Persist.Name}
+	target, err := core.ResolveTarget(matched.HostID)
+	if err != nil {
+		return nil, err
+	}
+	resolution.SSHHost, resolution.SSHUser, resolution.SSHPort = target.Hostname, target.User, target.Port
+	return resolution, nil
+}
+
+func visualizationAuthorityTarget(sessionID string) (*ports.ResumeTarget, error) {
+	if err := shellquote.ValidateSessionName(sessionID); err != nil {
+		return nil, err
+	}
+	sessions, err := (&core.Registry{}).ListSessions()
+	if err != nil {
+		return nil, err
+	}
+	for _, session := range sessions {
+		if session.ID != sessionID {
+			continue
+		}
+		target, err := core.ResolveTarget(session.HostID)
+		if err != nil {
+			return nil, err
+		}
+		return &ports.ResumeTarget{Host: target.Hostname, User: target.User, Port: target.Port}, nil
+	}
+	return nil, fmt.Errorf("session %q is absent from the authoritative registry", sessionID)
 }

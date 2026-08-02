@@ -35,6 +35,7 @@ Host *
 Host c3
   HostName 10.0.0.3
   User bob
+	Port 2222
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -61,6 +62,9 @@ Host c3
 	c1 := byID["c1"]
 	if c1.hostname != "10.0.0.1" || c1.user != "alice" || !c1.proxyJump || !c1.identityFile {
 		t.Fatalf("c1 block wrong: %+v", c1)
+	}
+	if byID["c3"].port != 2222 {
+		t.Fatalf("c3 port = %d", byID["c3"].port)
 	}
 	if _, ok := byID["github.com"]; ok {
 		t.Fatal("github.com should be filtered")

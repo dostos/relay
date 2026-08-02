@@ -367,8 +367,10 @@ use the same request, receipt, and cursor path.
 }
 ```
 
-The Mac config names the outbound control connection, its target mappings, and
-an owner-fixed update policy:
+The Mac config names the outbound control connection and an owner-fixed update
+policy. Home resolves session host aliases through its SSH config and sends
+only host/user/port; credentials remain on the Mac. Optional `targets` entries
+can still pin a client-local identity for a host key.
 
 ```json
 {
@@ -377,13 +379,6 @@ an owner-fixed update policy:
     "host": "100.108.118.32",
     "user": "dostos",
     "port": 2222
-  },
-  "targets": {
-    "home-relay": {
-      "host": "100.108.118.32",
-      "user": "dostos",
-      "port": 2222
-    }
   },
   "update": {
     "repo": "~/dev/relay",

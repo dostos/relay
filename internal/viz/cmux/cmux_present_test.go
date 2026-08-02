@@ -18,7 +18,7 @@ func TestVizServiceUsesRelayManagedReconnect(t *testing.T) {
 	v := &Viz{Targets: map[string]targetConfig{
 		"home-relay": {Host: "100.108.118.32", User: "dostos", Port: 2222, Identity: "~/.ssh/viz"},
 	}}
-	command, err := v.attachCommand(ports.Presentation{SessionID: "sess-1", Target: "home-relay", TmuxName: "beholder-pdf-main"})
+	command, err := v.attachCommand(context.Background(), ports.Presentation{SessionID: "sess-1", Target: "home-relay", TmuxName: "beholder-pdf-main"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestProjectedResumePrefersLiveAuthorityAndRequiresExplicitOffline(t *testin
 	t.Setenv("HOME", home)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	ssh := filepath.Join(binDir, "ssh")
-	if err := os.WriteFile(ssh, []byte("#!/bin/sh\nprintf '%s\\n' '{\"session_id\":\"sess-live\",\"target\":\"home-relay\",\"tmux_name\":\"apex-v4\"}'\n"), 0o700); err != nil {
+	if err := os.WriteFile(ssh, []byte("#!/bin/sh\nprintf '%s\\n' '{\"session_id\":\"sess-live\",\"target\":\"home-relay\",\"tmux_name\":\"apex-v4\",\"ssh_host\":\"home.example\"}'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	v := &Viz{
@@ -92,8 +92,14 @@ func TestProjectedResumePrefersLiveAuthorityAndRequiresExplicitOffline(t *testin
 		Targets:   map[string]targetConfig{"home-relay": {Host: "home.example", Identity: "~/.ssh/attach"}},
 	}
 	target, err := v.ResolveProjectedResume(context.Background(), "apex-v4", ports.ResumeResolveOpts{})
-	if err != nil || target.Host != "home.example" {
+	if err != nil || target.Host != "home.example" || target.Identity != filepath.Join(home, ".ssh/attach") {
 		t.Fatalf("live target=%+v err=%v", target, err)
+	}
+	if err := os.WriteFile(ssh, []byte("#!/bin/sh\nprintf '%s\\n' '{\"session_id\":\"sess-live\",\"target\":\"home-relay\",\"tmux_name\":\"apex-v4\"}'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.ResolveProjectedResume(context.Background(), "apex-v4", ports.ResumeResolveOpts{}); err == nil {
+		t.Fatal("live authority response without an SSH endpoint used local routing")
 	}
 	if err := os.WriteFile(ssh, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
@@ -107,6 +113,41 @@ func TestProjectedResumePrefersLiveAuthorityAndRequiresExplicitOffline(t *testin
 	}
 	if _, err := v.ResolveProjectedResume(context.Background(), "apex-v4", ports.ResumeResolveOpts{AllowOffline: true}); err != nil {
 		t.Fatalf("explicit offline fallback failed: %v", err)
+	}
+}
+
+func TestCoveredProjectionSkipsRetiredHistoricalSession(t *testing.T) {
+	v := &Viz{}
+	event := coord.Event{Seq: 50, Kind: "project", Meta: map[string]any{
+		"op": "upsert", "session_id": "sess-retired", "target": "hamburg", "tmux_name": "old",
+	}}
+	result, handled, receipt, err := v.handleCoveredProjection(context.Background(), event, ports.AuthoritySnapshot{V: 1, Revision: 52})
+	if err != nil || !handled || receipt || result != "" {
+		t.Fatalf("retired replay result=%q handled=%v receipt=%v err=%v", result, handled, receipt, err)
+	}
+	_, handled, _, err = v.handleCoveredProjection(context.Background(), coord.Event{Seq: 51, Kind: "update_relayd"}, ports.AuthoritySnapshot{V: 1, Revision: 52})
+	if err != nil || handled {
+		t.Fatalf("lifecycle event was swallowed by snapshot watermark: handled=%v err=%v", handled, err)
+	}
+}
+
+func TestCoveredHistoricalDeleteConvergesToCurrentSnapshot(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	v := &Viz{}
+	if err := v.persistBinding("sess-current", binding{V: 2, Revision: 52, SessionID: "sess-current", Surface: "surface:1"}); err != nil {
+		t.Fatal(err)
+	}
+	event := coord.Event{Seq: 50, Kind: "project", Meta: map[string]any{"op": "delete", "session_id": "sess-current"}}
+	snapshot := ports.AuthoritySnapshot{V: 1, Revision: 52, Items: []ports.Presentation{{
+		SessionID: "sess-current", Target: "hamburg", TmuxName: "current", SSHHost: "host.example",
+	}}}
+	_, handled, receipt, err := v.handleCoveredProjection(context.Background(), event, snapshot)
+	if err != nil || !handled || receipt {
+		t.Fatalf("covered delete handled=%v receipt=%v err=%v", handled, receipt, err)
+	}
+	b, err := v.loadBinding("sess-current")
+	if err != nil || b.Deleted {
+		t.Fatalf("historical delete retired current binding: %+v err=%v", b, err)
 	}
 }
 
@@ -301,8 +342,24 @@ func TestPresentationRejectsShellTargets(t *testing.T) {
 
 func TestAttachCommandRejectsUnknownTargetPolicy(t *testing.T) {
 	v := &Viz{Targets: map[string]targetConfig{"home": {Host: "home.example"}}}
-	if _, err := v.attachCommand(ports.Presentation{SessionID: "sess-1", Target: "raw-host", TmuxName: "safe"}); err == nil {
+	if _, err := v.attachCommand(context.Background(), ports.Presentation{SessionID: "sess-1", Target: "raw-host", TmuxName: "safe"}); err == nil {
 		t.Fatal("unknown policy key must not become a raw ssh destination")
+	}
+}
+
+func TestAttachCommandAcceptsAuthorityResolvedTarget(t *testing.T) {
+	v := &Viz{}
+	command, err := v.attachCommand(context.Background(), ports.Presentation{
+		SessionID: "sess-1", Target: "hamburg", TmuxName: "safe",
+		SSHHost: "host.example", SSHUser: "worker", SSHPort: 2222,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"--host 'host.example'", "--user 'worker'", "--port 2222"} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("authority target command %q missing %q", command, want)
+		}
 	}
 }
 

@@ -118,6 +118,15 @@ func cmdVizBroker(args []string) int {
 		_ = json.NewEncoder(os.Stdout).Encode(resolution)
 		return 0
 	}
+	if len(fields) == 3 && fields[0] == "viz-target" && fields[1] == service {
+		target, err := visualizationAuthorityTarget(fields[2])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(target)
+		return 0
+	}
 	if len(fields) == 2 && fields[0] == "viz-snapshot" && fields[1] == service {
 		items, err := visualizationAuthoritySnapshot()
 		if err != nil {

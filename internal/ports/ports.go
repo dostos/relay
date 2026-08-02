@@ -86,6 +86,9 @@ type Presentation struct {
 	ParentSessionID string `json:"parent_session_id,omitempty"`
 	Target          string `json:"target"`
 	TmuxName        string `json:"tmux_name"`
+	SSHHost         string `json:"ssh_host,omitempty"`
+	SSHUser         string `json:"ssh_user,omitempty"`
+	SSHPort         int    `json:"ssh_port,omitempty"`
 }
 
 type ProjectionOp string
@@ -127,13 +130,13 @@ type ProjectionInventory interface {
 	ProjectionSessions(context.Context) ([]ProjectedSession, error)
 }
 
-// ResumeTarget is an authority-projected session joined to owner-local SSH
-// policy. It lets a projection-only client attach without copying authority.
+// ResumeTarget joins authority-resolved routing to an optional client-local
+// identity. Private key paths never cross the projection protocol.
 type ResumeTarget struct {
-	Host     string
-	User     string
-	Port     int
-	Identity string
+	Host     string `json:"host"`
+	User     string `json:"user,omitempty"`
+	Port     int    `json:"port,omitempty"`
+	Identity string `json:"-"`
 }
 
 type ResumeResolver interface {
@@ -144,12 +147,15 @@ type ResumeResolveOpts struct {
 	AllowOffline bool
 }
 
-// ResumeResolution is the broker-safe authority response. SSH coordinates are
-// deliberately absent; the visualization host joins this to owner-local policy.
+// ResumeResolution is the broker-safe authority response. It carries public
+// connection coordinates, never credentials or key paths.
 type ResumeResolution struct {
 	SessionID string `json:"session_id"`
 	Target    string `json:"target"`
 	TmuxName  string `json:"tmux_name"`
+	SSHHost   string `json:"ssh_host"`
+	SSHUser   string `json:"ssh_user,omitempty"`
+	SSHPort   int    `json:"ssh_port,omitempty"`
 }
 
 type AuthoritySnapshot struct {

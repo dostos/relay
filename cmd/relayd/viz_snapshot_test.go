@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	coordrelayd "github.com/dostos/relay/internal/coord/relayd"
@@ -10,7 +12,14 @@ import (
 
 func TestVisualizationAuthoritySnapshotCarriesCurrentLineageAndContext(t *testing.T) {
 	t.Setenv("RELAY_STATE_DIR", t.TempDir())
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".ssh", "config"), []byte("Host home c3\n  HostName 10.0.0.3\n  User worker\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	reg := &core.Registry{}
 	for _, session := range []*core.Session{
 		{ID: "sess-apex", HostID: "home", Persist: ports.PersistHandle{Kind: "tmux", Name: "apex"}},

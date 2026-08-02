@@ -45,17 +45,38 @@ func (v *Viz) queuePresentation(req ports.Presentation) (int64, error) {
 	if !v.queueAvailable() {
 		return 0, fmt.Errorf("visualization request queue unavailable")
 	}
+	req, err := v.withAuthorityTarget(req)
+	if err != nil {
+		return 0, err
+	}
 	resp, err := coordrelayd.EmitLocal(localRelaydSocket(), v.serviceChannel(), "project", map[string]any{
 		"op":                string(ports.ProjectionUpsert),
 		"session_id":        req.SessionID,
 		"parent_session_id": req.ParentSessionID,
 		"target":            req.Target,
 		"tmux_name":         req.TmuxName,
+		"ssh_host":          req.SSHHost,
+		"ssh_user":          req.SSHUser,
+		"ssh_port":          req.SSHPort,
 	})
 	if err != nil {
 		return 0, err
 	}
 	return resp.Seq, nil
+}
+
+func (v *Viz) withAuthorityTarget(req ports.Presentation) (ports.Presentation, error) {
+	mapped, ok := v.Targets[req.Target]
+	if ok {
+		req.SSHHost, req.SSHUser, req.SSHPort = mapped.Host, mapped.User, mapped.Port
+		return req, nil
+	}
+	target, err := core.ResolveTarget(req.Target)
+	if err != nil {
+		return req, err
+	}
+	req.SSHHost, req.SSHUser, req.SSHPort = target.Hostname, target.User, target.Port
+	return req, nil
 }
 
 func (v *Viz) queueClose(sessionID string) error {
@@ -73,9 +94,14 @@ func (v *Viz) queueFocus(req ports.Presentation) error {
 	if !v.queueAvailable() {
 		return fmt.Errorf("visualization request queue unavailable")
 	}
-	_, err := coordrelayd.EmitLocal(localRelaydSocket(), v.serviceChannel(), "project", map[string]any{
+	req, err := v.withAuthorityTarget(req)
+	if err != nil {
+		return err
+	}
+	_, err = coordrelayd.EmitLocal(localRelaydSocket(), v.serviceChannel(), "project", map[string]any{
 		"op": string(ports.ProjectionFocus), "session_id": req.SessionID,
 		"parent_session_id": req.ParentSessionID, "target": req.Target, "tmux_name": req.TmuxName,
+		"ssh_host": req.SSHHost, "ssh_user": req.SSHUser, "ssh_port": req.SSHPort,
 	})
 	return err
 }
@@ -185,6 +211,14 @@ func (v *Viz) Follow(ctx context.Context, follow bool) error {
 	if err := v.fetchAuthoritySnapshot(ctx); err != nil {
 		return err
 	}
+	snapshotRaw, err := os.ReadFile(v.authoritySnapshotPath())
+	if err != nil {
+		return err
+	}
+	snapshot, err := decodeAuthoritySnapshot(snapshotRaw)
+	if err != nil {
+		return err
+	}
 	followBit := 0
 	if follow {
 		followBit = 1
@@ -211,14 +245,20 @@ func (v *Viz) Follow(ctx context.Context, follow bool) error {
 		if json.Unmarshal(scanner.Bytes(), &event) != nil || event.Heartbeat || event.Seq <= v.loadCursor() {
 			continue
 		}
-		result, handleErr := v.handleServiceEvent(ctx, event)
+		result, handled, emitReceipt, handleErr := v.handleCoveredProjection(ctx, event, snapshot)
+		if !handled {
+			result, handleErr = v.handleServiceEvent(ctx, event)
+			emitReceipt = true
+		}
 		if handleErr != nil {
 			_ = cmd.Process.Kill()
 			return fmt.Errorf("viz event %d %s: %w", event.Seq, event.Kind, handleErr)
 		}
-		if err := v.emitAck(ctx, event, result); err != nil {
-			_ = cmd.Process.Kill()
-			return err
+		if emitReceipt {
+			if err := v.emitAck(ctx, event, result); err != nil {
+				_ = cmd.Process.Kill()
+				return err
+			}
 		}
 		if err := v.saveCursor(event.Seq); err != nil {
 			_ = cmd.Process.Kill()
@@ -236,6 +276,39 @@ func (v *Viz) Follow(ctx context.Context, follow bool) error {
 		return fmt.Errorf("visualization control stream: %w (%s)", err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// handleCoveredProjection reduces historical pane work against the fresh
+// authority snapshot. This lets a stale cursor pass deleted/superseded events
+// without allowing them to recreate retired sessions.
+func (v *Viz) handleCoveredProjection(ctx context.Context, event coord.Event, snapshot ports.AuthoritySnapshot) (string, bool, bool, error) {
+	if event.Kind != "project" || event.Seq > snapshot.Revision {
+		return "", false, false, nil
+	}
+	sessionID := stringMeta(event.Meta, "session_id")
+	originalOp := stringMeta(event.Meta, "op")
+	var current *ports.Presentation
+	for i := range snapshot.Items {
+		if snapshot.Items[i].SessionID == sessionID {
+			current = &snapshot.Items[i]
+			break
+		}
+	}
+	if current == nil {
+		if originalOp == string(ports.ProjectionDelete) {
+			result, err := v.handleServiceEvent(ctx, event)
+			return result, true, false, err
+		}
+		return "", true, false, nil
+	}
+	meta := map[string]any{
+		"op": string(ports.ProjectionUpsert), "session_id": current.SessionID,
+		"parent_session_id": current.ParentSessionID, "target": current.Target, "tmux_name": current.TmuxName,
+		"ssh_host": current.SSHHost, "ssh_user": current.SSHUser, "ssh_port": current.SSHPort,
+	}
+	event.Meta = meta
+	result, err := v.handleServiceEvent(ctx, event)
+	return result, true, err == nil && originalOp == string(ports.ProjectionUpsert), err
 }
 
 // retireLocalAuthorityState makes the Viz host projection-only. The archived
@@ -305,7 +378,13 @@ func presentationFromMeta(meta map[string]any) ports.Presentation {
 	return ports.Presentation{
 		SessionID: stringMeta(meta, "session_id"), ParentSessionID: stringMeta(meta, "parent_session_id"),
 		Target: stringMeta(meta, "target"), TmuxName: stringMeta(meta, "tmux_name"),
+		SSHHost: stringMeta(meta, "ssh_host"), SSHUser: stringMeta(meta, "ssh_user"), SSHPort: intMeta(meta, "ssh_port"),
 	}
+}
+
+func intMeta(meta map[string]any, key string) int {
+	value, _ := meta[key].(float64)
+	return int(value)
 }
 
 func (v *Viz) retireControl(ctx context.Context) (string, error) {

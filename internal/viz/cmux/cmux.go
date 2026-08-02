@@ -137,7 +137,7 @@ func (v *Viz) PresentTarget(ctx context.Context, req ports.Presentation) (string
 		}
 		return fmt.Sprintf("viz:queued:%d", seq), nil
 	}
-	attach, err := v.attachCommand(req)
+	attach, err := v.attachCommand(ctx, req)
 	if err != nil {
 		return "", err
 	}
@@ -207,10 +207,17 @@ func (v *Viz) ApplyProjection(ctx context.Context, event ports.ProjectionEvent) 
 	}
 }
 
-func (v *Viz) attachCommand(req ports.Presentation) (string, error) {
+func (v *Viz) attachCommand(ctx context.Context, req ports.Presentation) (string, error) {
 	mapped, ok := v.Targets[req.Target]
-	if !ok {
-		return "", fmt.Errorf("unknown visualization target policy %q", req.Target)
+	if req.SSHHost != "" {
+		identity := mapped.Identity
+		mapped = targetConfig{Host: req.SSHHost, User: req.SSHUser, Port: req.SSHPort, Identity: identity}
+	} else if !ok {
+		resolved, err := v.fetchAuthorityTarget(ctx, req.SessionID)
+		if err != nil {
+			return "", err
+		}
+		mapped = targetConfig{Host: resolved.Host, User: resolved.User, Port: resolved.Port}
 	}
 	if !vizTargetRE.MatchString(mapped.Host) || (mapped.User != "" && !vizTargetRE.MatchString(mapped.User)) || mapped.Port < 0 || mapped.Port > 65535 || strings.ContainsAny(mapped.Identity, "\r\n\x00") {
 		return "", fmt.Errorf("invalid visualization target mapping for %q", req.Target)

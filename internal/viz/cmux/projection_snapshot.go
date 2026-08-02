@@ -139,7 +139,11 @@ func (v *Viz) updateAuthoritySnapshot(event ports.ProjectionEvent) error {
 func (v *Viz) ResolveProjectedResume(ctx context.Context, persistName string, opts ports.ResumeResolveOpts) (ports.ResumeTarget, error) {
 	resolution, err := v.fetchResumeResolution(ctx, persistName)
 	if err == nil {
-		return v.localResumeTarget(resolution.Target)
+		if resolution.SSHHost == "" {
+			return ports.ResumeTarget{}, fmt.Errorf("authoritative resume resolution omitted SSH endpoint")
+		}
+		identity := v.Targets[resolution.Target].Identity
+		return validateResumeTarget(ports.ResumeTarget{Host: resolution.SSHHost, User: resolution.SSHUser, Port: resolution.SSHPort, Identity: expandServicePath(identity)})
 	}
 	if !opts.AllowOffline {
 		return ports.ResumeTarget{}, fmt.Errorf("authoritative resume resolution unavailable: %w; use --offline only to accept the last snapshot", err)
@@ -147,6 +151,10 @@ func (v *Viz) ResolveProjectedResume(ctx context.Context, persistName string, op
 	item, fallbackErr := v.resolveOfflineSnapshot(persistName)
 	if fallbackErr != nil {
 		return ports.ResumeTarget{}, fmt.Errorf("authoritative resume resolution unavailable: %v; offline snapshot: %w", err, fallbackErr)
+	}
+	if item.SSHHost != "" {
+		identity := v.Targets[item.Target].Identity
+		return validateResumeTarget(ports.ResumeTarget{Host: item.SSHHost, User: item.SSHUser, Port: item.SSHPort, Identity: expandServicePath(identity)})
 	}
 	return v.localResumeTarget(item.Target)
 }
@@ -176,6 +184,27 @@ func (v *Viz) fetchResumeResolution(ctx context.Context, persistName string) (*p
 		return nil, fmt.Errorf("visualization authority returned mismatched resume identity")
 	}
 	return &resolution, nil
+}
+
+func (v *Viz) fetchAuthorityTarget(ctx context.Context, sessionID string) (*ports.ResumeTarget, error) {
+	if shellquote.ValidateSessionName(sessionID) != nil {
+		return nil, fmt.Errorf("invalid visualization session %q", sessionID)
+	}
+	args, err := v.controlSSHArgs("viz-target " + v.serviceChannel() + " " + sessionID)
+	if err != nil {
+		return nil, err
+	}
+	var stdout, stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("visualization authority target: %w (%s)", err, strings.TrimSpace(stderr.String()))
+	}
+	var resolved ports.ResumeTarget
+	if err := json.Unmarshal(stdout.Bytes(), &resolved); err != nil || !vizTargetRE.MatchString(resolved.Host) || resolved.Port < 0 || resolved.Port > 65535 {
+		return nil, fmt.Errorf("invalid visualization authority target response")
+	}
+	return &resolved, nil
 }
 
 func (v *Viz) resolveOfflineSnapshot(persistName string) (*ports.Presentation, error) {
@@ -210,8 +239,12 @@ func (v *Viz) localResumeTarget(target string) (ports.ResumeTarget, error) {
 	if !ok {
 		return ports.ResumeTarget{}, fmt.Errorf("no visualization target policy for authority host %q", target)
 	}
+	return validateResumeTarget(ports.ResumeTarget{Host: mapped.Host, User: mapped.User, Port: mapped.Port, Identity: expandServicePath(mapped.Identity)})
+}
+
+func validateResumeTarget(mapped ports.ResumeTarget) (ports.ResumeTarget, error) {
 	if !vizTargetRE.MatchString(mapped.Host) || (mapped.User != "" && !vizTargetRE.MatchString(mapped.User)) || mapped.Port < 0 || mapped.Port > 65535 || strings.ContainsAny(mapped.Identity, "\r\n\x00") {
-		return ports.ResumeTarget{}, fmt.Errorf("invalid visualization target mapping for %q", target)
+		return ports.ResumeTarget{}, fmt.Errorf("invalid visualization target mapping")
 	}
-	return ports.ResumeTarget{Host: mapped.Host, User: mapped.User, Port: mapped.Port, Identity: expandServicePath(mapped.Identity)}, nil
+	return mapped, nil
 }
