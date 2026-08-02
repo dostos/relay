@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -137,7 +138,7 @@ func cmdControlServe() int {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	sock := core.DesktopBridgeSocketPath()
-	srv := &bridge.Server{SockPath: sock, RelayBin: core.RelayBin(), Build: coord.Build, Authorize: core.AuthorizeBridgeSource}
+	srv := &bridge.Server{SockPath: sock, RelayBin: relayBinary(), Build: coord.Build, Authorize: core.AuthorizeBridgeSource}
 	service := &controlbridge.Service{Registry: &core.Registry{}, BridgeSocket: sock, Stderr: os.Stderr}
 	go func() {
 		<-ctx.Done()
@@ -215,7 +216,7 @@ func cmdViz(args []string) int {
 }
 
 func cmdBridge(args []string) int {
-	relayBin := core.RelayBin()
+	relayBin := relayBinary()
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--relay-bin":
@@ -245,6 +246,21 @@ func cmdBridge(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// relayBinary resolves relay beside relayd. core.RelayBin is intentionally for
+// callers running inside relay itself, where os.Executable is already relay.
+func relayBinary() string {
+	if value := os.Getenv("RELAY_BIN"); value != "" {
+		return value
+	}
+	if executable, err := os.Executable(); err == nil {
+		return filepath.Join(filepath.Dir(executable), "relay")
+	}
+	if path, err := exec.LookPath("relay"); err == nil {
+		return path
+	}
+	return "relay"
 }
 
 func sockPath() string {
