@@ -8,10 +8,12 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 
 	"github.com/dostos/relay/internal/bridge"
+	"github.com/dostos/relay/internal/controlbridge"
 	"github.com/dostos/relay/internal/controlstate"
 	"github.com/dostos/relay/internal/coord"
 	"github.com/dostos/relay/internal/coord/relayd"
@@ -67,7 +69,7 @@ Usage:
                                Optional visualization service (local policy)
   relayd viz sync             Consume queued requests from the control host
   relayd viz follow           Keep consuming while the Mac is awake
-  relayd control export|import
+  relayd control export|import|serve
                                Secure control-state migration over stdin/stdout
   relayd ping
   relayd status
@@ -82,6 +84,8 @@ func cmdControl(args []string) int {
 		return 2
 	}
 	switch args[0] {
+	case "serve":
+		return cmdControlServe()
 	case "export":
 		bundle, err := controlstate.Export(&core.Registry{})
 		if err != nil {
@@ -111,6 +115,46 @@ func cmdControl(args []string) int {
 		fmt.Fprintf(os.Stderr, "relayd control: unknown command %q\n", args[0])
 		return 2
 	}
+}
+
+func cmdControlServe() int {
+	if err := core.EnsureStateDirs(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	lock, err := os.OpenFile(filepath.Join(core.StateRoot(), "control-bridge.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		fmt.Fprintln(os.Stderr, "relayd control bridge already running")
+		return 1
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) //nolint:errcheck
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	sock := core.DesktopBridgeSocketPath()
+	srv := &bridge.Server{SockPath: sock, RelayBin: core.RelayBin(), Build: coord.Build, Authorize: core.AuthorizeBridgeSource}
+	service := &controlbridge.Service{Registry: &core.Registry{}, BridgeSocket: sock, Stderr: os.Stderr}
+	go func() {
+		<-ctx.Done()
+		_ = srv.Close()
+	}()
+	go func() {
+		if err := service.Run(ctx); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			cancel()
+		}
+	}()
+	fmt.Fprintf(os.Stderr, "relayd home control bridge listening on unix:%s\n", sock)
+	if err := srv.Serve(); err != nil && ctx.Err() == nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
 }
 
 func cmdViz(args []string) int {
