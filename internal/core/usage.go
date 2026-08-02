@@ -86,8 +86,10 @@ func LoadUsageHint(ctx context.Context, hookCmd string) (UsageHint, bool) {
 // AgentRank is one candidate's standing, for advisory display (`relay agent pick`).
 type AgentRank struct {
 	Agent           string `json:"agent"`
+	UsageKey        string `json:"usage_key,omitempty"`
 	WeeklyRemaining *int   `json:"weekly_remaining,omitempty"`
 	Preferred       bool   `json:"preferred,omitempty"`
+	Exhausted       bool   `json:"exhausted_fallback,omitempty"`
 	Chosen          bool   `json:"chosen,omitempty"`
 }
 
@@ -95,11 +97,17 @@ type AgentRank struct {
 //
 //  1. If preferred is a candidate and its weekly remaining is unknown or
 //     >= minRemaining, pick it.
-//  2. Else pick the candidate with the highest weekly remaining >= minRemaining.
-//  3. Else keep preferred (if a candidate), else the first candidate.
+//  2. If preferred is known exhausted and an exhausted fallback is configured,
+//     choose that launch profile (used by Suggest; SelectAgent has none).
+//  3. Else pick the candidate with the highest weekly remaining >= minRemaining.
+//  4. Else keep preferred (if a candidate), else the first candidate.
 //
 // Ties keep candidate order. Returns the pick plus a ranking in candidate order.
 func SelectAgent(candidates []string, preferred string, hint UsageHint, minRemaining int) (string, []AgentRank) {
+	return selectAgent(candidates, preferred, "", hint, minRemaining, nil)
+}
+
+func selectAgent(candidates []string, preferred, exhausted string, hint UsageHint, minRemaining int, usageKeys map[string]string) (string, []AgentRank) {
 	inList := func(n string) bool {
 		for _, c := range candidates {
 			if c == n {
@@ -111,8 +119,12 @@ func SelectAgent(candidates []string, preferred string, hint UsageHint, minRemai
 
 	ranks := make([]AgentRank, 0, len(candidates))
 	for _, c := range candidates {
-		r := AgentRank{Agent: c, Preferred: c == preferred}
-		if v, ok := hint.Remaining(c); ok {
+		key := c
+		if usageKeys[c] != "" {
+			key = usageKeys[c]
+		}
+		r := AgentRank{Agent: c, UsageKey: key, Preferred: c == preferred, Exhausted: c == exhausted}
+		if v, ok := hint.Remaining(key); ok {
 			vv := v
 			r.WeeklyRemaining = &vv
 		}
@@ -121,16 +133,26 @@ func SelectAgent(candidates []string, preferred string, hint UsageHint, minRemai
 
 	pick := ""
 	// Rule 1: preferred with headroom (or unknown usage).
+	preferredKey := preferred
+	if usageKeys[preferred] != "" {
+		preferredKey = usageKeys[preferred]
+	}
 	if preferred != "" && inList(preferred) {
-		if v, ok := hint.Remaining(preferred); !ok || v >= minRemaining {
+		if v, ok := hint.Remaining(preferredKey); !ok || v >= minRemaining {
 			pick = preferred
+		} else if exhausted != "" && inList(exhausted) {
+			pick = exhausted
 		}
 	}
 	// Rule 2: highest remaining at/above threshold.
 	if pick == "" {
 		best := -1
 		for _, c := range candidates {
-			if v, ok := hint.Remaining(c); ok && v >= minRemaining && v > best {
+			key := c
+			if usageKeys[c] != "" {
+				key = usageKeys[c]
+			}
+			if v, ok := hint.Remaining(key); ok && v >= minRemaining && v > best {
 				best = v
 				pick = c
 			}
@@ -182,5 +204,9 @@ func Suggest(ctx context.Context, profile *HostProfile) (string, []AgentRank) {
 		min = defaultUsageMinRemaining
 	}
 	hint, _ := LoadUsageHint(ctx, usageHookFor(profile))
-	return SelectAgent(candidateAgents(profile), profile.Defaults.PreferredAgent, hint, min)
+	usageKeys := map[string]string{}
+	for _, a := range profile.Agents {
+		usageKeys[a.Name] = strings.TrimSpace(a.UsageKey)
+	}
+	return selectAgent(candidateAgents(profile), profile.Defaults.PreferredAgent, profile.Defaults.ExhaustedAgent, hint, min, usageKeys)
 }

@@ -30,5 +30,12 @@ not initiate login, trust, or permission setup as part of selection.
    or unauthenticated, report that constraint rather than silently selecting an
    unsuitable CLI.
 
+Host policy may define named launch profiles with model arguments. Profiles
+that draw from the same provider quota share `usage_key`; `preferred_agent`
+selects the normal profile and `exhausted_agent` selects the provider-managed
+fallback when that quota drops below `usage_min_remaining`. For example, a
+host may prefer a fast Grok profile and fall back to an Auto profile. Keep the
+actual model identifiers and flags in `host.yaml`, never in the delegated goal.
+
 Never encode vendor names, UI strings, login flows, or model-specific flags in
 the goal. Relay's host profile owns those details.

@@ -60,6 +60,7 @@ type AgentSpec struct {
 	Name       string            `yaml:"name" json:"name"` // claude | cursor-agent | codex | ccs:personal | …
 	Command    string            `yaml:"command,omitempty" json:"command,omitempty"`
 	Args       []string          `yaml:"args,omitempty" json:"args,omitempty"`
+	UsageKey   string            `yaml:"usage_key,omitempty" json:"usage_key,omitempty"` // shared provider/quota identity
 	Env        map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
 	RelayHooks string            `yaml:"relay_hooks,omitempty" json:"relay_hooks,omitempty"` // auto (default) | off
 	Notes      string            `yaml:"notes,omitempty" json:"notes,omitempty"`
@@ -75,6 +76,9 @@ type PathMapEntry struct {
 // HostDefaults are per-host defaults.
 type HostDefaults struct {
 	PreferredAgent string `yaml:"preferred_agent,omitempty" json:"preferred_agent,omitempty"`
+	// ExhaustedAgent is an explicit launch profile used when PreferredAgent's
+	// known usage falls below UsageMinRemaining (for example, provider Auto).
+	ExhaustedAgent string `yaml:"exhausted_agent,omitempty" json:"exhausted_agent,omitempty"`
 	SilenceSec     int    `yaml:"silence_sec,omitempty" json:"silence_sec,omitempty"`
 	WorkspaceHint  string `yaml:"workspace_hint,omitempty" json:"workspace_hint,omitempty"`
 	// UsageHook is a command relay runs locally to learn each agent's remaining
@@ -642,6 +646,15 @@ agents:
     notes: interactive Claude Code CLI
   - name: cursor-agent
     command: cursor-agent
+  # Named launch profiles may share one provider quota. Example:
+  # - name: grok-fast
+  #   command: cursor-agent
+  #   args: [--model, cursor-grok-4.5-high-fast]
+  #   usage_key: cursor
+  # - name: cursor-auto
+  #   command: cursor-agent
+  #   args: [--model, auto]
+  #   usage_key: cursor
   - name: codex
     command: codex
   - name: ccs:personal
@@ -658,6 +671,7 @@ path_map:
 
 defaults:
   preferred_agent: claude
+  # exhausted_agent: cursor-auto
   silence_sec: 10
   # Optional: usage-aware selection. relay runs this locally, expecting
   # {"agents":{"<name>":{"weekly_remaining":0-100}}} on stdout; the preferred

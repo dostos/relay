@@ -73,6 +73,34 @@ func TestSelectAgent(t *testing.T) {
 	}
 }
 
+func TestSuggestUsesExhaustedLaunchProfileWithSharedQuota(t *testing.T) {
+	profile := &HostProfile{
+		Agents: []AgentSpec{
+			{Name: "grok-fast", Command: "cursor-agent", Args: []string{"--model", "cursor-grok-4.5-high-fast"}, UsageKey: "cursor"},
+			{Name: "auto", Command: "cursor-agent", Args: []string{"--model", "auto"}, UsageKey: "cursor"},
+		},
+		Defaults: HostDefaults{PreferredAgent: "grok-fast", ExhaustedAgent: "auto", UsageMinRemaining: 5},
+	}
+	pick, ranks := selectAgent(candidateAgents(profile), profile.Defaults.PreferredAgent, profile.Defaults.ExhaustedAgent, hint(map[string]int{"cursor": 0}), 5, map[string]string{"grok-fast": "cursor", "auto": "cursor"})
+	if pick != "auto" {
+		t.Fatalf("pick = %q, want auto; ranks=%+v", pick, ranks)
+	}
+	if !ranks[1].Chosen || !ranks[1].Exhausted || ranks[1].UsageKey != "cursor" {
+		t.Fatalf("fallback rank = %+v", ranks[1])
+	}
+}
+
+func TestSuggestKeepsPreferredWhenUsageIsUnknown(t *testing.T) {
+	profile := &HostProfile{
+		Agents:   []AgentSpec{{Name: "grok-fast", UsageKey: "cursor"}, {Name: "auto", UsageKey: "cursor"}},
+		Defaults: HostDefaults{PreferredAgent: "grok-fast", ExhaustedAgent: "auto", UsageMinRemaining: 5},
+	}
+	pick, _ := selectAgent(candidateAgents(profile), "grok-fast", "auto", UsageHint{}, 5, map[string]string{"grok-fast": "cursor", "auto": "cursor"})
+	if pick != "grok-fast" {
+		t.Fatalf("unknown telemetry pick = %q, want grok-fast", pick)
+	}
+}
+
 func TestLoadUsageHint(t *testing.T) {
 	ctx := context.Background()
 
