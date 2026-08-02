@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Shell entrypoints must remain LF-terminated; see .gitattributes.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
