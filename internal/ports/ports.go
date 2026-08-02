@@ -81,9 +81,10 @@ type Layout struct {
 // display. Geometry is deliberately absent: it belongs to user policy on the
 // visualization host.
 type Presentation struct {
-	SessionID string `json:"session_id"`
-	Target    string `json:"target"`
-	TmuxName  string `json:"tmux_name"`
+	SessionID       string `json:"session_id"`
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+	Target          string `json:"target"`
+	TmuxName        string `json:"tmux_name"`
 }
 
 type TargetPresenter interface {

@@ -136,7 +136,7 @@ func (v *Viz) PresentTarget(ctx context.Context, req ports.Presentation) (string
 	if err != nil {
 		return "", err
 	}
-	return v.Present(ctx, req.SessionID, attach, ports.Layout{Mode: "remote"})
+	return v.Present(ctx, req.SessionID, attach, ports.Layout{Mode: "remote", SourceSessionID: req.ParentSessionID})
 }
 
 func (v *Viz) attachCommand(req ports.Presentation) (string, error) {
@@ -195,6 +195,19 @@ func (v *Viz) Present(ctx context.Context, sessionID, attachCmd string, layout p
 	// up panes.
 	if b, err := v.lookup(sessionID); err == nil && b.Surface != "" {
 		if loc := v.locationOfSurface(ctx, b.Surface); loc.Workspace != "" {
+			if layout.SourceSessionID != "" && !layout.ExplicitPlace {
+				if parent, parentErr := v.lookup(layout.SourceSessionID); parentErr == nil {
+					parentLoc := v.locationOfSurface(ctx, parent.Surface)
+					if parentLoc.Workspace != "" && parentLoc.Workspace != loc.Workspace {
+						v.closeSurface(ctx, b.Surface)
+						v.mu.Lock()
+						delete(v.bindings, sessionID)
+						v.mu.Unlock()
+						_ = os.Remove(bindPath(sessionID))
+						goto openFresh
+					}
+				}
+			}
 			b.SessionID = sessionID
 			b.Workspace = loc.Workspace
 			b.Pane = loc.Pane
@@ -218,6 +231,7 @@ func (v *Viz) Present(ctx context.Context, sessionID, attachCmd string, layout p
 		_ = os.Remove(bindPath(sessionID))
 	}
 
+openFresh:
 	// Blind-usage default: when the caller omits --workspace, land the split in
 	// whatever workspace cmux currently has focused. Without this, cmux
 	// new-split fails "Surface not found" and present is unusable unless the

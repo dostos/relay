@@ -46,9 +46,10 @@ func (v *Viz) queuePresentation(req ports.Presentation) (int64, error) {
 		return 0, fmt.Errorf("visualization request queue unavailable")
 	}
 	resp, err := coordrelayd.EmitLocal(localRelaydSocket(), v.serviceChannel(), "present", map[string]any{
-		"session_id": req.SessionID,
-		"target":     req.Target,
-		"tmux_name":  req.TmuxName,
+		"session_id":        req.SessionID,
+		"parent_session_id": req.ParentSessionID,
+		"target":            req.Target,
+		"tmux_name":         req.TmuxName,
 	})
 	if err != nil {
 		return 0, err
@@ -211,9 +212,10 @@ func (v *Viz) handleServiceEvent(ctx context.Context, event coord.Event) (string
 	switch event.Kind {
 	case "present":
 		req := ports.Presentation{
-			SessionID: stringMeta(event.Meta, "session_id"),
-			Target:    stringMeta(event.Meta, "target"),
-			TmuxName:  stringMeta(event.Meta, "tmux_name"),
+			SessionID:       stringMeta(event.Meta, "session_id"),
+			ParentSessionID: stringMeta(event.Meta, "parent_session_id"),
+			Target:          stringMeta(event.Meta, "target"),
+			TmuxName:        stringMeta(event.Meta, "tmux_name"),
 		}
 		return v.PresentTarget(ctx, req)
 	case "update_relayd":

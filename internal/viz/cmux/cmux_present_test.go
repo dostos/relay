@@ -28,6 +28,18 @@ func TestVizServiceOwnsTargetMappingAndTmuxAttach(t *testing.T) {
 	}
 }
 
+func TestPresentTargetCarriesParentAnchorIntoLocalPolicy(t *testing.T) {
+	req := ports.Presentation{SessionID: "sess-child", ParentSessionID: "sess-parent", Target: "home", TmuxName: "child"}
+	if req.ParentSessionID != "sess-parent" {
+		t.Fatalf("parent anchor lost: %+v", req)
+	}
+	layout := ports.Layout{Mode: "remote", SourceSessionID: req.ParentSessionID}
+	got := childLayout(parentChildLayout(layout, binding{Workspace: "workspace:beholder", Pane: "pane:parent"}), binding{})
+	if got.Workspace != "workspace:beholder" || got.Pane != "pane:parent" || got.SplitDirection != "right" {
+		t.Fatalf("anchored layout = %+v", got)
+	}
+}
+
 func TestPresentationRejectsShellTargets(t *testing.T) {
 	err := validatePresentation(ports.Presentation{SessionID: "sess-1", Target: "home; touch /tmp/no", TmuxName: "safe"})
 	if err == nil {

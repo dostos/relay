@@ -11,9 +11,10 @@ import (
 func PresentSession(ctx context.Context, viz ports.Viz, sess *Session, attachCmd string, layout ports.Layout) (string, error) {
 	if presenter, ok := viz.(ports.TargetPresenter); ok {
 		return presenter.PresentTarget(ctx, ports.Presentation{
-			SessionID: sess.ID,
-			Target:    sess.HostID,
-			TmuxName:  sess.Persist.Name,
+			SessionID:       sess.ID,
+			ParentSessionID: firstNonEmpty(sess.SourceSessionID, layout.SourceSessionID),
+			Target:          sess.HostID,
+			TmuxName:        sess.Persist.Name,
 		})
 	}
 	return viz.Present(ctx, sess.ID, attachCmd, layout)
