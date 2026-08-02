@@ -310,8 +310,35 @@ fi
 	if strings.Contains(string(logRaw), "new-split") {
 		t.Fatalf("present created a duplicate pane:\n%s", logRaw)
 	}
+	if !strings.Contains(string(logRaw), "surface resume set --surface surface:7") {
+		t.Fatalf("adopted pane was not stamped:\n%s", logRaw)
+	}
 	stored, err := (&core.Registry{}).GetSession(sess.ID)
 	if err != nil || stored.VizSurfaceRef != surface {
 		t.Fatalf("registry surface=%q err=%v", stored.VizSurfaceRef, err)
+	}
+}
+
+func TestGhostRegistrySurfaceClearsWithoutBindingFile(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	now := time.Now().UTC()
+	reg := &core.Registry{}
+	ghost := &core.Session{ID: "sess-ghost", Persist: ports.PersistHandle{Kind: "tmux", Name: "apex"}, VizSurfaceRef: "surface:243", CreatedAt: now, UpdatedAt: now}
+	live := &core.Session{ID: "sess-live", Persist: ports.PersistHandle{Kind: "tmux", Name: "apex-v3"}, VizSurfaceRef: "surface:279", CreatedAt: now, UpdatedAt: now}
+	for _, sess := range []*core.Session{ghost, live} {
+		if err := reg.PutSession(sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+	New().clearGhostRegistrySurfaces(map[string]surfaceLocation{
+		"surface:279": {Workspace: "workspace:38", Pane: "pane:209"},
+	})
+	gotGhost, _ := reg.GetSession(ghost.ID)
+	gotLive, _ := reg.GetSession(live.ID)
+	if gotGhost.VizSurfaceRef != "" {
+		t.Fatalf("ghost ref remains: %q", gotGhost.VizSurfaceRef)
+	}
+	if gotLive.VizSurfaceRef != "surface:279" {
+		t.Fatalf("live ref changed: %q", gotLive.VizSurfaceRef)
 	}
 }

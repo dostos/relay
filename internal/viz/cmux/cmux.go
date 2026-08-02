@@ -221,6 +221,11 @@ func (v *Viz) Present(ctx context.Context, sessionID, attachCmd string, layout p
 			}
 			b.UpdatedAt = time.Now().UTC()
 			_ = v.persistBinding(sessionID, b)
+			if sessName != "" {
+				if err := v.stampResume(ctx, b.Surface, sessName, attachCmd); err != nil {
+					return "", err
+				}
+			}
 			_ = v.focusSurface(ctx, b)
 			_ = v.brandSurface(ctx, b.Surface, sessName)
 			if sessName != "" {
@@ -279,16 +284,13 @@ openFresh:
 	if _, err := v.run(ctx, "send", "--surface", surface, "--", attachCmd+"\n"); err != nil {
 		return "", err
 	}
-	// Best-effort: stamp cmux resume binding so restart can re-run the same command.
+	// The pane is not successfully presented until its durable identity lands.
+	// Otherwise a healthy response leaves an unadoptable orphan after restart.
 	if sessName != "" {
-		title := brandTitle(sessName)
-		_, _ = v.run(ctx, "surface", "resume", "set",
-			"--surface", surface,
-			"--kind", "relay",
-			"--name", title,
-			"--checkpoint", sessName,
-			"--", attachCmd,
-		)
+		if err := v.stampResume(ctx, surface, sessName, attachCmd); err != nil {
+			v.closeSurface(ctx, surface)
+			return "", err
+		}
 		_ = v.brandSurface(ctx, surface, sessName)
 		v.rememberPane(sessionID, surface, sessName)
 	}
@@ -447,14 +449,7 @@ func (v *Viz) BindSurface(ctx context.Context, sessionID, attachCmd, surface str
 	if sessName == "" {
 		return "", fmt.Errorf("attach command has no --session")
 	}
-	title := brandTitle(sessName)
-	if _, err := v.run(ctx, "surface", "resume", "set",
-		"--surface", surface,
-		"--kind", "relay",
-		"--name", title,
-		"--checkpoint", sessName,
-		"--", attachCmd,
-	); err != nil {
+	if err := v.stampResume(ctx, surface, sessName, attachCmd); err != nil {
 		return "", err
 	}
 	_ = v.brandSurface(ctx, surface, sessName)
@@ -493,6 +488,20 @@ func (v *Viz) BindSurface(ctx context.Context, sessionID, attachCmd, surface str
 	}
 	v.rememberPane(sessionID, surface, sessName)
 	return surface, nil
+}
+
+func (v *Viz) stampResume(ctx context.Context, surface, persistName, attachCmd string) error {
+	_, err := v.run(ctx, "surface", "resume", "set",
+		"--surface", surface,
+		"--kind", "relay",
+		"--name", brandTitle(persistName),
+		"--checkpoint", persistName,
+		"--", attachCmd,
+	)
+	if err != nil {
+		return fmt.Errorf("stamp relay checkpoint %s on %s: %w", persistName, surface, err)
+	}
+	return nil
 }
 
 // RebindRenamedSession updates the existing surface checkpoint and restarts
@@ -1478,6 +1487,7 @@ func (v *Viz) ManagedPanes(ctx context.Context) ([]ManagedPane, error) {
 	}
 	locations, locationsErr := v.liveSurfaceLocations(ctx)
 	if locationsErr == nil {
+		v.clearGhostRegistrySurfaces(locations)
 		v.adoptUnboundSurfaces(ctx, locations)
 		entries, err = os.ReadDir(dir)
 		if err != nil {
@@ -1545,6 +1555,26 @@ func (v *Viz) ManagedPanes(ctx context.Context) ([]ManagedPane, error) {
 		return panes[i].SessionID < panes[j].SessionID
 	})
 	return panes, nil
+}
+
+// clearGhostRegistrySurfaces starts from authoritative rows, not binding
+// files, so a deleted binding cannot leave a dead surface advertised forever.
+func (v *Viz) clearGhostRegistrySurfaces(locations map[string]surfaceLocation) {
+	reg := &core.Registry{}
+	sessions, err := reg.ListSessions()
+	if err != nil {
+		return
+	}
+	for _, sess := range sessions {
+		ref := sess.VizSurfaceRef
+		if !strings.HasPrefix(ref, "surface:") || locations[ref].Workspace != "" {
+			continue
+		}
+		sess.VizSurfaceRef = ""
+		sess.UpdatedAt = time.Now().UTC()
+		_ = reg.PutSession(sess)
+		_ = core.RemovePaneBinding(ref)
+	}
 }
 
 func (v *Viz) liveSurfaceLocations(ctx context.Context) (map[string]surfaceLocation, error) {
