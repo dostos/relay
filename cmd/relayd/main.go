@@ -98,6 +98,15 @@ func cmdVizBroker(args []string) int {
 		return 2
 	}
 	fields := strings.Fields(strings.TrimSpace(os.Getenv("SSH_ORIGINAL_COMMAND")))
+	if len(fields) == 2 && fields[0] == "viz-snapshot" && fields[1] == service {
+		items, err := visualizationAuthoritySnapshot()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(items)
+		return 0
+	}
 	if len(fields) == 4 && fields[0] == "viz-subscribe" && fields[1] == service {
 		from, err := strconv.ParseInt(fields[2], 10, 64)
 		follow := fields[3] == "1"

@@ -1321,24 +1321,22 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 }
 
 func (a *App) projectedSessions(ctx context.Context) ([]*core.Session, error) {
-	manager, ok := a.Viz.(interface {
-		ManagedPanes(context.Context) ([]cmux.ManagedPane, error)
-	})
+	manager, ok := a.Viz.(ports.ProjectionInventory)
 	if !ok {
 		return nil, core.ErrProjectionOnlyAuthority
 	}
-	panes, err := manager.ManagedPanes(ctx)
+	panes, err := manager.ProjectionSessions(ctx)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]*core.Session, 0, len(panes))
 	for _, pane := range panes {
-		if pane.State != "live" || pane.SessionID == "" {
+		if pane.SessionID == "" {
 			continue
 		}
 		out = append(out, &core.Session{
-			ID: pane.SessionID, HostID: pane.Target, Persist: ports.PersistHandle{Kind: "tmux", Name: pane.PersistName},
-			SourceSessionID: pane.SourceSessionID, VizSurfaceRef: pane.Surface,
+			ID: pane.SessionID, HostID: pane.Target, Persist: ports.PersistHandle{Kind: "tmux", Name: pane.TmuxName},
+			SourceSessionID: pane.ParentSessionID, VizSurfaceRef: pane.Surface,
 			Labels: map[string]string{"role": "projection", "authority": "home"}, CreatedAt: pane.CreatedAt, UpdatedAt: pane.UpdatedAt,
 		})
 	}
@@ -3159,6 +3157,10 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 	if len(args) == 0 {
 		return a.fail(fmt.Errorf("viz subcommand required"))
 	}
+	if args[0] == "--help" || (len(args) > 1 && args[1] == "--help") {
+		fmt.Println("usage: relay viz list|update|retire-control")
+		return 0
+	}
 	if a.Viz == nil {
 		return a.fail(fmt.Errorf("viz adapter unavailable"))
 	}
@@ -3686,7 +3688,7 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 					checks = append(checks, check{"coord_build", false, err.Error()})
 				case remote != coord.Build:
 					checks = append(checks, check{"coord_build", false,
-						fmt.Sprintf("%s runs relayd build %s; local is %s — run: relay host init -H %s --apply",
+						fmt.Sprintf("%s runs relayd build %s; local is %s — run: relay host bootstrap -H %s",
 							host, remote, coord.Build, host)})
 				default:
 					checks = append(checks, check{"coord_build", true, "matches local build " + remote})

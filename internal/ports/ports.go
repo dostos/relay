@@ -5,6 +5,7 @@ package ports
 import (
 	"context"
 	"io"
+	"time"
 )
 
 // Transport reaches a remote host. SSH is the default implementation.
@@ -106,6 +107,24 @@ type ProjectionEvent struct {
 
 type ProjectionSink interface {
 	ApplyProjection(context.Context, ProjectionEvent) (surfaceRef string, err error)
+}
+
+// ProjectedSession is the authority-owned identity and lineage joined to a
+// visualization host's local surface. It is a read model, never authority.
+type ProjectedSession struct {
+	SessionID       string
+	ParentSessionID string
+	Target          string
+	TmuxName        string
+	Surface         string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+// ProjectionInventory is an optional Viz capability used on projection-only
+// hosts. Implementations must fail when current authority metadata is absent.
+type ProjectionInventory interface {
+	ProjectionSessions(context.Context) ([]ProjectedSession, error)
 }
 
 // Viz presents sessions to a human. cmux is the default; may be a no-op.

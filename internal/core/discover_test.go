@@ -1,6 +1,10 @@
 package core
 
 import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -23,6 +27,39 @@ func TestSuggestPathsBoostAndDedupe(t *testing.T) {
 	}
 	if seen["relay"] != 1 {
 		t.Fatalf("relay should appear once: %#v", got)
+	}
+}
+
+func TestExactBuildWorktreeIgnoresDirtyCallerTree(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Clean(filepath.Join(cwd, "..", ".."))
+	out, err := exec.Command("git", "-C", repo, "rev-parse", "--short", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := strings.TrimSpace(string(out))
+	worktree, cleanup, err := exactBuildWorktree(context.Background(), repo, build)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	got, err := exec.Command("git", "-C", worktree, "rev-parse", "--short", "HEAD").Output()
+	if err != nil || strings.TrimSpace(string(got)) != build {
+		t.Fatalf("worktree build=%q want=%q err=%v", got, build, err)
+	}
+}
+
+func TestEnsurePingRequiresExpectedBuild(t *testing.T) {
+	transport := &fakeTransport{id: "c3", outputs: map[string]string{"c3": `{"ok":true,"build":"old"}`}}
+	if _, err := ensurePing(context.Background(), transport, "new"); err == nil || !strings.Contains(err.Error(), "did not land") {
+		t.Fatalf("stale build accepted: %v", err)
+	}
+	transport.outputs["c3"] = `{"ok":true,"build":"new"}`
+	if build, err := ensurePing(context.Background(), transport, "new"); err != nil || build != "new" {
+		t.Fatalf("verified build=%q err=%v", build, err)
 	}
 }
 

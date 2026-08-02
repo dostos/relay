@@ -178,6 +178,9 @@ func (v *Viz) Follow(ctx context.Context, follow bool) error {
 	if err := retireLocalAuthorityState(); err != nil {
 		return err
 	}
+	if err := v.fetchAuthoritySnapshot(ctx); err != nil {
+		return err
+	}
 	followBit := 0
 	if follow {
 		followBit = 1

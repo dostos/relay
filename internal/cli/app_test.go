@@ -15,16 +15,15 @@ import (
 	"github.com/dostos/relay/internal/bridge"
 	"github.com/dostos/relay/internal/core"
 	"github.com/dostos/relay/internal/ports"
-	cmuxviz "github.com/dostos/relay/internal/viz/cmux"
 )
 
 type projectedPaneViz struct {
 	ports.Viz
-	panes []cmuxviz.ManagedPane
+	panes []ports.ProjectedSession
 	err   error
 }
 
-func (v projectedPaneViz) ManagedPanes(context.Context) ([]cmuxviz.ManagedPane, error) {
+func (v projectedPaneViz) ProjectionSessions(context.Context) ([]ports.ProjectedSession, error) {
 	return v.panes, v.err
 }
 
@@ -35,7 +34,7 @@ func TestProjectionOnlyCLIUsesSnapshotOnlyForSessionList(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := New()
-	a.Viz = projectedPaneViz{panes: []cmuxviz.ManagedPane{{SessionID: "sess-live", PersistName: "apex", Surface: "surface:1", State: "live"}}}
+	a.Viz = projectedPaneViz{panes: []ports.ProjectedSession{{SessionID: "sess-live", TmuxName: "apex", Surface: "surface:1"}}}
 	out := captureStdout(t, func() {
 		if code := a.Run([]string{"--json", "session", "list"}); code != 0 {
 			t.Fatalf("session list code=%d", code)
@@ -74,6 +73,19 @@ func TestProjectionSessionListDoesNotCollapseInventoryFailureToEmpty(t *testing.
 	}
 }
 
+func TestVizHelpDoesNotExecuteUpdate(t *testing.T) {
+	a := New()
+	a.Viz = projectedPaneViz{}
+	out := captureStdout(t, func() {
+		if code := a.Run([]string{"viz", "update", "--help"}); code != 0 {
+			t.Fatalf("help code=%d", code)
+		}
+	})
+	if !strings.Contains(out, "usage: relay viz") {
+		t.Fatalf("help output=%q", out)
+	}
+}
+
 func TestProjectedSessionListUsesLiveVizBindings(t *testing.T) {
 	state := t.TempDir()
 	t.Setenv("RELAY_STATE_DIR", state)
@@ -81,9 +93,8 @@ func TestProjectedSessionListUsesLiveVizBindings(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := New()
-	a.Viz = projectedPaneViz{panes: []cmuxviz.ManagedPane{
-		{SessionID: "sess-engram", SourceSessionID: "sess-apex", PersistName: "engram", Target: "c3", Surface: "surface:2", State: "live"},
-		{SessionID: "sess-old", PersistName: "old", Surface: "surface:3", State: "disconnected"},
+	a.Viz = projectedPaneViz{panes: []ports.ProjectedSession{
+		{SessionID: "sess-engram", ParentSessionID: "sess-apex", TmuxName: "engram", Target: "c3", Surface: "surface:2"},
 	}}
 	list, err := a.Sessions.List()
 	if !errors.Is(err, core.ErrProjectionOnlyAuthority) || list != nil {

@@ -24,6 +24,7 @@ type BootstrapResult struct {
 	Started     bool   `json:"started"`
 	PingOK      bool   `json:"ping_ok"`
 	Version     string `json:"version,omitempty"`
+	Build       string `json:"build,omitempty"`
 	Detail      string `json:"detail,omitempty"`
 }
 
@@ -78,6 +79,11 @@ func (b *BootstrapService) Bootstrap(ctx context.Context, hostID string) (*Boots
 	if repo == "" {
 		return nil, fmt.Errorf("cannot find relay repo (set RELAY_REPO)")
 	}
+	buildRepo, cleanupBuildRepo, err := exactBuildWorktree(ctx, repo, coord.Build)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanupBuildRepo()
 	tmpBase := filepath.Join(os.TempDir(), fmt.Sprintf("relay-bootstrap-%s-%d", goarch, time.Now().UnixNano()))
 	tmpRelayd := tmpBase + "-relayd"
 	tmpRelay := tmpBase + "-relay"
@@ -89,7 +95,7 @@ func (b *BootstrapService) Bootstrap(ctx context.Context, hostID string) (*Boots
 	ldflags := "-X github.com/dostos/relay/internal/coord.Build=" + coord.Build
 	build := func(output, pkg string) error {
 		cmd := exec.CommandContext(ctx, "go", "build", "-ldflags", ldflags, "-o", output, pkg)
-		cmd.Dir = repo
+		cmd.Dir = buildRepo
 		cmd.Env = append(os.Environ(),
 			"CGO_ENABLED=0",
 			"GOOS=linux",
@@ -188,7 +194,8 @@ fi
 	time.Sleep(400 * time.Millisecond)
 
 	// 5) one ping verify
-	if err := ensurePing(ctx, t); err != nil {
+	remoteBuild, err := ensurePing(ctx, t, coord.Build)
+	if err != nil {
 		out.PingOK = false
 		out.Started = false
 		out.Detail = strings.TrimSpace(stdout + "\n" + stderr + "\n" + err.Error())
@@ -197,7 +204,32 @@ fi
 	out.PingOK = true
 	out.Started = true
 	out.Version = "0.1.0"
+	out.Build = remoteBuild
 	return out, nil
+}
+
+func exactBuildWorktree(ctx context.Context, repo, build string) (string, func(), error) {
+	if build == "" || build == "dev" || strings.Contains(build, "dirty") {
+		return "", nil, fmt.Errorf("refuse bootstrap from unverifiable build %q", build)
+	}
+	if out, err := exec.CommandContext(ctx, "git", "-C", repo, "rev-parse", "--verify", build+"^{commit}").CombinedOutput(); err != nil {
+		return "", nil, fmt.Errorf("resolve deployed build %s: %w (%s)", build, err, strings.TrimSpace(string(out)))
+	}
+	path, err := os.MkdirTemp("", "relay-bootstrap-source-")
+	if err != nil {
+		return "", nil, err
+	}
+	if err := os.Remove(path); err != nil {
+		return "", nil, err
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", repo, "worktree", "add", "--detach", path, build)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "", nil, fmt.Errorf("prepare exact bootstrap source: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	cleanup := func() {
+		_ = exec.Command("git", "-C", repo, "worktree", "remove", "--force", path).Run()
+	}
+	return path, cleanup, nil
 }
 
 func firstLinePrefix(s, prefix string) string {
@@ -210,18 +242,22 @@ func firstLinePrefix(s, prefix string) string {
 	return ""
 }
 
-func ensurePing(ctx context.Context, t ports.Transport) error {
+func ensurePing(ctx context.Context, t ports.Transport, expectedBuild string) (string, error) {
 	stdout, stderr, err := t.Run(ctx, "", `"$HOME/.local/bin/relayd" ping`)
 	if err != nil {
-		return fmt.Errorf("ping failed: %w (%s)", err, strings.TrimSpace(stderr))
+		return "", fmt.Errorf("ping failed: %w (%s)", err, strings.TrimSpace(stderr))
 	}
 	var resp struct {
-		OK bool `json:"ok"`
+		OK    bool   `json:"ok"`
+		Build string `json:"build"`
 	}
 	if json.Unmarshal([]byte(strings.TrimSpace(stdout)), &resp) != nil || !resp.OK {
-		return fmt.Errorf("unexpected ping output: %s", strings.TrimSpace(stdout+stderr))
+		return "", fmt.Errorf("unexpected ping output: %s", strings.TrimSpace(stdout+stderr))
 	}
-	return nil
+	if resp.Build == "" || resp.Build != expectedBuild {
+		return "", fmt.Errorf("relayd update did not land: running build %q, expected %q", resp.Build, expectedBuild)
+	}
+	return resp.Build, nil
 }
 
 func mapUnameToGoarch(u string) string {

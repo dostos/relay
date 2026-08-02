@@ -97,6 +97,33 @@ func TestLiveSurfaceInventoryRejectsValidWrongSchema(t *testing.T) {
 	}
 }
 
+func TestProjectionSessionsUsesAuthoritySnapshotNotBindingLineage(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("RELAY_STATE_DIR", state)
+	bin := filepath.Join(t.TempDir(), "cmux")
+	tree := `{"windows":[{"workspaces":[{"ref":"workspace:1","panes":[{"ref":"pane:1","surfaces":[{"ref":"surface:1"}]}]}]}]}`
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s\\n' '"+tree+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	v := &Viz{Bin: bin}
+	if err := v.persistBinding("sess-engram", binding{SessionID: "sess-engram", SourceSessionID: "sess-dead", Surface: "surface:1"}); err != nil {
+		t.Fatal(err)
+	}
+	items := []ports.Presentation{{SessionID: "sess-engram", ParentSessionID: "sess-apex", Target: "c3", TmuxName: "engram"}}
+	raw, _ := json.Marshal(items)
+	if err := saveBytes(v.authoritySnapshotPath(), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projected, err := v.ProjectionSessions(context.Background())
+	if err != nil || len(projected) != 1 {
+		t.Fatalf("projection=%+v err=%v", projected, err)
+	}
+	got := projected[0]
+	if got.ParentSessionID != "sess-apex" || got.Target != "c3" || got.TmuxName != "engram" {
+		t.Fatalf("stale binding leaked into projection: %+v", got)
+	}
+}
+
 func TestPresentTargetCarriesParentAnchorIntoLocalPolicy(t *testing.T) {
 	req := ports.Presentation{SessionID: "sess-child", ParentSessionID: "sess-parent", Target: "home", TmuxName: "child"}
 	if req.ParentSessionID != "sess-parent" {

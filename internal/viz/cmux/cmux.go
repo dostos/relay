@@ -1619,6 +1619,47 @@ func (v *Viz) ManagedPanes(ctx context.Context) ([]ManagedPane, error) {
 	return panes, nil
 }
 
+// ProjectionSessions joins current authority identity/lineage from the last
+// reconnect snapshot with live local surfaces. Binding lineage is deliberately
+// ignored because it is only a historical placement record.
+func (v *Viz) ProjectionSessions(ctx context.Context) ([]ports.ProjectedSession, error) {
+	raw, err := os.ReadFile(v.authoritySnapshotPath())
+	if err != nil {
+		return nil, fmt.Errorf("current visualization authority snapshot unavailable: %w", err)
+	}
+	var snapshot []ports.Presentation
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return nil, fmt.Errorf("invalid visualization authority snapshot: %w", err)
+	}
+	authority := make(map[string]ports.Presentation, len(snapshot))
+	for _, item := range snapshot {
+		if _, duplicate := authority[item.SessionID]; duplicate {
+			return nil, fmt.Errorf("duplicate session %s in visualization authority snapshot", item.SessionID)
+		}
+		if err := validatePresentation(item); err != nil {
+			return nil, err
+		}
+		authority[item.SessionID] = item
+	}
+	panes, err := v.ManagedPanes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ports.ProjectedSession, 0, len(panes))
+	for _, pane := range panes {
+		item, ok := authority[pane.SessionID]
+		if !ok || pane.State != "live" {
+			continue
+		}
+		out = append(out, ports.ProjectedSession{
+			SessionID: item.SessionID, ParentSessionID: item.ParentSessionID,
+			Target: item.Target, TmuxName: item.TmuxName, Surface: pane.Surface,
+			CreatedAt: pane.CreatedAt, UpdatedAt: pane.UpdatedAt,
+		})
+	}
+	return out, nil
+}
+
 func preferBindingOwner(candidate, current binding) bool {
 	if candidate.Revision != current.Revision {
 		return candidate.Revision > current.Revision

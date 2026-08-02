@@ -15,22 +15,22 @@ import (
 
 // DiscoverCard is the new-machine setup inventory for one host.
 type DiscoverCard struct {
-	OK               bool                    `json:"ok"`
-	HostID           string                  `json:"host_id"`
-	Reachable        bool                    `json:"reachable"`
-	ReachDetail      string                  `json:"reach_detail,omitempty"`
-	Tmux             TmuxInfo                `json:"tmux"`
-	Relayd           string                  `json:"relayd"` // ok | missing | error detail
-	HostYAML         string                  `json:"host_yaml"` // missing | present
-	Existing         *HostProfile            `json:"existing,omitempty"`
-	AgentsDetected   []AgentDetect           `json:"agents_detected"`
-	AgentsConfigured []AgentSpec             `json:"agents_configured,omitempty"`
-	PathSuggestions  []PathMapEntry          `json:"path_suggestions"`
-	Proposal         *HostProfile            `json:"proposal,omitempty"`
-	ProposalYAML     string                  `json:"proposal_yaml,omitempty"`
-	Next             string                  `json:"next,omitempty"`
-	Argv             []string                `json:"argv,omitempty"`
-	RemoteProfilePath string                 `json:"remote_profile_path"`
+	OK                bool           `json:"ok"`
+	HostID            string         `json:"host_id"`
+	Reachable         bool           `json:"reachable"`
+	ReachDetail       string         `json:"reach_detail,omitempty"`
+	Tmux              TmuxInfo       `json:"tmux"`
+	Relayd            string         `json:"relayd"`    // ok | missing | error detail
+	HostYAML          string         `json:"host_yaml"` // missing | present
+	Existing          *HostProfile   `json:"existing,omitempty"`
+	AgentsDetected    []AgentDetect  `json:"agents_detected"`
+	AgentsConfigured  []AgentSpec    `json:"agents_configured,omitempty"`
+	PathSuggestions   []PathMapEntry `json:"path_suggestions"`
+	Proposal          *HostProfile   `json:"proposal,omitempty"`
+	ProposalYAML      string         `json:"proposal_yaml,omitempty"`
+	Next              string         `json:"next,omitempty"`
+	Argv              []string       `json:"argv,omitempty"`
+	RemoteProfilePath string         `json:"remote_profile_path"`
 }
 
 // TmuxInfo is remote tmux availability.
@@ -312,18 +312,18 @@ func buildProposal(hostID string, card *DiscoverCard) *HostProfile {
 
 // InitResult is the mutating new-machine follow-through.
 type InitResult struct {
-	OK           bool           `json:"ok"`
-	HostID       string         `json:"host_id"`
-	DryRun       bool           `json:"dry_run"`
-	Applied      bool           `json:"applied"`
+	OK           bool             `json:"ok"`
+	HostID       string           `json:"host_id"`
+	DryRun       bool             `json:"dry_run"`
+	Applied      bool             `json:"applied"`
 	Bootstrap    *BootstrapResult `json:"bootstrap,omitempty"`
-	WroteProfile bool           `json:"wrote_profile"`
-	Forced       bool           `json:"forced,omitempty"`
-	Discover     *DiscoverCard  `json:"discover"`
-	Probe        *HostProfile   `json:"probe,omitempty"`
-	Detail       string         `json:"detail,omitempty"`
-	Next         string         `json:"next,omitempty"`
-	Argv         []string       `json:"argv,omitempty"`
+	WroteProfile bool             `json:"wrote_profile"`
+	Forced       bool             `json:"forced,omitempty"`
+	Discover     *DiscoverCard    `json:"discover"`
+	Probe        *HostProfile     `json:"probe,omitempty"`
+	Detail       string           `json:"detail,omitempty"`
+	Next         string           `json:"next,omitempty"`
+	Argv         []string         `json:"argv,omitempty"`
 }
 
 // InitOptions controls host init.
@@ -375,6 +375,12 @@ func (d *DiscoverService) Init(ctx context.Context, hostID string, opts InitOpti
 			res.Detail = err.Error()
 			return res, nil
 		}
+		if br == nil || !br.Started || !br.PingOK || br.Build == "" {
+			res.OK = false
+			res.Detail = "bootstrap returned without a verified running build"
+			return res, nil
+		}
+		res.Applied = true
 	}
 
 	t, err := d.NewTransport(hostID)
@@ -409,7 +415,6 @@ func (d *DiscoverService) Init(ctx context.Context, hostID string, opts InitOpti
 			return res, nil
 		}
 		res.WroteProfile = true
-		res.Applied = true
 		// refresh local cache
 		if d.Profiles != nil {
 			_, _ = d.Profiles.Fetch(ctx, hostID)
