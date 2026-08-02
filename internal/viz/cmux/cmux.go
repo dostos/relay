@@ -911,6 +911,9 @@ func (v *Viz) focusSurface(ctx context.Context, b binding) error {
 }
 
 func (v *Viz) Close(ctx context.Context, sessionID string) error {
+	if v.ServiceID != "" && v.Control == nil {
+		return v.queueClose(sessionID)
+	}
 	b, err := v.lookup(sessionID)
 	if err != nil {
 		return nil // already gone

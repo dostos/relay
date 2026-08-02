@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dostos/relay/internal/coord"
 	"github.com/dostos/relay/internal/ports"
 )
 
@@ -249,6 +250,21 @@ func TestClosePersistRemovesBindingWithoutCmux(t *testing.T) {
 		t.Fatalf("removed = %d", removed)
 	}
 	if _, err := os.Stat(bindPath("sess-cleaned")); !os.IsNotExist(err) {
+		t.Fatalf("binding still exists: %v", err)
+	}
+}
+
+func TestCloseServiceEventRemovesLocalBinding(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	v := &Viz{Bin: "/definitely/missing/cmux", ServiceID: "mac", Control: &targetConfig{Host: "home"}, bindings: map[string]binding{}}
+	if err := v.persistBinding("sess-old", binding{SessionID: "sess-old", Surface: "surface:99"}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := v.handleServiceEvent(context.Background(), coord.Event{Kind: "close", Meta: map[string]any{"session_id": "sess-old"}})
+	if err != nil || result != "closed" {
+		t.Fatalf("result=%q err=%v", result, err)
+	}
+	if _, err := os.Stat(bindPath("sess-old")); !os.IsNotExist(err) {
 		t.Fatalf("binding still exists: %v", err)
 	}
 }

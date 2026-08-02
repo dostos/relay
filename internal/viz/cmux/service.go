@@ -57,6 +57,16 @@ func (v *Viz) queuePresentation(req ports.Presentation) (int64, error) {
 	return resp.Seq, nil
 }
 
+func (v *Viz) queueClose(sessionID string) error {
+	if !v.queueAvailable() {
+		return fmt.Errorf("visualization request queue unavailable")
+	}
+	_, err := coordrelayd.EmitLocal(localRelaydSocket(), v.serviceChannel(), "close", map[string]any{
+		"session_id": sessionID,
+	})
+	return err
+}
+
 // QueueUpdate emits a durable update signal. Source, repository, branch, and
 // install policy are never supplied by the sender; they are fixed in the
 // visualization host's owner-only config.
@@ -234,6 +244,11 @@ func (v *Viz) handleServiceEvent(ctx context.Context, event coord.Event) (string
 			"parent_session_id": req.ParentSessionID,
 		})
 		return string(result), nil
+	case "close":
+		if err := v.Close(ctx, stringMeta(event.Meta, "session_id")); err != nil {
+			return "", err
+		}
+		return "closed", nil
 	case "update_relayd":
 		return v.updateRelayd(ctx)
 	case "migrate_control":
