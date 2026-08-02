@@ -501,6 +501,9 @@ func (v *Viz) stampResume(ctx context.Context, surface, persistName, attachCmd s
 	if err != nil {
 		return fmt.Errorf("stamp relay checkpoint %s on %s: %w", persistName, surface, err)
 	}
+	if landed, _, _ := v.relayCheckpoint(ctx, surface); landed != persistName {
+		return fmt.Errorf("stamp relay checkpoint %s on %s was not observed (got %q)", persistName, surface, landed)
+	}
 	return nil
 }
 
