@@ -2,13 +2,44 @@ package cmux
 
 import (
 	"context"
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/dostos/relay/internal/ports"
 )
+
+func TestRemoteVizUsesStrictSSHAndQuotesArguments(t *testing.T) {
+	v := &Viz{Bin: "/Applications/cmux.app/Contents/Resources/bin/cmux", SSHTarget: "jingyu@mac", SSHIdentity: "/keys/id", bindings: map[string]binding{}}
+	bin, args := v.command("send", "--", "text with ' quote")
+	joined := strings.Join(args, " ")
+	if bin != "ssh" || !strings.Contains(joined, "BatchMode=yes") || !strings.Contains(joined, "StrictHostKeyChecking=yes") || !strings.Contains(joined, "-i /keys/id") || !strings.Contains(joined, "jingyu@mac") {
+		t.Fatalf("remote command = %s %q", bin, args)
+	}
+	if !strings.Contains(args[len(args)-1], `'text with '\'' quote'`) {
+		t.Fatalf("remote argument was not shell quoted: %q", args[len(args)-1])
+	}
+}
+
+func TestNewLoadsRemoteVizConfig(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("RELAY_CONFIG_DIR", configDir)
+	t.Setenv("RELAY_CMUX_BIN", "")
+	t.Setenv("RELAY_VIZ_SSH_TARGET", "")
+	t.Setenv("RELAY_VIZ_SSH_IDENTITY", "")
+	raw, _ := json.Marshal(config{SSHTarget: "jingyu@mac", SSHIdentity: "/keys/id"})
+	if err := os.WriteFile(filepath.Join(configDir, "viz.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	v := New()
+	if v.SSHTarget != "jingyu@mac" || v.SSHIdentity != "/keys/id" || v.Bin != "/Applications/cmux.app/Contents/Resources/bin/cmux" {
+		t.Fatalf("viz config = %+v", v)
+	}
+}
 
 func TestSurfaceCommandPinsTextAndEnterToWorkspace(t *testing.T) {
 	tests := []struct {

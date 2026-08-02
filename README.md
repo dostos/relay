@@ -330,19 +330,35 @@ relay viz restore                 # optional manual path
 |-------|------|
 | **cmux** | Workspaces, splits, tabs, Vault resume UI |
 | **relay CLI** | Session/handoff IDs, `viz present`, branding, agent JSON API |
-| **desktop bridge** | Local Unix-socket daemon; serializes remote requests and owns cmux operations |
+| **control bridge** | Unix-socket daemon on the control host; serializes authenticated remote requests |
+| **cmux client** | Optional visualization endpoint; executes cmux operations but owns no agent lifecycle |
 | **tmux** (remote) | Durable process surface |
 | **relayd** (remote) | Always-on event bus over a **Unix socket only** (no TCP listen) |
 
 Host profiles (`~/.config/relay/host.yaml` on each remote) list agent CLIs and `path_map`. Connection coords stay in your SSH config — relay only uses Host aliases.
 
-The desktop bridge is started on demand by `relay resume`. Its socket is
+During the control-plane migration, the desktop bridge is started on demand by `relay resume`. Its socket is
 `~/.local/state/relay/desktop-bridge.sock` (0600). Each attached pane uses SSH
 stream-local reverse forwarding to expose a per-session socket under `/tmp` on
 the remote host. Requests carry a per-session token, and the bridge allowlist
 is limited to named-session and handoff operations. There is no TCP listener or
 inbound connection to the laptop; the forward lives and reconnects with the
 pane's dedicated SSH connection.
+
+An always-on control host can execute visualization remotely without moving
+its registry or watchers to the Mac. Configure `~/.config/relay/viz.json`:
+
+```json
+{
+  "ssh_target": "jingyu@100.105.40.111",
+  "ssh_identity": "~/.ssh/id_ed25519",
+  "bin": "/Applications/cmux.app/Contents/Resources/bin/cmux"
+}
+```
+
+Visualization SSH is batch-only with strict host-key checking. If the Mac is
+asleep or unreachable, visualization is unavailable; control work remains on
+the always-on host.
 
 Remote-to-remote commands require a session created by this bridge-aware relay
 version. The shorthand can still adopt an older tmux session for attachment,

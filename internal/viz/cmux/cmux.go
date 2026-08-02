@@ -18,14 +18,23 @@ import (
 
 	"github.com/dostos/relay/internal/core"
 	"github.com/dostos/relay/internal/ports"
+	"github.com/dostos/relay/internal/shellquote"
 )
 
 // Viz presents sessions in cmux panes. Lifecycle is never owned here.
 type Viz struct {
-	Bin string
+	Bin         string
+	SSHTarget   string
+	SSHIdentity string
 
 	mu       sync.Mutex
 	bindings map[string]binding // sessionID -> refs
+}
+
+type config struct {
+	Bin         string `json:"bin,omitempty"`
+	SSHTarget   string `json:"ssh_target,omitempty"`
+	SSHIdentity string `json:"ssh_identity,omitempty"`
 }
 
 type binding struct {
@@ -62,9 +71,17 @@ type surfaceLocation struct {
 }
 
 func New() *Viz {
-	bin := os.Getenv("RELAY_CMUX_BIN")
+	cfg := config{}
+	if raw, err := os.ReadFile(filepath.Join(core.ConfigRoot(), "viz.json")); err == nil {
+		_ = json.Unmarshal(raw, &cfg)
+	}
+	bin := firstNonEmpty(os.Getenv("RELAY_CMUX_BIN"), cfg.Bin)
+	sshTarget := firstNonEmpty(os.Getenv("RELAY_VIZ_SSH_TARGET"), cfg.SSHTarget)
+	sshIdentity := firstNonEmpty(os.Getenv("RELAY_VIZ_SSH_IDENTITY"), cfg.SSHIdentity)
 	if bin == "" {
-		if p, err := exec.LookPath("cmux"); err == nil {
+		if sshTarget != "" {
+			bin = "/Applications/cmux.app/Contents/Resources/bin/cmux"
+		} else if p, err := exec.LookPath("cmux"); err == nil {
 			bin = p
 		} else if _, err := os.Stat("/Applications/cmux.app/Contents/Resources/bin/cmux"); err == nil {
 			bin = "/Applications/cmux.app/Contents/Resources/bin/cmux"
@@ -72,18 +89,19 @@ func New() *Viz {
 			bin = "cmux"
 		}
 	}
-	return &Viz{Bin: bin, bindings: map[string]binding{}}
+	return &Viz{Bin: bin, SSHTarget: sshTarget, SSHIdentity: expandHome(sshIdentity), bindings: map[string]binding{}}
 }
 
 func (v *Viz) Kind() string { return "cmux" }
 
 func (v *Viz) Available(ctx context.Context) bool {
-	cmd := exec.CommandContext(ctx, v.Bin, "ping")
-	return cmd.Run() == nil
+	_, err := v.run(ctx, "ping")
+	return err == nil
 }
 
 func (v *Viz) run(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, v.Bin, args...)
+	bin, commandArgs := v.command(args...)
+	cmd := exec.CommandContext(ctx, bin, commandArgs...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -91,6 +109,32 @@ func (v *Viz) run(ctx context.Context, args ...string) (string, error) {
 		return "", fmt.Errorf("cmux %v: %w (%s)", args, err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.String(), nil
+}
+
+func (v *Viz) command(args ...string) (string, []string) {
+	if strings.TrimSpace(v.SSHTarget) == "" {
+		return v.Bin, args
+	}
+	sshArgs := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5"}
+	if v.SSHIdentity != "" {
+		sshArgs = append(sshArgs, "-i", v.SSHIdentity)
+	}
+	remote := make([]string, 0, len(args)+1)
+	remote = append(remote, shellquote.Quote(v.Bin))
+	for _, arg := range args {
+		remote = append(remote, shellquote.Quote(arg))
+	}
+	sshArgs = append(sshArgs, v.SSHTarget, strings.Join(remote, " "))
+	return "ssh", sshArgs
+}
+
+func expandHome(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(path, "~/"))
+		}
+	}
+	return path
 }
 
 func (v *Viz) Present(ctx context.Context, sessionID, attachCmd string, layout ports.Layout) (string, error) {

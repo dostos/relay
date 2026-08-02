@@ -1,7 +1,7 @@
 # relay — autonomous mode, Part D: control-plane locality
 
 Date: 2026-08-01
-Status: **Gap identified, not yet designed.** Found by simulating a laptop sleep against real hardware after A/B/C were built and validated.
+Status: **Direction chosen 2026-08-02: home owns control; Mac is viz-only.** Migration is incremental so there is never more than one authoritative writer.
 
 ## The gap in one sentence
 
@@ -54,6 +54,15 @@ This does not deliver away-from-desk autonomy. It removes the false impression o
 
 Options 1–3 remain open. The control plane currently stays on the Mac by choice, while `home` is being redesigned; revisit once that settles.
 
-## Open question for the human
+## Decision
 
-Which host should own the durable control plane? That is the actual decision behind this gap, and it is an infrastructure choice rather than a code one.
+`home-relay` owns the durable registry, authorization, inboxes, watchers, and
+bridge. The Mac is a replaceable visualization client that executes cmux
+operations over strict, key-authenticated SSH when awake. Coordination must
+continue when visualization is unavailable.
+
+The first migration increment separates cmux execution from locality:
+`~/.config/relay/viz.json` may name `ssh_target`, `ssh_identity`, and `bin`.
+Relay keeps bindings and control state locally while executing only cmux CLI
+operations on that target. State/socket cutover remains a separate verified
+step; until it completes, the existing desktop bridge stays authoritative.
