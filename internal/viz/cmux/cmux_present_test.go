@@ -13,15 +13,25 @@ import (
 	"github.com/dostos/relay/internal/ports"
 )
 
-func TestRemoteVizUsesStrictSSHAndQuotesArguments(t *testing.T) {
-	v := &Viz{Bin: "/Applications/cmux.app/Contents/Resources/bin/cmux", SSHTarget: "jingyu@mac", SSHIdentity: "/keys/id", bindings: map[string]binding{}}
-	bin, args := v.command("send", "--", "text with ' quote")
-	joined := strings.Join(args, " ")
-	if bin != "ssh" || !strings.Contains(joined, "BatchMode=yes") || !strings.Contains(joined, "StrictHostKeyChecking=yes") || !strings.Contains(joined, "-i /keys/id") || !strings.Contains(joined, "jingyu@mac") {
-		t.Fatalf("remote command = %s %q", bin, args)
+func TestVizServiceOwnsTargetMappingAndTmuxAttach(t *testing.T) {
+	v := &Viz{Targets: map[string]targetConfig{
+		"home-relay": {Host: "100.108.118.32", User: "dostos", Port: 2222},
+	}}
+	command, err := v.attachCommand(ports.Presentation{SessionID: "sess-1", Target: "home-relay", TmuxName: "beholder-pdf-main"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(args[len(args)-1], `'text with '\'' quote'`) {
-		t.Fatalf("remote argument was not shell quoted: %q", args[len(args)-1])
+	for _, want := range []string{"'-p' '2222'", "'dostos@100.108.118.32'", `tmux attach-session -t`, `beholder-pdf-main`} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("attach command %q missing %q", command, want)
+		}
+	}
+}
+
+func TestPresentationRejectsShellTargets(t *testing.T) {
+	err := validatePresentation(ports.Presentation{SessionID: "sess-1", Target: "home; touch /tmp/no", TmuxName: "safe"})
+	if err == nil {
+		t.Fatal("shell syntax in a visualization target must be rejected")
 	}
 }
 
@@ -29,14 +39,12 @@ func TestNewLoadsRemoteVizConfig(t *testing.T) {
 	configDir := t.TempDir()
 	t.Setenv("RELAY_CONFIG_DIR", configDir)
 	t.Setenv("RELAY_CMUX_BIN", "")
-	t.Setenv("RELAY_VIZ_SSH_TARGET", "")
-	t.Setenv("RELAY_VIZ_SSH_IDENTITY", "")
-	raw, _ := json.Marshal(config{SSHTarget: "jingyu@mac", SSHIdentity: "/keys/id"})
+	raw, _ := json.Marshal(config{ServiceID: "mac", Control: &targetConfig{Host: "home", Port: 2222}})
 	if err := os.WriteFile(filepath.Join(configDir, "viz.json"), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	v := New()
-	if v.SSHTarget != "jingyu@mac" || v.SSHIdentity != "/keys/id" || v.Bin != "/Applications/cmux.app/Contents/Resources/bin/cmux" {
+	if v.ServiceID != "mac" || v.Control == nil || v.Control.Host != "home" || v.Control.Port != 2222 {
 		t.Fatalf("viz config = %+v", v)
 	}
 }

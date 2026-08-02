@@ -249,7 +249,7 @@ func (s *AuthService) Login(ctx context.Context, hostID, agent string) (*AuthLog
 	}
 	if s.Viz != nil && s.Viz.Available(ctx) {
 		launch := ResumeLaunchCmd(sess.Persist.Name)
-		ref, err := s.Viz.Present(ctx, sess.ID, launch, ports.Layout{Mode: "remote"})
+		ref, err := PresentSession(ctx, s.Viz, sess, launch, ports.Layout{Mode: "remote"})
 		if err == nil {
 			res.Surface = ref
 			sess.VizSurfaceRef = ref

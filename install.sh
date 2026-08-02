@@ -149,6 +149,24 @@ else
   fi
 fi
 
+# The optional Mac visualization client connects outbound to the authoritative
+# control host. It is installed only when owner config declares a control
+# target; home never needs inbound SSH access to the Mac.
+VIZ_CONFIG="${RELAY_CONFIG_DIR:-$HOME/.config/relay}/viz.json"
+VIZ_LABEL="com.dostos.relay-viz"
+VIZ_PLIST="$HOME/Library/LaunchAgents/$VIZ_LABEL.plist"
+if [[ "$(uname -s)" == "Darwin" && -f "$VIZ_CONFIG" ]] && grep -q '"control"' "$VIZ_CONFIG"; then
+  mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
+  sed -e "s|REPLACE_INSTALL_DIR|$INSTALL_DIR|g" -e "s|REPLACE_HOME|$HOME|g" \
+    "$ROOT/share/launchd/$VIZ_LABEL.plist" > "$VIZ_PLIST"
+  if [[ -z "${RELAY_VIZ_SELF_UPDATE:-}" ]]; then
+    launchctl bootout "gui/$(id -u)/$VIZ_LABEL" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/$(id -u)" "$VIZ_PLIST"
+    launchctl kickstart -k "gui/$(id -u)/$VIZ_LABEL"
+  fi
+  echo "relay viz: outbound client registered"
+fi
+
 # Relay's compact JSON + `next`/`argv` is the complete agent protocol. Remove
 # symlinks created by older installers; workspace AGENTS.md files can point at
 # `relay agent protocol` without a runtime-specific skill layer.

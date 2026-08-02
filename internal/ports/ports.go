@@ -77,6 +77,19 @@ type Layout struct {
 	ExplicitPlace   bool   // explicit workspace/pane flags disable sibling stacking
 }
 
+// Presentation identifies what an optional visualization service should
+// display. Geometry is deliberately absent: it belongs to user policy on the
+// visualization host.
+type Presentation struct {
+	SessionID string `json:"session_id"`
+	Target    string `json:"target"`
+	TmuxName  string `json:"tmux_name"`
+}
+
+type TargetPresenter interface {
+	PresentTarget(ctx context.Context, req Presentation) (surfaceRef string, err error)
+}
+
 // Viz presents sessions to a human. cmux is the default; may be a no-op.
 type Viz interface {
 	Kind() string

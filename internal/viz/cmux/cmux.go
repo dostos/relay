@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,18 +24,36 @@ import (
 
 // Viz presents sessions in cmux panes. Lifecycle is never owned here.
 type Viz struct {
-	Bin         string
-	SSHTarget   string
-	SSHIdentity string
+	Bin       string
+	ServiceID string
+	Control   *targetConfig
+	Update    *updateConfig
+	Targets   map[string]targetConfig
 
 	mu       sync.Mutex
 	bindings map[string]binding // sessionID -> refs
 }
 
 type config struct {
-	Bin         string `json:"bin,omitempty"`
-	SSHTarget   string `json:"ssh_target,omitempty"`
-	SSHIdentity string `json:"ssh_identity,omitempty"`
+	Bin       string                  `json:"bin,omitempty"`
+	ServiceID string                  `json:"service_id,omitempty"`
+	Control   *targetConfig           `json:"control,omitempty"`
+	Update    *updateConfig           `json:"update,omitempty"`
+	Targets   map[string]targetConfig `json:"targets,omitempty"`
+}
+
+type targetConfig struct {
+	Host     string `json:"host"`
+	User     string `json:"user,omitempty"`
+	Port     int    `json:"port,omitempty"`
+	Identity string `json:"identity,omitempty"`
+	Relayd   string `json:"relayd_bin,omitempty"`
+}
+
+type updateConfig struct {
+	Repo   string `json:"repo"`
+	Remote string `json:"remote,omitempty"`
+	Branch string `json:"branch,omitempty"`
 }
 
 type binding struct {
@@ -76,12 +95,8 @@ func New() *Viz {
 		_ = json.Unmarshal(raw, &cfg)
 	}
 	bin := firstNonEmpty(os.Getenv("RELAY_CMUX_BIN"), cfg.Bin)
-	sshTarget := firstNonEmpty(os.Getenv("RELAY_VIZ_SSH_TARGET"), cfg.SSHTarget)
-	sshIdentity := firstNonEmpty(os.Getenv("RELAY_VIZ_SSH_IDENTITY"), cfg.SSHIdentity)
 	if bin == "" {
-		if sshTarget != "" {
-			bin = "/Applications/cmux.app/Contents/Resources/bin/cmux"
-		} else if p, err := exec.LookPath("cmux"); err == nil {
+		if p, err := exec.LookPath("cmux"); err == nil {
 			bin = p
 		} else if _, err := os.Stat("/Applications/cmux.app/Contents/Resources/bin/cmux"); err == nil {
 			bin = "/Applications/cmux.app/Contents/Resources/bin/cmux"
@@ -89,19 +104,78 @@ func New() *Viz {
 			bin = "cmux"
 		}
 	}
-	return &Viz{Bin: bin, SSHTarget: sshTarget, SSHIdentity: expandHome(sshIdentity), bindings: map[string]binding{}}
+	return &Viz{Bin: bin, ServiceID: cfg.ServiceID, Control: cfg.Control, Update: cfg.Update, Targets: cfg.Targets, bindings: map[string]binding{}}
 }
 
 func (v *Viz) Kind() string { return "cmux" }
 
 func (v *Viz) Available(ctx context.Context) bool {
+	if v.ServiceID != "" && v.Control == nil {
+		return v.queueAvailable()
+	}
 	_, err := v.run(ctx, "ping")
 	return err == nil
 }
 
+var vizTargetRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._@:-]{0,254}$`)
+
+// PresentTarget queues identity on the control host or, inside the optional
+// visualization service, owns SSH attachment and local placement policy.
+func (v *Viz) PresentTarget(ctx context.Context, req ports.Presentation) (string, error) {
+	if err := validatePresentation(req); err != nil {
+		return "", err
+	}
+	if v.ServiceID != "" && v.Control == nil {
+		seq, err := v.queuePresentation(req)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("viz:queued:%d", seq), nil
+	}
+	attach, err := v.attachCommand(req)
+	if err != nil {
+		return "", err
+	}
+	return v.Present(ctx, req.SessionID, attach, ports.Layout{Mode: "remote"})
+}
+
+func (v *Viz) attachCommand(req ports.Presentation) (string, error) {
+	target := req.Target
+	sshArgs := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"}
+	if mapped, ok := v.Targets[target]; ok {
+		if !vizTargetRE.MatchString(mapped.Host) || (mapped.User != "" && !vizTargetRE.MatchString(mapped.User)) || mapped.Port < 0 || mapped.Port > 65535 {
+			return "", fmt.Errorf("invalid visualization target mapping for %q", target)
+		}
+		if mapped.Port > 0 {
+			sshArgs = append(sshArgs, "-p", strconv.Itoa(mapped.Port))
+		}
+		target = mapped.Host
+		if mapped.User != "" {
+			target = mapped.User + "@" + target
+		}
+	}
+	sshArgs = append(sshArgs, "-t", target, "--")
+	remoteTmux := "tmux attach-session -t " + shellquote.Quote(req.TmuxName)
+	parts := []string{"ssh"}
+	for _, arg := range sshArgs {
+		parts = append(parts, shellquote.Quote(arg))
+	}
+	parts = append(parts, shellquote.Quote(remoteTmux))
+	return strings.Join(parts, " "), nil
+}
+
+func validatePresentation(req ports.Presentation) error {
+	if strings.TrimSpace(req.SessionID) == "" || strings.ContainsAny(req.SessionID, "\r\n\x00") {
+		return fmt.Errorf("invalid session id")
+	}
+	if !vizTargetRE.MatchString(req.Target) {
+		return fmt.Errorf("invalid visualization target %q", req.Target)
+	}
+	return shellquote.ValidateSessionName(req.TmuxName)
+}
+
 func (v *Viz) run(ctx context.Context, args ...string) (string, error) {
-	bin, commandArgs := v.command(args...)
-	cmd := exec.CommandContext(ctx, bin, commandArgs...)
+	cmd := exec.CommandContext(ctx, v.Bin, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -109,32 +183,6 @@ func (v *Viz) run(ctx context.Context, args ...string) (string, error) {
 		return "", fmt.Errorf("cmux %v: %w (%s)", args, err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.String(), nil
-}
-
-func (v *Viz) command(args ...string) (string, []string) {
-	if strings.TrimSpace(v.SSHTarget) == "" {
-		return v.Bin, args
-	}
-	sshArgs := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5"}
-	if v.SSHIdentity != "" {
-		sshArgs = append(sshArgs, "-i", v.SSHIdentity)
-	}
-	remote := make([]string, 0, len(args)+1)
-	remote = append(remote, shellquote.Quote(v.Bin))
-	for _, arg := range args {
-		remote = append(remote, shellquote.Quote(arg))
-	}
-	sshArgs = append(sshArgs, v.SSHTarget, strings.Join(remote, " "))
-	return "ssh", sshArgs
-}
-
-func expandHome(path string) string {
-	if strings.HasPrefix(path, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, strings.TrimPrefix(path, "~/"))
-		}
-	}
-	return path
 }
 
 func (v *Viz) Present(ctx context.Context, sessionID, attachCmd string, layout ports.Layout) (string, error) {

@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,6 +14,8 @@ import (
 	"github.com/dostos/relay/internal/coord"
 	"github.com/dostos/relay/internal/coord/relayd"
 	"github.com/dostos/relay/internal/core"
+	"github.com/dostos/relay/internal/ports"
+	cmuxviz "github.com/dostos/relay/internal/viz/cmux"
 )
 
 func main() {
@@ -25,6 +28,8 @@ func main() {
 		os.Exit(cmdServe())
 	case "bridge":
 		os.Exit(cmdBridge(os.Args[2:]))
+	case "viz":
+		os.Exit(cmdViz(os.Args[2:]))
 	case "ping":
 		os.Exit(cmdPing())
 	case "status":
@@ -51,11 +56,73 @@ Usage:
   relayd serve                 Listen on ~/.local/state/relay/relayd.sock
   relayd bridge [--relay-bin PATH]
                                Desktop bridge for remote relay → local cmux
+  relayd viz ping
+  relayd viz present --session ID --target SSH --tmux NAME
+                               Optional visualization service (local policy)
+  relayd viz sync             Consume queued requests from the control host
+  relayd viz follow           Keep consuming while the Mac is awake
   relayd ping
   relayd status
   relayd emit -s SESS --kind KIND [--meta JSON]
   relayd subscribe -s SESS [--from N] [-f]
 `)
+}
+
+func cmdViz(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "relayd viz: ping or present required")
+		return 2
+	}
+	viz := cmuxviz.New()
+	switch args[0] {
+	case "ping":
+		if !viz.Available(context.Background()) {
+			fmt.Fprintln(os.Stderr, "cmux unavailable")
+			return 1
+		}
+		fmt.Println(`{"ok":true}`)
+		return 0
+	case "present":
+		var req ports.Presentation
+		for i := 1; i < len(args); i++ {
+			switch args[i] {
+			case "--session":
+				i++
+				if i < len(args) {
+					req.SessionID = args[i]
+				}
+			case "--target":
+				i++
+				if i < len(args) {
+					req.Target = args[i]
+				}
+			case "--tmux":
+				i++
+				if i < len(args) {
+					req.TmuxName = args[i]
+				}
+			default:
+				fmt.Fprintf(os.Stderr, "relayd viz: unknown argument %q\n", args[i])
+				return 2
+			}
+		}
+		surface, err := viz.PresentTarget(context.Background(), req)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "surface": surface})
+		return 0
+	case "sync", "follow":
+		if err := viz.Follow(context.Background(), args[0] == "follow"); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "relayd viz: unknown command %q\n", args[0])
+		return 2
+	}
 }
 
 func cmdBridge(args []string) int {

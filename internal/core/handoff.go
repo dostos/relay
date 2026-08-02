@@ -252,7 +252,7 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 	if !opts.NoPane && h.Viz != nil && h.Viz.Available(ctx) {
 		// Restorable argv: `relay resume --session <persist>` (cmux Vault extracts --session).
 		launch := ResumeLaunchCmd(sess.Persist.Name)
-		ref, err := h.Viz.Present(ctx, sess.ID, launch, handoffLayout(opts))
+		ref, err := PresentSession(ctx, h.Viz, sess, launch, handoffLayout(opts))
 		if err == nil {
 			pane = true
 			sess.VizSurfaceRef = ref

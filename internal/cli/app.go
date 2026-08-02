@@ -983,7 +983,7 @@ func (a *App) cmdNamed(ctx context.Context, host, name string) int {
 			return a.fail(fmt.Errorf("cmux unavailable on desktop bridge"))
 		}
 		workspace, pane := a.locationForSource(sourceID)
-		ref, err := a.Viz.Present(ctx, sess.ID, launch, ports.Layout{
+		ref, err := core.PresentSession(ctx, a.Viz, sess, launch, ports.Layout{
 			Mode: "remote", Workspace: workspace, Pane: pane, SourceSessionID: sourceID,
 		})
 		if err != nil {
@@ -3063,6 +3063,17 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 		return a.fail(fmt.Errorf("viz adapter unavailable (is cmux running?)"))
 	}
 	switch args[0] {
+	case "update":
+		updater, ok := a.Viz.(interface{ QueueUpdate() (int64, error) })
+		if !ok {
+			return a.fail(fmt.Errorf("viz adapter does not expose update signaling"))
+		}
+		seq, err := updater.QueueUpdate()
+		if err != nil {
+			return a.fail(err)
+		}
+		a.JSON = true
+		return a.errOut(a.out(map[string]any{"ok": true, "seq": seq, "kind": "update_relayd"}))
 	case "list":
 		manager, ok := a.Viz.(interface {
 			ManagedPanes(context.Context) ([]cmux.ManagedPane, error)
@@ -3145,7 +3156,7 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 			return a.fail(fmt.Errorf("--tab requires --pane"))
 		}
 		launch := core.ResumeLaunchCmd(sess.Persist.Name)
-		ref, err := a.Viz.Present(ctx, args[1], launch, layout)
+		ref, err := core.PresentSession(ctx, a.Viz, sess, launch, layout)
 		if err != nil {
 			return a.fail(err)
 		}

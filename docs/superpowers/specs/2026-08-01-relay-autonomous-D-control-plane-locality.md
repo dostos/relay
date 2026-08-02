@@ -56,13 +56,18 @@ Options 1–3 remain open. The control plane currently stays on the Mac by choic
 
 ## Decision
 
-`home-relay` owns the durable registry, authorization, inboxes, watchers, and
-bridge. The Mac is a replaceable visualization client that executes cmux
-operations over strict, key-authenticated SSH when awake. Coordination must
-continue when visualization is unavailable.
+`home-relay` owns the durable registry, authorization, inboxes, watchers,
+bridge, and visualization request queue. The Mac is a replaceable visualization
+client. It connects outbound to home, then executes target SSH and cmux locally
+when awake. Home requires no SSH access to the Mac. Coordination must continue
+when visualization is unavailable.
 
-The first migration increment separates cmux execution from locality:
-`~/.config/relay/viz.json` may name `ssh_target`, `ssh_identity`, and `bin`.
-Relay keeps bindings and control state locally while executing only cmux CLI
-operations on that target. State/socket cutover remains a separate verified
-step; until it completes, the existing desktop bridge stays authoritative.
+The first migration increment separates presentation from control locality.
+Home sends a typed `{session_id, target, tmux_name}` request to the optional Mac
+`relayd viz` queue. It sends no shell command and no geometry. The Mac launchd
+follower consumes requests through outbound strict SSH, resolves target SSH
+coordinates, and applies the user's local placement policy (default `rome`). A
+typed `update_relayd` signal uses owner-fixed repo/remote/branch policy and
+refuses dirty or non-fast-forward updates. State/socket cutover remains a
+separate verified step; until it completes, the existing desktop bridge stays
+authoritative.

@@ -345,20 +345,50 @@ is limited to named-session and handoff operations. There is no TCP listener or
 inbound connection to the laptop; the forward lives and reconnects with the
 pane's dedicated SSH connection.
 
-An always-on control host can execute visualization remotely without moving
-its registry or watchers to the Mac. Configure `~/.config/relay/viz.json`:
+An always-on control host can request visualization without moving its registry
+or watchers to the Mac. Home sends only session ID, SSH target, and tmux name to
+the optional Mac `relayd viz` service through a durable local queue. The Mac
+owns SSH attachment and placement policy, and consumes that queue using its own
+outbound SSH connection. Configure home's `~/.config/relay/viz.json`:
 
 ```json
 {
-  "ssh_target": "jingyu@100.105.40.111",
-  "ssh_identity": "~/.ssh/id_ed25519",
-  "bin": "/Applications/cmux.app/Contents/Resources/bin/cmux"
+  "service_id": "mac"
 }
 ```
 
-Visualization SSH is batch-only with strict host-key checking. If the Mac is
-asleep or unreachable, visualization is unavailable; control work remains on
-the always-on host.
+The Mac config names the outbound control connection, its target mappings, and
+an owner-fixed update policy:
+
+```json
+{
+  "service_id": "mac",
+  "control": {
+    "host": "100.108.118.32",
+    "user": "dostos",
+    "port": 2222
+  },
+  "targets": {
+    "home-relay": {
+      "host": "100.108.118.32",
+      "user": "dostos",
+      "port": 2222
+    }
+  },
+  "update": {
+    "repo": "~/dev/relay",
+    "remote": "origin",
+    "branch": "master"
+  }
+}
+```
+
+`relay viz update` appends a durable `update_relayd` signal. The Mac refuses it
+when its checkout is dirty; otherwise it fetches and fast-forwards only the
+configured branch, installs, acknowledges, advances its cursor, and restarts
+its launchd follower. Both outbound control and target attachment are
+batch-only with strict host-key checking. If the Mac is asleep, requests wait
+durably while control work continues on home.
 
 Remote-to-remote commands require a session created by this bridge-aware relay
 version. The shorthand can still adopt an older tmux session for attachment,
