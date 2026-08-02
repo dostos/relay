@@ -23,23 +23,31 @@ type Service struct {
 	Stderr       *os.File
 
 	mu      sync.Mutex
-	tunnels map[string]context.CancelFunc
+	tunnels map[string]*tunnel
+}
+
+type tunnel struct {
+	host   string
+	cancel context.CancelFunc
 }
 
 func (s *Service) Run(ctx context.Context) error {
 	if s.Registry == nil || s.BridgeSocket == "" {
 		return fmt.Errorf("control bridge registry and socket required")
 	}
-	s.tunnels = make(map[string]context.CancelFunc)
+	s.tunnels = make(map[string]*tunnel)
 	defer s.stopAll()
+	if err := s.reconcile(ctx); err != nil {
+		return err
+	}
 	for {
-		if err := s.reconcile(ctx); err != nil && s.Stderr != nil {
-			fmt.Fprintf(s.Stderr, "relayd control bridge reconcile: %v\n", err)
-		}
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-time.After(reconcileInterval):
+		}
+		if err := s.reconcile(ctx); err != nil && s.Stderr != nil {
+			fmt.Fprintf(s.Stderr, "relayd control bridge reconcile: %v\n", err)
 		}
 	}
 }
@@ -61,23 +69,33 @@ func (s *Service) reconcile(ctx context.Context) error {
 		}
 		wanted[session.ID] = true
 		if session.HostID == localHost || session.HostID == "self" {
+			s.stopTunnel(session.ID)
 			if err := linkLocalSocket(core.BridgeRemoteSocket(session.ID), s.BridgeSocket); err != nil {
 				errs = append(errs, err.Error())
 			}
 			continue
 		}
+		_ = removeLocalLink(core.BridgeRemoteSocket(session.ID), s.BridgeSocket)
 		s.ensureTunnel(ctx, session.ID, session.HostID)
 	}
 	s.mu.Lock()
-	for id, cancel := range s.tunnels {
+	for id, tunnel := range s.tunnels {
 		if !wanted[id] {
-			cancel()
+			tunnel.cancel()
 			delete(s.tunnels, id)
 		}
 	}
 	s.mu.Unlock()
 	if len(errs) > 0 {
 		return fmt.Errorf("%s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+func removeLocalLink(path, target string) error {
+	current, err := os.Readlink(path)
+	if err == nil && current == target {
+		return os.Remove(path)
 	}
 	return nil
 }
@@ -123,24 +141,31 @@ func (s *Service) ensureTunnel(parent context.Context, sessionID, host string) {
 		return
 	}
 	s.mu.Lock()
-	if _, ok := s.tunnels[sessionID]; ok {
-		s.mu.Unlock()
-		return
+	if current, ok := s.tunnels[sessionID]; ok {
+		if current.host == host {
+			s.mu.Unlock()
+			return
+		}
+		current.cancel()
+		delete(s.tunnels, sessionID)
 	}
 	ctx, cancel := context.WithCancel(parent)
-	s.tunnels[sessionID] = cancel
+	state := &tunnel{host: host, cancel: cancel}
+	s.tunnels[sessionID] = state
 	s.mu.Unlock()
-	go s.runTunnel(ctx, sessionID, host)
+	go s.runTunnel(ctx, sessionID, host, state)
 }
 
-func (s *Service) runTunnel(ctx context.Context, sessionID, host string) {
+func (s *Service) runTunnel(ctx context.Context, sessionID, host string, state *tunnel) {
 	defer func() {
 		s.mu.Lock()
-		delete(s.tunnels, sessionID)
+		if s.tunnels[sessionID] == state {
+			delete(s.tunnels, sessionID)
+		}
 		s.mu.Unlock()
 	}()
 	remote := core.BridgeRemoteSocket(sessionID)
-	cleanup := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", host, "rm -f -- "+remote)
+	cleanup := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", host, "rm -f -- "+remote)
 	cleanup.Stderr = s.Stderr
 	if err := cleanup.Run(); err != nil || ctx.Err() != nil {
 		return
@@ -153,18 +178,27 @@ func (s *Service) runTunnel(ctx context.Context, sessionID, host string) {
 
 func tunnelArgs(remote, local, host string) []string {
 	return []string{
-		"-N", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPath=none",
+		"-N", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ControlMaster=no", "-o", "ControlPath=none",
 		"-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=4",
 		"-o", "ExitOnForwardFailure=yes", "-o", "StreamLocalBindUnlink=yes",
 		"-o", "StreamLocalBindMask=0177", "-R", remote + ":" + local, host,
 	}
 }
 
+func (s *Service) stopTunnel(sessionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if current, ok := s.tunnels[sessionID]; ok {
+		current.cancel()
+		delete(s.tunnels, sessionID)
+	}
+}
+
 func (s *Service) stopAll() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for id, cancel := range s.tunnels {
-		cancel()
+	for id, tunnel := range s.tunnels {
+		tunnel.cancel()
 		delete(s.tunnels, id)
 	}
 }

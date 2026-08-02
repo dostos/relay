@@ -3478,9 +3478,13 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 	// agent's control path — still reported ok.
 	bridgeOK := false
 	bridgeDetail := "not running; remote agents cannot reach this control plane"
-	if err := (bridge.Client{SockPath: core.DesktopBridgeSocketPath()}).Ping(ctx); err == nil {
-		bridgeOK = true
-		bridgeDetail = "running"
+	if status, err := (bridge.Client{SockPath: core.DesktopBridgeSocketPath()}).Status(ctx); err == nil {
+		if status.Build == coord.Build {
+			bridgeOK = true
+			bridgeDetail = "running build " + status.Build
+		} else {
+			bridgeDetail = fmt.Sprintf("build drift: bridge=%s client=%s", status.Build, coord.Build)
+		}
 	}
 	checks = append(checks, check{"desktop_bridge", bridgeOK, bridgeDetail})
 

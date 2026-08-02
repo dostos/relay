@@ -26,12 +26,26 @@ func TestLinkLocalSocketReplacesStaleEndpoint(t *testing.T) {
 func TestTunnelArgsAreDedicatedAndNonInteractive(t *testing.T) {
 	got := tunnelArgs("/tmp/remote.sock", "/tmp/local.sock", "worker")
 	want := []string{
-		"-N", "-o", "BatchMode=yes", "-o", "ControlMaster=no", "-o", "ControlPath=none",
+		"-N", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ControlMaster=no", "-o", "ControlPath=none",
 		"-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=4",
 		"-o", "ExitOnForwardFailure=yes", "-o", "StreamLocalBindUnlink=yes",
 		"-o", "StreamLocalBindMask=0177", "-R", "/tmp/remote.sock:/tmp/local.sock", "worker",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %#v", got)
+	}
+}
+
+func TestRemoveLocalLinkLeavesUnrelatedPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.sock")
+	if err := os.Symlink("/different/bridge.sock", path); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeLocalLink(path, "/wanted/bridge.sock"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("unrelated link removed: %v", err)
 	}
 }

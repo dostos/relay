@@ -63,3 +63,22 @@ func TestBundleMovesControlStateButNotVizBindings(t *testing.T) {
 		t.Fatalf("viz binding crossed control boundary: %v", err)
 	}
 }
+
+func TestImportRefusesBridgeTokenConflict(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	if err := core.EnsureStateDirs(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(core.BridgeTokensDir(), "sess-1.token")
+	if err := os.WriteFile(path, []byte("destination-authority"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Import(&core.Registry{}, &Bundle{V: 1, Tokens: map[string][]byte{"sess-1.token": []byte("stale-authority")}})
+	if err == nil {
+		t.Fatal("conflicting token import succeeded")
+	}
+	raw, readErr := os.ReadFile(path)
+	if readErr != nil || string(raw) != "destination-authority" {
+		t.Fatalf("destination token changed: %q, %v", raw, readErr)
+	}
+}

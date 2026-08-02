@@ -63,14 +63,21 @@ type Response struct {
 type Client struct{ SockPath string }
 
 func (c Client) Ping(ctx context.Context) error {
+	_, err := c.Status(ctx)
+	return err
+}
+
+// Status proves the bridge is responsive and returns the running build so
+// callers do not confuse an old but live process with the installed control.
+func (c Client) Status(ctx context.Context) (*Response, error) {
 	resp, err := c.call(ctx, Request{V: 1, Op: "ping"})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !resp.OK {
-		return fmt.Errorf("bridge ping: %s", resp.Error)
+		return nil, fmt.Errorf("bridge ping: %s", resp.Error)
 	}
-	return nil
+	return resp, nil
 }
 
 func (c Client) Invoke(ctx context.Context, argv []string, source Source) (*Response, error) {

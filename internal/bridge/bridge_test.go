@@ -26,6 +26,10 @@ func TestServerInvoke(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
+	status, err := client.Status(ctx)
+	if err != nil || status.Build != "test-build" {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
 	resp, err := client.Invoke(ctx, []string{"c1", "named"}, Source{SessionID: "sess-source"})
 	if err != nil {
 		t.Fatal(err)

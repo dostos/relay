@@ -4,6 +4,7 @@ package controlstate
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -73,11 +74,15 @@ func Export(reg *core.Registry) (*Bundle, error) {
 	if file, openErr := os.Open(core.LedgerPath()); openErr == nil {
 		defer file.Close()
 		scanner := bufio.NewScanner(file)
+		scanner.Buffer(make([]byte, 64*1024), 4<<20)
 		for scanner.Scan() {
 			line := append([]byte(nil), scanner.Bytes()...)
 			if json.Valid(line) {
 				bundle.Ledger = append(bundle.Ledger, json.RawMessage(line))
 			}
+		}
+		if err := scanner.Err(); err != nil {
+			return nil, fmt.Errorf("read control ledger: %w", err)
 		}
 	}
 	return bundle, nil
@@ -126,7 +131,16 @@ func Import(reg *core.Registry, bundle *Bundle) (*Summary, error) {
 		if filepath.Base(name) != name || filepath.Ext(name) != ".token" || len(token) > 4096 {
 			return nil, fmt.Errorf("invalid bridge token entry %q", name)
 		}
-		if err := os.WriteFile(filepath.Join(core.BridgeTokensDir(), name), token, 0o600); err != nil {
+		destination := filepath.Join(core.BridgeTokensDir(), name)
+		if current, err := os.ReadFile(destination); err == nil {
+			if !bytes.Equal(current, token) {
+				return nil, fmt.Errorf("refuse to overwrite existing bridge token %q", name)
+			}
+			continue
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
+		if err := os.WriteFile(destination, token, 0o600); err != nil {
 			return nil, err
 		}
 		summary.Tokens++
@@ -170,12 +184,16 @@ func mergeJSONL(path string, incoming []byte) error {
 	var lines []string
 	for _, source := range [][]byte{readFile(path), incoming} {
 		scanner := bufio.NewScanner(strings.NewReader(string(source)))
+		scanner.Buffer(make([]byte, 64*1024), 4<<20)
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
 			if line != "" && json.Valid([]byte(line)) && !seen[line] {
 				seen[line] = true
 				lines = append(lines, line)
 			}
+		}
+		if err := scanner.Err(); err != nil {
+			return fmt.Errorf("merge JSONL: %w", err)
 		}
 	}
 	data := []byte(strings.Join(lines, "\n"))
