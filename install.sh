@@ -147,7 +147,7 @@ unlink_relay_skills() {
   local dst="$1"
   local name target
   [[ -d "$dst" ]] || return 0
-  for name in relay-sessions relay-handoff; do
+  for name in relay-sessions relay-handoff relay-role-bootstrap; do
     [[ -L "$dst/$name" ]] || continue
     target="$(readlink "$dst/$name")"
     if [[ "$target" == "$ROOT/skills/$name" ]] || [[ ! -e "$dst/$name" ]]; then
@@ -161,13 +161,13 @@ unlink_relay_skills "$HOME/.claude/skills"
 unlink_relay_skills "$HOME/.codex/skills"
 unlink_relay_skills "$HOME/.cursor/skills"
 
-# Role bootstrap is semantic policy above the compact wire protocol, so it is
+# Goal handoff is semantic policy above the compact wire protocol, so it is
 # useful to every agent runtime. Link the same vendor-neutral skill everywhere
 # without overwriting a user-owned directory or file.
-link_relay_role_skill() {
+link_relay_goal_skill() {
   local dst="$1"
-  local src="$ROOT/skills/relay-role-bootstrap"
-  local link="$dst/relay-role-bootstrap"
+  local src="$ROOT/skills/relay-goal-handoff"
+  local link="$dst/relay-goal-handoff"
   [[ -d "$src" ]] || return 0
   mkdir -p "$dst"
   if [[ -e "$link" && ! -L "$link" ]]; then
@@ -176,10 +176,10 @@ link_relay_role_skill() {
   fi
   ln -sfn "$src" "$link"
 }
-link_relay_role_skill "$HOME/.agents/skills"
-link_relay_role_skill "$HOME/.claude/skills"
-link_relay_role_skill "$HOME/.codex/skills"
-link_relay_role_skill "$HOME/.cursor/skills"
+link_relay_goal_skill "$HOME/.agents/skills"
+link_relay_goal_skill "$HOME/.claude/skills"
+link_relay_goal_skill "$HOME/.codex/skills"
+link_relay_goal_skill "$HOME/.cursor/skills"
 
 # Register with cmux Vault so panes re-launch after cmux quit / Mac reboot.
 if command -v cmux >/dev/null 2>&1 || [[ -x /Applications/cmux.app/Contents/Resources/bin/cmux ]]; then

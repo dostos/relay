@@ -142,10 +142,10 @@ Relay stays model-free throughout. It owns enrollment, rule resolution, and the
 audit; the judgment lives in the portable role at
 [`share/roles/relay-conductor.md`](share/roles/relay-conductor.md).
 
-For role-aware startup and verification, the vendor-neutral
-[`relay-role-bootstrap`](skills/relay-role-bootstrap/SKILL.md) skill selects
-apex, manager, worker, or procedural-operator semantics while using the same
-`relay agent` protocol for every agent runtime.
+For goal-driven delegation, the vendor-neutral
+[`relay-goal-handoff`](skills/relay-goal-handoff/SKILL.md) skill infers the
+immediate hierarchy edge, chooses job versus agent and an appropriate CLI from
+task fit and remaining usage, then yields ownership without micromanagement.
 
 **Governance runs where the control plane runs.** The registry, the parent
 inboxes, and the watcher processes all live on the machine that started the
