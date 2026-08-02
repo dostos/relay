@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/dostos/relay/internal/controlstate"
 	"github.com/dostos/relay/internal/coord"
@@ -243,6 +244,9 @@ func (v *Viz) retireControl(ctx context.Context) (string, error) {
 			return "", fmt.Errorf("disable legacy supervisor: %w (%s)", err, strings.TrimSpace(stderr.String()))
 		}
 	}
+	if exec.CommandContext(ctx, "launchctl", "print", domain).Run() == nil {
+		return "", fmt.Errorf("legacy supervisor still loaded after bootout")
+	}
 	home, _ := os.UserHomeDir()
 	plist := filepath.Join(home, "Library", "LaunchAgents", label+".plist")
 	removedPlist := false
@@ -274,13 +278,32 @@ func (v *Viz) retireControl(ctx context.Context) (string, error) {
 			}
 			stoppedBridge = true
 		}
+	} else if _, ok := err.(*exec.ExitError); !ok {
+		return "", fmt.Errorf("inspect legacy desktop bridge: %w", err)
+	}
+	for attempt := 0; attempt < 20 && socketOwned(ctx, socket); attempt++ {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if socketOwned(ctx, socket) {
+		return "", fmt.Errorf("legacy desktop bridge still owns %s", socket)
+	}
+	vizLoaded := exec.CommandContext(ctx, "launchctl", "print", "gui/"+uid+"/com.dostos.relay-viz").Run() == nil
+	if !vizLoaded {
+		return "", fmt.Errorf("visualization follower is not loaded after control retirement")
 	}
 	result, _ := json.Marshal(map[string]any{
 		"supervisor_plist_removed": removedPlist,
+		"supervisor_loaded":        false,
 		"bridge_stopped":           stoppedBridge,
-		"viz_preserved":            true,
+		"bridge_socket_owned":      false,
+		"viz_preserved":            vizLoaded,
 	})
 	return string(result), nil
+}
+
+func socketOwned(ctx context.Context, socket string) bool {
+	out, err := exec.CommandContext(ctx, "lsof", "-t", socket).Output()
+	return err == nil && strings.TrimSpace(string(out)) != ""
 }
 
 func isLegacyBridgeCommand(command string) bool {
