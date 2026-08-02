@@ -102,6 +102,37 @@ func TestGCDryRunNoMutation(t *testing.T) {
 	}
 }
 
+func TestRepairDanglingLineageMovesOnlyPreviouslyManagedSessionsToApex(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	reg := &Registry{}
+	now := time.Now().UTC()
+	apex := &Session{ID: "sess-apex", HostID: "home", Persist: ports.PersistHandle{Name: "apex-v3"}, Labels: map[string]string{ApexLabel: "true"}, CreatedAt: now}
+	orphan := &Session{ID: "sess-orphan", SourceSessionID: "sess-dead", CreatedByHandoffID: "ho-orphan", CreatedAt: now}
+	root := &Session{ID: "sess-intentional-root", CreatedAt: now}
+	for _, sess := range []*Session{apex, orphan, root} {
+		if err := reg.PutSession(sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := reg.PutHandoff(&Handoff{ID: "ho-orphan", SessionID: orphan.ID, SourceSessionID: "sess-dead", Status: StatusRunning, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	m := &MaintenanceService{Reg: reg}
+	repaired := m.repairDanglingLineage()
+	if len(repaired) != 1 || repaired[0] != orphan.ID {
+		t.Fatalf("repaired=%v", repaired)
+	}
+	gotOrphan, _ := reg.GetSession(orphan.ID)
+	gotRoot, _ := reg.GetSession(root.ID)
+	gotHandoff, _ := reg.GetHandoff("ho-orphan")
+	if gotOrphan.SourceSessionID != apex.ID || gotHandoff.SourceSessionID != apex.ID {
+		t.Fatalf("orphan session=%+v handoff=%+v", gotOrphan, gotHandoff)
+	}
+	if gotRoot.SourceSessionID != "" {
+		t.Fatalf("intentional root was annexed: %+v", gotRoot)
+	}
+}
+
 func itoa(n int64) string {
 	neg := n < 0
 	if neg {

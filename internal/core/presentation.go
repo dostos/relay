@@ -15,6 +15,9 @@ func PresentSession(ctx context.Context, viz ports.Viz, sess *Session, attachCmd
 			ParentSessionID: firstNonEmpty(sess.SourceSessionID, layout.SourceSessionID),
 			Target:          sess.HostID,
 			TmuxName:        sess.Persist.Name,
+			RemoteCWD:       sess.RemoteCWD,
+			RepoRef:         sess.RepoRef,
+			Labels:          sess.Labels,
 		})
 	}
 	return viz.Present(ctx, sess.ID, attachCmd, layout)

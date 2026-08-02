@@ -342,3 +342,20 @@ func TestGhostRegistrySurfaceClearsWithoutBindingFile(t *testing.T) {
 		t.Fatalf("live ref changed: %q", gotLive.VizSurfaceRef)
 	}
 }
+
+func TestPresentationSnapshotKeepsAuthoritativeSessionID(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	v := New()
+	v.rememberAuthoritativeSession(ports.Presentation{
+		SessionID: "sess-home", ParentSessionID: "sess-apex", Target: "home-relay",
+		TmuxName: "apex-v3", RemoteCWD: "/work", RepoRef: "/repo",
+		Labels: map[string]string{"agent": "cursor-auto"},
+	})
+	got, err := (&core.Registry{}).GetSession("sess-home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != "sess-home" || got.Persist.Name != "apex-v3" || got.SourceSessionID != "sess-apex" || got.Labels["agent"] != "cursor-auto" {
+		t.Fatalf("replica=%+v", got)
+	}
+}

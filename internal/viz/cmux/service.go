@@ -50,6 +50,9 @@ func (v *Viz) queuePresentation(req ports.Presentation) (int64, error) {
 		"parent_session_id": req.ParentSessionID,
 		"target":            req.Target,
 		"tmux_name":         req.TmuxName,
+		"remote_cwd":        req.RemoteCWD,
+		"repo_ref":          req.RepoRef,
+		"labels":            req.Labels,
 	})
 	if err != nil {
 		return 0, err
@@ -233,7 +236,11 @@ func (v *Viz) handleServiceEvent(ctx context.Context, event coord.Event) (string
 			ParentSessionID: stringMeta(event.Meta, "parent_session_id"),
 			Target:          stringMeta(event.Meta, "target"),
 			TmuxName:        stringMeta(event.Meta, "tmux_name"),
+			RemoteCWD:       stringMeta(event.Meta, "remote_cwd"),
+			RepoRef:         stringMeta(event.Meta, "repo_ref"),
+			Labels:          stringMapMeta(event.Meta["labels"]),
 		}
+		v.rememberAuthoritativeSession(req)
 		surface, err := v.PresentTarget(ctx, req)
 		if err != nil {
 			return "", err
@@ -260,6 +267,39 @@ func (v *Viz) handleServiceEvent(ctx context.Context, event coord.Event) (string
 	default:
 		return "", fmt.Errorf("unsupported visualization event %q", event.Kind)
 	}
+}
+
+func (v *Viz) rememberAuthoritativeSession(req ports.Presentation) {
+	reg := &core.Registry{}
+	now := time.Now().UTC()
+	sess, err := reg.GetSession(req.SessionID)
+	if err != nil {
+		sess = &core.Session{ID: req.SessionID, CreatedAt: now}
+	}
+	sess.HostID = req.Target
+	sess.RemoteCWD = req.RemoteCWD
+	sess.RepoRef = req.RepoRef
+	sess.Persist = ports.PersistHandle{Kind: "tmux", Name: req.TmuxName}
+	sess.SourceSessionID = req.ParentSessionID
+	if req.Labels != nil {
+		sess.Labels = req.Labels
+	}
+	sess.UpdatedAt = now
+	_ = reg.PutSession(sess)
+}
+
+func stringMapMeta(value any) map[string]string {
+	raw, ok := value.(map[string]any)
+	if !ok {
+		return nil
+	}
+	out := map[string]string{}
+	for key, value := range raw {
+		if text, ok := value.(string); ok {
+			out[key] = text
+		}
+	}
+	return out
 }
 
 func (v *Viz) retireControl(ctx context.Context) (string, error) {

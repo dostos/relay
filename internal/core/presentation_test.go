@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"reflect"
 	"testing"
 
 	"github.com/dostos/relay/internal/ports"
@@ -25,7 +26,7 @@ func TestPresentSessionSendsIdentityWithoutPlacement(t *testing.T) {
 		t.Fatalf("ref=%q err=%v", ref, err)
 	}
 	want := (ports.Presentation{SessionID: sess.ID, ParentSessionID: sess.SourceSessionID, Target: sess.HostID, TmuxName: sess.Persist.Name})
-	if viz.req != want {
+	if !reflect.DeepEqual(viz.req, want) {
 		t.Fatalf("request=%+v want=%+v", viz.req, want)
 	}
 }
