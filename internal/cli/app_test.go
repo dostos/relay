@@ -73,6 +73,16 @@ func TestParentCallerScope(t *testing.T) {
 	}
 }
 
+func TestCurrentParentIDUsesRelaySessionIdentity(t *testing.T) {
+	t.Setenv(bridge.SourceSessionEnv, "")
+	t.Setenv("RELAY_SESSION_ID", "sess-apex")
+	a := New()
+	got, err := a.currentParentID()
+	if err != nil || got != "sess-apex" {
+		t.Fatalf("parent=%q err=%v", got, err)
+	}
+}
+
 func TestAuthenticatedManagerCannotBypassHierarchy(t *testing.T) {
 	t.Setenv("RELAY_STATE_DIR", t.TempDir())
 	t.Setenv(bridge.SourceSessionEnv, "sess-manager")

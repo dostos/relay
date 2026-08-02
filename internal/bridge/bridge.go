@@ -330,7 +330,7 @@ func validateArgv(argv []string) error {
 		}
 		// Remote children may inspect/respond to the durable goal channel, but
 		// cannot register, relink, retire, or otherwise mutate local panes.
-		allowed := map[string]bool{"inbox": true, "reply": true, "ack": true, "status": true}
+		allowed := map[string]bool{"inbox": true, "reply": true, "ack": true, "status": true, "send": true}
 		if !allowed[filtered[1]] {
 			return fmt.Errorf("relay parent %q is not allowed through the desktop bridge", filtered[1])
 		}

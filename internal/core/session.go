@@ -430,6 +430,23 @@ func (s *SessionService) Send(ctx context.Context, id, text string, enter bool) 
 	return s.Persist.Send(ctx, t, sess.Persist, text, enter)
 }
 
+// SendManagedChild lets an authenticated manager communicate with exactly one
+// immediate interactive child. It is the session analogue of agent send; the
+// durable lineage edge is the authorization boundary.
+func (s *SessionService) SendManagedChild(ctx context.Context, managerID, childID, text string) error {
+	if strings.TrimSpace(managerID) == "" {
+		return fmt.Errorf("authenticated manager required")
+	}
+	child, err := s.Reg.GetSession(childID)
+	if err != nil {
+		return err
+	}
+	if child.SourceSessionID != managerID {
+		return fmt.Errorf("session %s is not an immediate child of %s", childID, managerID)
+	}
+	return s.Send(ctx, childID, text, true)
+}
+
 func (s *SessionService) Exec(ctx context.Context, id, command string) (stdout, stderr string, err error) {
 	sess, err := s.Reg.GetSession(id)
 	if err != nil {

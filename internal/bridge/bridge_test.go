@@ -57,7 +57,7 @@ func TestRejectInteractiveForward(t *testing.T) {
 func TestBridgeAllowlist(t *testing.T) {
 	for _, argv := range [][]string{
 		{"c1", "named"}, {"agent", "start", "c1", "codex", "--", "x"}, {"resolve", "pm-1", "yes"}, {"log", "0"}, {"--json", "history"},
-		{"resume", "list", "--probe"}, {"--json", "resume", "list", "--probe"},
+		{"resume", "list", "--probe"}, {"--json", "resume", "list", "--probe"}, {"parent", "send", "sess-child", "--", "review"},
 	} {
 		if err := validateArgv(argv); err != nil {
 			t.Fatalf("expected %v to be allowed: %v", argv, err)
@@ -65,6 +65,7 @@ func TestBridgeAllowlist(t *testing.T) {
 	}
 	for _, argv := range [][]string{
 		{"host", "bootstrap", "-H", "c1"}, {"auth", "copy"}, {"session", "destroy", "sess-x"},
+		{"session", "send", "sess-x", "--", "review"},
 		{"parent", "register", "--surface", "surface:1"}, {"parent", "link", "sess-p", "ho-1"},
 		{"parent", "retire", "sess-p"}, {"parent", "watch", "ho-1"}, {"policy", "list"},
 	} {

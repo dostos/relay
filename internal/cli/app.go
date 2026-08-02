@@ -1713,6 +1713,22 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		return a.fail(fmt.Errorf("usage: relay parent register|link|list|inbox|sweep|reply|ack|state|status|retire …"))
 	}
 	switch args[0] {
+	case "send":
+		if len(args) < 2 {
+			return a.fail(fmt.Errorf("usage: relay parent send CHILD -- TEXT"))
+		}
+		text, ok := afterDashDash(args[2:])
+		if !ok || text == "" {
+			return a.fail(fmt.Errorf("usage: relay parent send CHILD -- TEXT"))
+		}
+		managerID, err := a.currentParentID()
+		if err != nil {
+			return a.fail(err)
+		}
+		if err := a.Sessions.SendManagedChild(ctx, managerID, args[1], text); err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "parent_session_id": managerID, "child_session_id": args[1], "submitted": true}))
 	case "register":
 		var opts core.RegisterParentOpts
 		for i := 1; i < len(args); i++ {
