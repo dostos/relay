@@ -155,7 +155,7 @@ func (v *Viz) attachCommand(req ports.Presentation) (string, error) {
 		}
 	}
 	sshArgs = append(sshArgs, "-t", target, "--")
-	remoteTmux := "tmux attach-session -t " + shellquote.Quote(req.TmuxName)
+	remoteTmux := "tmux attach-session -t " + shellquote.Quote("="+req.TmuxName)
 	parts := []string{"ssh"}
 	for _, arg := range sshArgs {
 		parts = append(parts, shellquote.Quote(arg))

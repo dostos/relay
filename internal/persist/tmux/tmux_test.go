@@ -37,8 +37,18 @@ func TestSendRetriesEnterUntilComposerClears(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(transport.commands, "\n")
-	if strings.Count(joined, "send-keys -t 'agent' Enter") != 2 || strings.Count(joined, "-l -- 'relay marker'") != 1 {
+	if strings.Count(joined, "send-keys -t '=agent' Enter") != 2 || strings.Count(joined, "-l -- 'relay marker'") != 1 {
 		t.Fatalf("expected one type and two enters, commands=%v", transport.commands)
+	}
+}
+
+func TestDestroyUsesExactSessionTarget(t *testing.T) {
+	transport := &recordingTransport{}
+	if err := New().Destroy(context.Background(), transport, ports.PersistHandle{Name: "apex"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := transport.commands[0]; !strings.Contains(got, "kill-session -t '=apex'") {
+		t.Fatalf("destroy command permits prefix matching: %q", got)
 	}
 }
 

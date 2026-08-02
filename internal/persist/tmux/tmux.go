@@ -28,6 +28,10 @@ func New() *Persist { return &Persist{} }
 
 func (p *Persist) Kind() string { return kind }
 
+// tmux otherwise accepts a unique prefix, which can make a retired "apex"
+// target the live "apex-v2" session. A leading '=' requires an exact match.
+func exactTarget(name string) string { return "=" + name }
+
 func (p *Persist) Create(ctx context.Context, t ports.Transport, name, cwd, command string) (ports.PersistHandle, error) {
 	if err := shellquote.ValidateSessionName(name); err != nil {
 		return ports.PersistHandle{}, err
@@ -85,7 +89,7 @@ func (p *Persist) Rename(ctx context.Context, t ports.Transport, from, to ports.
 	}
 	_, stderr, err := t.Run(ctx, "", fmt.Sprintf(
 		"tmux rename-session -t %s %s",
-		shellquote.Quote(from.Name), shellquote.Quote(to.Name),
+		shellquote.Quote(exactTarget(from.Name)), shellquote.Quote(to.Name),
 	))
 	if err != nil {
 		return fmt.Errorf("tmux rename %q to %q: %w (%s)", from.Name, to.Name, err, strings.TrimSpace(stderr))
@@ -109,7 +113,7 @@ func (p *Persist) Exists(ctx context.Context, t ports.Transport, h ports.Persist
 }
 
 func (p *Persist) Destroy(ctx context.Context, t ports.Transport, h ports.PersistHandle) error {
-	_, _, err := t.Run(ctx, "", fmt.Sprintf("tmux kill-session -t %s 2>/dev/null || true", shellquote.Quote(h.Name)))
+	_, _, err := t.Run(ctx, "", fmt.Sprintf("tmux kill-session -t %s 2>/dev/null || true", shellquote.Quote(exactTarget(h.Name))))
 	return err
 }
 
@@ -117,7 +121,7 @@ func (p *Persist) Capture(ctx context.Context, t ports.Transport, h ports.Persis
 	if lines <= 0 {
 		lines = 50
 	}
-	cmd := fmt.Sprintf("tmux capture-pane -t %s -p -S -%d", shellquote.Quote(h.Name), lines)
+	cmd := fmt.Sprintf("tmux capture-pane -t %s -p -S -%d", shellquote.Quote(exactTarget(h.Name)), lines)
 	stdout, stderr, err := t.Run(ctx, "", cmd)
 	if err != nil {
 		return "", fmt.Errorf("capture: %w (%s)", err, strings.TrimSpace(stderr))
@@ -126,7 +130,7 @@ func (p *Persist) Capture(ctx context.Context, t ports.Transport, h ports.Persis
 }
 
 func (p *Persist) Send(ctx context.Context, t ports.Transport, h ports.PersistHandle, text string, enter bool) error {
-	cmd := fmt.Sprintf("tmux send-keys -t %s -l -- %s", shellquote.Quote(h.Name), shellquote.Quote(text))
+	cmd := fmt.Sprintf("tmux send-keys -t %s -l -- %s", shellquote.Quote(exactTarget(h.Name)), shellquote.Quote(text))
 	_, stderr, err := t.Run(ctx, "", cmd)
 	if err != nil {
 		return fmt.Errorf("send: %w (%s)", err, strings.TrimSpace(stderr))
@@ -139,7 +143,7 @@ func (p *Persist) Send(ctx context.Context, t ports.Transport, h ports.PersistHa
 		marker = marker[:48]
 	}
 	for attempt := 0; attempt < sendConfirmAttempts; attempt++ {
-		_, stderr, err = t.Run(ctx, "", fmt.Sprintf("tmux send-keys -t %s Enter", shellquote.Quote(h.Name)))
+		_, stderr, err = t.Run(ctx, "", fmt.Sprintf("tmux send-keys -t %s Enter", shellquote.Quote(exactTarget(h.Name))))
 		if err != nil {
 			return fmt.Errorf("submit: %w (%s)", err, strings.TrimSpace(stderr))
 		}
@@ -184,7 +188,7 @@ func composerHolds(screen, marker string) bool {
 }
 
 func (p *Persist) Resize(ctx context.Context, t ports.Transport, h ports.PersistHandle) error {
-	q := shellquote.Quote(h.Name)
+	q := shellquote.Quote(exactTarget(h.Name))
 	script := fmt.Sprintf(`
 pane=$(tmux display-message -p -t %s '#{pane_tty}')
 w=$(tmux display-message -p -t %s '#{pane_width}')
@@ -211,7 +215,7 @@ func (p *Persist) DeadStatus(ctx context.Context, t ports.Transport, h ports.Per
 	}
 	stdout, _, err := t.Run(ctx, "", fmt.Sprintf(
 		`tmux list-panes -t %s -F '#{pane_dead} #{pane_dead_status}' | head -n1`,
-		shellquote.Quote(h.Name),
+		shellquote.Quote(exactTarget(h.Name)),
 	))
 	if err != nil {
 		return false, 0, err
@@ -255,7 +259,7 @@ tmux set-option -t "$SESS" silence-action any
 tmux set-hook -t "$SESS" pane-died "run-shell -b %s"
 tmux set-hook -t "$SESS" alert-silence "run-shell -b %s"
 tmux set-option -t "$SESS" remain-on-exit on
-`, shellquote.Quote(h.Name), silenceSec,
+`, shellquote.Quote(exactTarget(h.Name)), silenceSec,
 		shellquote.Quote(exitCmd),
 		shellquote.Quote(idleCmd),
 	)
