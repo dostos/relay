@@ -28,6 +28,20 @@ const DefaultSilenceSec = 10
 // never been onboarded. Callers can offer `relay host init` as the fix.
 var ErrMissingProfile = errors.New("relay host profile missing")
 
+// LocalHostIDFromProfile returns this machine's authoritative Relay identity.
+// An absent or malformed profile means the machine has not declared one.
+func LocalHostIDFromProfile() string {
+	raw, err := os.ReadFile(filepath.Join(ConfigRoot(), "host.yaml"))
+	if err != nil {
+		return ""
+	}
+	p, err := ParseHostProfileYAML(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(p.HostID)
+}
+
 // HostProfile is authoritative on each remote (~/.config/relay/host.yaml).
 type HostProfile struct {
 	Version    int                    `yaml:"version" json:"version"`

@@ -56,6 +56,7 @@ func New() *App {
 	persist := tmux.New()
 	viz := cmux.New()
 	coord := sshcoord.New()
+	localHostID := core.LocalHostIDFromProfile()
 	tf := func(hostID string) (ports.Transport, error) {
 		if hostID == "" {
 			return nil, fmt.Errorf("host required")
@@ -63,7 +64,7 @@ func New() *App {
 		// "local" is an identity, not a resolvable hostname. Sending it to ssh
 		// made every local session — including root manager panes — fail with
 		// "could not resolve hostname local".
-		if hostID == core.LocalHostID {
+		if hostID == core.LocalHostID || hostID == "self" || (localHostID != "" && hostID == localHostID) {
 			return localtransport.New(), nil
 		}
 		return sshtransport.New(hostID), nil

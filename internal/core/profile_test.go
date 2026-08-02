@@ -1,9 +1,24 @@
 package core
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestLocalHostIDFromProfile(t *testing.T) {
+	t.Setenv("RELAY_CONFIG_DIR", t.TempDir())
+	if got := LocalHostIDFromProfile(); got != "" {
+		t.Fatalf("missing profile host id = %q", got)
+	}
+	if err := os.WriteFile(filepath.Join(ConfigRoot(), "host.yaml"), []byte("version: 1\nhost_id: home-relay\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := LocalHostIDFromProfile(); got != "home-relay" {
+		t.Fatalf("profile host id = %q", got)
+	}
+}
 
 func TestParseAndResolvePathMap(t *testing.T) {
 	yaml := `
