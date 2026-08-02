@@ -256,6 +256,9 @@ func (v *Viz) handleServiceEvent(ctx context.Context, event coord.Event) (string
 		if err != nil {
 			return "", err
 		}
+		if err := v.updateAuthoritySnapshot(projection); err != nil {
+			return "", err
+		}
 		location := v.locationOfSurface(ctx, surface)
 		result, _ := json.Marshal(map[string]any{
 			"session_id": projection.Item.SessionID, "revision": projection.Revision,
@@ -269,6 +272,9 @@ func (v *Viz) handleServiceEvent(ctx context.Context, event coord.Event) (string
 		if err != nil {
 			return "", err
 		}
+		if err := v.updateAuthoritySnapshot(ports.ProjectionEvent{V: 1, Revision: event.Seq, Op: ports.ProjectionUpsert, Item: req}); err != nil {
+			return "", err
+		}
 		location := v.locationOfSurface(ctx, surface)
 		result, _ := json.Marshal(map[string]string{
 			"surface": surface, "workspace": location.Workspace, "pane": location.Pane,
@@ -276,7 +282,11 @@ func (v *Viz) handleServiceEvent(ctx context.Context, event coord.Event) (string
 		})
 		return string(result), nil
 	case "close":
-		if _, err := v.ApplyProjection(ctx, ports.ProjectionEvent{V: 1, Revision: event.Seq, Op: ports.ProjectionDelete, Item: presentationFromMeta(event.Meta)}); err != nil {
+		projection := ports.ProjectionEvent{V: 1, Revision: event.Seq, Op: ports.ProjectionDelete, Item: presentationFromMeta(event.Meta)}
+		if _, err := v.ApplyProjection(ctx, projection); err != nil {
+			return "", err
+		}
+		if err := v.updateAuthoritySnapshot(projection); err != nil {
 			return "", err
 		}
 		return "closed", nil

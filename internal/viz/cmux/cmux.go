@@ -1627,10 +1627,11 @@ func (v *Viz) ProjectionSessions(ctx context.Context) ([]ports.ProjectedSession,
 	if err != nil {
 		return nil, fmt.Errorf("current visualization authority snapshot unavailable: %w", err)
 	}
-	var snapshot []ports.Presentation
-	if err := json.Unmarshal(raw, &snapshot); err != nil {
-		return nil, fmt.Errorf("invalid visualization authority snapshot: %w", err)
+	envelope, err := decodeAuthoritySnapshot(raw)
+	if err != nil {
+		return nil, err
 	}
+	snapshot := envelope.Items
 	authority := make(map[string]ports.Presentation, len(snapshot))
 	for _, item := range snapshot {
 		if _, duplicate := authority[item.SessionID]; duplicate {

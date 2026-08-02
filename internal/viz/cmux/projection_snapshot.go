@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/dostos/relay/internal/core"
@@ -20,7 +21,7 @@ func (v *Viz) authoritySnapshotPath() string {
 }
 
 func (v *Viz) fetchAuthoritySnapshot(ctx context.Context) error {
-	command := "viz-snapshot " + v.serviceChannel()
+	command := "viz-snapshot-v2 " + v.serviceChannel()
 	args, err := v.controlSSHArgs(command)
 	if err != nil {
 		return err
@@ -34,10 +35,11 @@ func (v *Viz) fetchAuthoritySnapshot(ctx context.Context) error {
 	if stdout.Len() > 4<<20 {
 		return fmt.Errorf("visualization authority snapshot exceeds 4 MiB")
 	}
-	var items []ports.Presentation
-	if err := json.Unmarshal(stdout.Bytes(), &items); err != nil {
+	var snapshot ports.AuthoritySnapshot
+	if err := json.Unmarshal(stdout.Bytes(), &snapshot); err != nil || snapshot.V != 1 || snapshot.Revision < 0 {
 		return fmt.Errorf("invalid visualization authority snapshot: %w", err)
 	}
+	items := snapshot.Items
 	seen := make(map[string]bool, len(items))
 	for _, item := range items {
 		if seen[item.SessionID] {
@@ -48,7 +50,7 @@ func (v *Viz) fetchAuthoritySnapshot(ctx context.Context) error {
 		}
 		seen[item.SessionID] = true
 	}
-	raw, err := json.Marshal(items)
+	raw, err := json.Marshal(snapshot)
 	if err != nil {
 		return err
 	}
@@ -64,6 +66,74 @@ func saveBytes(path string, raw []byte, mode os.FileMode) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+func decodeAuthoritySnapshot(raw []byte) (ports.AuthoritySnapshot, error) {
+	var snapshot ports.AuthoritySnapshot
+	if err := json.Unmarshal(raw, &snapshot); err == nil && snapshot.V == 1 && snapshot.Revision >= 0 {
+		return snapshot, nil
+	}
+	var legacy []ports.Presentation
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		return ports.AuthoritySnapshot{}, fmt.Errorf("invalid visualization authority snapshot: %w", err)
+	}
+	return ports.AuthoritySnapshot{V: 1, Items: legacy}, nil
+}
+
+// updateAuthoritySnapshot applies the already-effected stream event to the
+// local authority view. The cursor is saved only after this succeeds, so a
+// crash retries both the idempotent pane projection and this snapshot update.
+func (v *Viz) updateAuthoritySnapshot(event ports.ProjectionEvent) error {
+	if event.Op != ports.ProjectionUpsert && event.Op != ports.ProjectionDelete {
+		return fmt.Errorf("unsupported authority projection operation %q", event.Op)
+	}
+	if event.Item.SessionID == "" {
+		return fmt.Errorf("authority projection session_id required")
+	}
+	raw, err := os.ReadFile(v.authoritySnapshotPath())
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	var snapshot ports.AuthoritySnapshot
+	if len(raw) > 0 {
+		snapshot, err = decodeAuthoritySnapshot(raw)
+		if err != nil {
+			return err
+		}
+	}
+	if event.Revision <= snapshot.Revision {
+		return nil
+	}
+	items := snapshot.Items
+	byID := make(map[string]ports.Presentation, len(items))
+	for _, item := range items {
+		if _, duplicate := byID[item.SessionID]; duplicate {
+			return fmt.Errorf("duplicate session %s in visualization authority snapshot", item.SessionID)
+		}
+		if err := validatePresentation(item); err != nil {
+			return err
+		}
+		byID[item.SessionID] = item
+	}
+	if event.Op == ports.ProjectionDelete {
+		delete(byID, event.Item.SessionID)
+	} else {
+		if err := validatePresentation(event.Item); err != nil {
+			return err
+		}
+		byID[event.Item.SessionID] = event.Item
+	}
+	items = items[:0]
+	for _, item := range byID {
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].SessionID < items[j].SessionID })
+	snapshot = ports.AuthoritySnapshot{V: 1, Revision: event.Revision, Items: items}
+	raw, err = json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	return saveBytes(v.authoritySnapshotPath(), raw, 0o600)
 }
 
 func (v *Viz) ResolveProjectedResume(ctx context.Context, persistName string, opts ports.ResumeResolveOpts) (ports.ResumeTarget, error) {
@@ -113,10 +183,11 @@ func (v *Viz) resolveOfflineSnapshot(persistName string) (*ports.Presentation, e
 	if err != nil {
 		return nil, fmt.Errorf("current visualization authority snapshot unavailable: %w", err)
 	}
-	var snapshot []ports.Presentation
-	if err := json.Unmarshal(raw, &snapshot); err != nil {
-		return nil, fmt.Errorf("invalid visualization authority snapshot: %w", err)
+	envelope, err := decodeAuthoritySnapshot(raw)
+	if err != nil {
+		return nil, err
 	}
+	snapshot := envelope.Items
 	var matched *ports.Presentation
 	for i := range snapshot {
 		item := &snapshot[i]

@@ -100,6 +100,15 @@ func cmdVizBroker(args []string) int {
 		return 2
 	}
 	fields := strings.Fields(strings.TrimSpace(os.Getenv("SSH_ORIGINAL_COMMAND")))
+	if len(fields) == 2 && fields[0] == "viz-snapshot-v2" && fields[1] == service {
+		snapshot, err := visualizationAuthoritySnapshotV2(service)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(snapshot)
+		return 0
+	}
 	if len(fields) == 3 && fields[0] == "viz-resolve" && fields[1] == service {
 		resolution, err := visualizationAuthorityResume(fields[2])
 		if err != nil {

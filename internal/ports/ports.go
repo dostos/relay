@@ -152,6 +152,12 @@ type ResumeResolution struct {
 	TmuxName  string `json:"tmux_name"`
 }
 
+type AuthoritySnapshot struct {
+	V        int            `json:"v"`
+	Revision int64          `json:"revision"`
+	Items    []Presentation `json:"items"`
+}
+
 // Viz presents sessions to a human. cmux is the default; may be a no-op.
 type Viz interface {
 	Kind() string

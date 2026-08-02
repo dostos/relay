@@ -214,6 +214,52 @@ func TestProjectionSessionsUsesAuthoritySnapshotNotBindingLineage(t *testing.T) 
 	}
 }
 
+func TestAuthoritySnapshotTracksStreamReparentAndDelete(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	v := &Viz{}
+	initial, _ := json.Marshal([]ports.Presentation{{SessionID: "sess-child", ParentSessionID: "sess-old", Target: "c3", TmuxName: "child"}})
+	if err := saveBytes(v.authoritySnapshotPath(), initial, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	updated := ports.Presentation{SessionID: "sess-child", ParentSessionID: "sess-new", Target: "hamburg", TmuxName: "child-v2"}
+	if err := v.updateAuthoritySnapshot(ports.ProjectionEvent{V: 1, Revision: 10, Op: ports.ProjectionUpsert, Item: updated}); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(v.authoritySnapshotPath())
+	snapshot, err := decodeAuthoritySnapshot(raw)
+	items := snapshot.Items
+	if err != nil || snapshot.Revision != 10 || len(items) != 1 || items[0] != updated {
+		t.Fatalf("updated snapshot=%+v err=%v", items, err)
+	}
+	if err := v.updateAuthoritySnapshot(ports.ProjectionEvent{V: 1, Revision: 11, Op: ports.ProjectionDelete, Item: updated}); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = os.ReadFile(v.authoritySnapshotPath())
+	snapshot, err = decodeAuthoritySnapshot(raw)
+	items = snapshot.Items
+	if err != nil || snapshot.Revision != 11 || len(items) != 0 {
+		t.Fatalf("deleted snapshot=%+v err=%v", items, err)
+	}
+}
+
+func TestAuthoritySnapshotWatermarkRejectsRegressiveReplay(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	v := &Viz{}
+	current, _ := json.Marshal(ports.AuthoritySnapshot{V: 1, Revision: 12, Items: []ports.Presentation{}})
+	if err := saveBytes(v.authoritySnapshotPath(), current, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stale := ports.Presentation{SessionID: "sess-deleted", Target: "c3", TmuxName: "deleted"}
+	if err := v.updateAuthoritySnapshot(ports.ProjectionEvent{V: 1, Revision: 11, Op: ports.ProjectionUpsert, Item: stale}); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(v.authoritySnapshotPath())
+	snapshot, err := decodeAuthoritySnapshot(raw)
+	if err != nil || snapshot.Revision != 12 || len(snapshot.Items) != 0 {
+		t.Fatalf("regressive replay changed snapshot: %+v err=%v", snapshot, err)
+	}
+}
+
 func TestPresentTargetCarriesParentAnchorIntoLocalPolicy(t *testing.T) {
 	req := ports.Presentation{SessionID: "sess-child", ParentSessionID: "sess-parent", Target: "home", TmuxName: "child"}
 	if req.ParentSessionID != "sess-parent" {
