@@ -8,6 +8,14 @@ import (
 	"time"
 )
 
+func TestClientLifecycleIsDesktopOnly(t *testing.T) {
+	for _, argv := range [][]string{{"client", "update"}, {"client", "list"}, {"client", "status"}} {
+		if err := validateArgv(argv); err == nil {
+			t.Fatalf("bridge accepted operator command %v", argv)
+		}
+	}
+}
+
 func TestServerInvoke(t *testing.T) {
 	sock := filepath.Join(t.TempDir(), "bridge.sock")
 	srv := &Server{SockPath: sock, RelayBin: "/bin/echo", Build: "test-build"}

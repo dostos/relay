@@ -59,6 +59,30 @@ func TestAuthorizeVizKeyRefusesExistingUnrestrictedCopy(t *testing.T) {
 	}
 }
 
+func TestAuthorizeVizKeyRollsBackWhenClientRegistrationFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.Mkdir(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	blocked := filepath.Join(home, "not-a-directory")
+	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("RELAY_STATE_DIR", blocked)
+	if _, err := authorizeVizKey("relay-viz-test", generateTestPublicKey(t)); err == nil {
+		t.Fatal("registration failure accepted")
+	}
+	raw, err := os.ReadFile(filepath.Join(sshDir, "authorized_keys"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if len(raw) != 0 {
+		t.Fatalf("authorized key survived failed enrollment: %q", raw)
+	}
+}
+
 func generateTestPublicKey(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "viz")

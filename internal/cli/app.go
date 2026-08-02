@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/dostos/relay/internal/bridge"
+	"github.com/dostos/relay/internal/clientfleet"
 	"github.com/dostos/relay/internal/coord"
 	"github.com/dostos/relay/internal/coord/sshcoord"
 	"github.com/dostos/relay/internal/core"
@@ -428,6 +429,8 @@ func (a *App) Run(args []string) int {
 		return a.cmdGC(ctx, filtered[1:])
 	case "events":
 		return a.cmdEvents(ctx, filtered[1:])
+	case "client":
+		return a.cmdClient(filtered[1:])
 	case "viz", "pane":
 		return a.cmdViz(ctx, filtered[1:])
 	case "resume":
@@ -450,6 +453,57 @@ func (a *App) Run(args []string) int {
 		}
 		ui.Warn(fmt.Sprintf("unknown command %q", filtered[0]))
 		return a.cmdHelp()
+	}
+}
+
+func (a *App) cmdClient(args []string) int {
+	if len(args) == 0 || args[0] == "--help" {
+		fmt.Println("usage: relay client list|update [--client ID]|update-status")
+		return 0
+	}
+	root := core.StateRoot()
+	switch args[0] {
+	case "list":
+		clients, err := clientfleet.List(root)
+		if err != nil {
+			return a.fail(err)
+		}
+		a.JSON = true
+		return a.errOut(a.out(map[string]any{"ok": true, "clients": clientfleet.Summaries(clients)}))
+	case "update":
+		selected := ""
+		if len(args) == 3 && args[1] == "--client" {
+			selected = args[2]
+		} else if len(args) != 1 {
+			return a.fail(fmt.Errorf("usage: relay client update [--client ID]"))
+		}
+		queued, err := clientfleet.QueueUpdate(root, filepath.Join(root, "relayd.sock"), selected)
+		if err != nil {
+			return a.fail(err)
+		}
+		a.JSON = true
+		ok := true
+		for _, result := range queued {
+			if result.State != "queued" {
+				ok = false
+			}
+		}
+		if outErr := a.out(map[string]any{"ok": ok, "kind": "update_relayd", "clients": queued}); outErr != nil {
+			return a.errOut(outErr)
+		}
+		if !ok {
+			return 1
+		}
+		return 0
+	case "update-status", "status":
+		statuses, err := clientfleet.Status(root)
+		if err != nil {
+			return a.fail(err)
+		}
+		a.JSON = true
+		return a.errOut(a.out(map[string]any{"ok": true, "clients": statuses}))
+	default:
+		return a.fail(fmt.Errorf("unknown client subcommand %q", args[0]))
 	}
 }
 
@@ -3171,11 +3225,14 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 		return a.fail(fmt.Errorf("viz subcommand required"))
 	}
 	if args[0] == "--help" || (len(args) > 1 && args[1] == "--help") {
-		fmt.Println("usage: relay viz list|update|retire-control")
+		fmt.Println("usage: relay viz list|retire-control")
 		return 0
 	}
 	if a.Viz == nil {
 		return a.fail(fmt.Errorf("viz adapter unavailable"))
+	}
+	if args[0] == "update" {
+		return a.cmdClient([]string{"update"})
 	}
 	// Pane inventory remains useful when cmux is stopped: persisted bindings
 	// are reported as disconnected instead of hidden.
@@ -3194,17 +3251,6 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 		}
 		a.JSON = true
 		return a.errOut(a.out(map[string]any{"ok": true, "seq": seq, "kind": "retire_control"}))
-	case "update":
-		updater, ok := a.Viz.(interface{ QueueUpdate() (int64, error) })
-		if !ok {
-			return a.fail(fmt.Errorf("viz adapter does not expose update signaling"))
-		}
-		seq, err := updater.QueueUpdate()
-		if err != nil {
-			return a.fail(err)
-		}
-		a.JSON = true
-		return a.errOut(a.out(map[string]any{"ok": true, "seq": seq, "kind": "update_relayd"}))
 	case "list":
 		manager, ok := a.Viz.(interface {
 			ManagedPanes(context.Context) ([]cmux.ManagedPane, error)

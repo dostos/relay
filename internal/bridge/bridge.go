@@ -311,6 +311,7 @@ func validateArgv(argv []string) error {
 		"viz": true, "pane": true, "resume": true, "doctor": true, "history": true,
 		"help": true, "version": true, "install-cmux-restore": true,
 		"resolve": true, "log": true,
+		"client": true,
 		// board and root are reserved so the two-token host shorthand below
 		// cannot admit them unchecked. board is re-allowed per subcommand;
 		// root stays desktop-only because the apex lifecycle is an operator

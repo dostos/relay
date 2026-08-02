@@ -9,6 +9,9 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+
+	"github.com/dostos/relay/internal/clientfleet"
+	"github.com/dostos/relay/internal/core"
 )
 
 var vizServiceName = regexp.MustCompile(`^relay-viz-[A-Za-z0-9._-]+$`)
@@ -19,10 +22,11 @@ type vizAuthorizationResult struct {
 	Fingerprint string `json:"fingerprint"`
 	Installed   bool   `json:"installed"`
 	Path        string `json:"path"`
+	ClientID    string `json:"client_id"`
 }
 
 func cmdVizAuthorize(args []string) int {
-	service, keyFile := "", ""
+	service, keyFile, label := "", "", ""
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--service":
@@ -35,12 +39,17 @@ func cmdVizAuthorize(args []string) int {
 			if i < len(args) {
 				keyFile = args[i]
 			}
+		case "--label":
+			i++
+			if i < len(args) {
+				label = args[i]
+			}
 		default:
 			fmt.Fprintf(os.Stderr, "relayd viz authorize: unknown argument %q\n", args[i])
 			return 2
 		}
 	}
-	result, err := authorizeVizKey(service, keyFile)
+	result, err := authorizeVizClient(service, keyFile, label)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -50,6 +59,10 @@ func cmdVizAuthorize(args []string) int {
 }
 
 func authorizeVizKey(service, keyFile string) (*vizAuthorizationResult, error) {
+	return authorizeVizClient(service, keyFile, "")
+}
+
+func authorizeVizClient(service, keyFile, label string) (*vizAuthorizationResult, error) {
 	if !vizServiceName.MatchString(service) {
 		return nil, fmt.Errorf("valid --service relay-viz-NAME required")
 	}
@@ -86,7 +99,11 @@ func authorizeVizKey(service, keyFile string) (*vizAuthorizationResult, error) {
 			continue
 		}
 		if strings.TrimSpace(line) == expected {
-			return &vizAuthorizationResult{OK: true, Service: service, Fingerprint: fingerprint, Installed: false, Path: path}, nil
+			client, err := clientfleet.Enroll(core.StateRoot(), "visualization", service, label, fingerprint)
+			if err != nil {
+				return nil, err
+			}
+			return &vizAuthorizationResult{OK: true, Service: service, Fingerprint: fingerprint, Installed: false, Path: path, ClientID: client.ID}, nil
 		}
 		return nil, fmt.Errorf("public key %s already exists with different or unrestricted authorization; remove or explicitly replace that entry first", fingerprint)
 	}
@@ -102,7 +119,14 @@ func authorizeVizKey(service, keyFile string) (*vizAuthorizationResult, error) {
 	if err := atomicAuthorizedKeys(path, updated); err != nil {
 		return nil, err
 	}
-	return &vizAuthorizationResult{OK: true, Service: service, Fingerprint: fingerprint, Installed: true, Path: path}, nil
+	client, err := clientfleet.Enroll(core.StateRoot(), "visualization", service, label, fingerprint)
+	if err != nil {
+		if rollbackErr := atomicAuthorizedKeys(path, raw); rollbackErr != nil {
+			return nil, fmt.Errorf("register client: %v; rollback authorized key: %w", err, rollbackErr)
+		}
+		return nil, fmt.Errorf("register client: %w (authorized key rolled back)", err)
+	}
+	return &vizAuthorizationResult{OK: true, Service: service, Fingerprint: fingerprint, Installed: true, Path: path, ClientID: client.ID}, nil
 }
 
 func validatedPublicKey(path string) (string, string, error) {

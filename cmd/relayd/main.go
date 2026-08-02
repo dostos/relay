@@ -73,7 +73,7 @@ Usage:
                                Optional visualization service (local policy)
   relayd viz sync             Consume queued requests from the control host
   relayd viz follow           Keep consuming while the Mac is awake
-  relayd viz authorize --service NAME --public-key-file FILE
+  relayd viz authorize --service NAME --public-key-file FILE [--label LABEL]
                                Explicitly enroll a restricted Viz SSH key
   relayd viz-broker --service NAME
                                Forced-command endpoint for a Viz-only SSH key
@@ -164,7 +164,11 @@ func cmdVizBroker(args []string) int {
 			fmt.Fprintln(os.Stderr, "relayd viz-broker: acknowledgement schema refused")
 			return 2
 		}
-		resp, err := relayd.EmitLocal(sockPath(), service+"-ack", "viz_ack", meta)
+		kind := "viz_ack"
+		if meta["request_kind"] == "update_relayd" {
+			kind = "client_ack"
+		}
+		resp, err := relayd.EmitLocal(sockPath(), service+"-ack", kind, meta)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1

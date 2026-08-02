@@ -107,20 +107,6 @@ func (v *Viz) queueFocus(req ports.Presentation) error {
 	return err
 }
 
-// QueueUpdate emits a durable update signal. Source, repository, branch, and
-// install policy are never supplied by the sender; they are fixed in the
-// visualization host's owner-only config.
-func (v *Viz) QueueUpdate() (int64, error) {
-	if v.ServiceID == "" || v.Control != nil {
-		return 0, fmt.Errorf("update signals are emitted by the control host")
-	}
-	resp, err := coordrelayd.EmitLocal(localRelaydSocket(), v.serviceChannel(), "update_relayd", nil)
-	if err != nil {
-		return 0, err
-	}
-	return resp.Seq, nil
-}
-
 // QueueControlRetirement asks the optional display host to remove its legacy
 // control processes after the authoritative host has been verified.
 func (v *Viz) QueueControlRetirement() (int64, error) {
@@ -206,6 +192,21 @@ func (v *Viz) Follow(ctx context.Context, follow bool) error {
 	if v.ServiceID == "" || v.Control == nil {
 		return fmt.Errorf("visualization service_id and control are required")
 	}
+	if err := os.MkdirAll(filepath.Dir(v.cursorPath()), 0o700); err != nil {
+		return err
+	}
+	lock, err := os.OpenFile(v.cursorPath()+".follow.lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return fmt.Errorf("visualization follower already running")
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	if err := v.emitPendingUpdateAck(ctx); err != nil {
+		return err
+	}
 	if err := retireLocalAuthorityState(); err != nil {
 		return err
 	}
@@ -258,6 +259,13 @@ func (v *Viz) Follow(ctx context.Context, follow bool) error {
 			_ = cmd.Process.Kill()
 			return fmt.Errorf("viz event %d %s: %w", event.Seq, event.Kind, handleErr)
 		}
+		if event.Kind == "update_relayd" {
+			if err := v.savePendingUpdateAck(event, result); err != nil {
+				_ = cmd.Process.Kill()
+				return err
+			}
+			emitReceipt = false
+		}
 		if emitReceipt {
 			if err := v.emitAck(ctx, event, result); err != nil {
 				_ = cmd.Process.Kill()
@@ -278,6 +286,88 @@ func (v *Viz) Follow(ctx context.Context, follow bool) error {
 	}
 	if err := cmd.Wait(); err != nil {
 		return fmt.Errorf("visualization control stream: %w (%s)", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+type pendingUpdateAck struct {
+	Event coord.Event `json:"event"`
+	Build string      `json:"build"`
+}
+
+func (v *Viz) pendingUpdateAckPath() string { return v.cursorPath() + ".update-ack" }
+
+func (v *Viz) savePendingUpdateAck(event coord.Event, build string) error {
+	raw, err := json.Marshal(pendingUpdateAck{Event: event, Build: build})
+	if err != nil {
+		return err
+	}
+	path := v.pendingUpdateAckPath()
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".update-ack-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o600); err == nil {
+		_, err = tmp.Write(append(raw, '\n'))
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	err = dir.Sync()
+	if closeErr := dir.Close(); err == nil {
+		err = closeErr
+	}
+	return err
+}
+
+// The process which installed new binaries is not allowed to certify them.
+// Only a subsequently started follower running that exact build emits the
+// durable lifecycle receipt.
+func (v *Viz) emitPendingUpdateAck(ctx context.Context) error {
+	raw, err := os.ReadFile(v.pendingUpdateAckPath())
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var pending pendingUpdateAck
+	if err := json.Unmarshal(raw, &pending); err != nil {
+		quarantine := v.pendingUpdateAckPath() + ".corrupt-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		if renameErr := os.Rename(v.pendingUpdateAckPath(), quarantine); renameErr != nil {
+			return fmt.Errorf("invalid pending update receipt: %v; quarantine: %w", err, renameErr)
+		}
+		return nil
+	}
+	if pending.Event.Seq <= 0 || pending.Event.Kind != "update_relayd" {
+		return fmt.Errorf("invalid pending update receipt")
+	}
+	if v.loadCursor() < pending.Event.Seq {
+		return nil
+	}
+	if pending.Build == "" || coord.Build != pending.Build {
+		return fmt.Errorf("updated relayd build %s is not active (running %s)", pending.Build, coord.Build)
+	}
+	if err := v.emitAck(ctx, pending.Event, pending.Build); err != nil {
+		return err
+	}
+	if err := os.Remove(v.pendingUpdateAckPath()); err != nil && !os.IsNotExist(err) {
+		return err
 	}
 	return nil
 }
