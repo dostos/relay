@@ -14,18 +14,21 @@ import (
 	"github.com/dostos/relay/internal/ports"
 )
 
-func TestVizServiceOwnsTargetMappingAndTmuxAttach(t *testing.T) {
+func TestVizServiceUsesRelayManagedReconnect(t *testing.T) {
 	v := &Viz{Targets: map[string]targetConfig{
-		"home-relay": {Host: "100.108.118.32", User: "dostos", Port: 2222},
+		"home-relay": {Host: "100.108.118.32", User: "dostos", Port: 2222, Identity: "~/.ssh/viz"},
 	}}
 	command, err := v.attachCommand(ports.Presentation{SessionID: "sess-1", Target: "home-relay", TmuxName: "beholder-pdf-main"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"'-p' '2222'", "'dostos@100.108.118.32'", `tmux attach-session -t`, `beholder-pdf-main`} {
+	for _, want := range []string{"relay", `resume`, `--session`, `beholder-pdf-main`, `--host`, `100.108.118.32`, `--user`, `dostos`, `--port`, `2222`, `--identity`, `~/.ssh/viz`} {
 		if !strings.Contains(command, want) {
 			t.Fatalf("attach command %q missing %q", command, want)
 		}
+	}
+	if strings.Contains(command, "tmux attach") || strings.HasPrefix(command, "ssh ") {
+		t.Fatalf("viz bypassed Relay persistence: %q", command)
 	}
 }
 

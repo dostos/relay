@@ -572,7 +572,7 @@ Visualization (optional cmux adapter):
 
 cmux session restore (survive cmux quit / Mac reboot):
   relay install-cmux-restore          Register vault agent (run by install.sh)
-  relay resume [--session NAME] [--cwd DIR] [--no-reconnect]
+  relay resume [--session NAME] [--host HOST] [--cwd DIR] [--no-reconnect]
                                       Bare form uses this cmux pane's history.
                                       Re-attach; waits/retries on SSH drop (session frozen).
   relay resume list [--probe]               live | disconnected | cleaned
@@ -3378,7 +3378,7 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 		a.JSON = true
 		return a.errOut(a.out(map[string]any{"ok": true, "removed": removed, "count": len(removed)}))
 	}
-	var session, cwd string
+	var session, cwd, targetHost string
 	opts := core.ResumeOpts{}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -3393,6 +3393,31 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 			if i < len(args) {
 				cwd = args[i]
 			}
+		case "--host":
+			i++
+			if i < len(args) {
+				targetHost = args[i]
+				opts.TargetHost = targetHost
+			}
+		case "--user":
+			i++
+			if i < len(args) {
+				opts.TargetUser = args[i]
+			}
+		case "--port":
+			i++
+			if i < len(args) {
+				port, err := strconv.Atoi(args[i])
+				if err != nil || port < 1 || port > 65535 {
+					return a.fail(fmt.Errorf("invalid resume port %q", args[i]))
+				}
+				opts.TargetPort = port
+			}
+		case "--identity":
+			i++
+			if i < len(args) {
+				opts.TargetIdentity = args[i]
+			}
 		case "--no-reconnect":
 			opts.NoReconnect = true
 		case "list":
@@ -3402,9 +3427,12 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 		}
 	}
 	if session == "" {
+		if targetHost != "" {
+			return a.fail(fmt.Errorf("--host requires --session"))
+		}
 		name, paneCWD, surface, err := core.ResolveResumeFromPane()
 		if err != nil {
-			return a.fail(fmt.Errorf("%w\nusage: relay resume [--session NAME] [--cwd DIR] [--no-reconnect]  |  relay resume list", err))
+			return a.fail(fmt.Errorf("%w\nusage: relay resume [--session NAME] [--host HOST] [--cwd DIR] [--no-reconnect]  |  relay resume list", err))
 		}
 		session = name
 		opts.Surface = surface
@@ -3412,6 +3440,9 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 			cwd = paneCWD
 		}
 		ui.Note(fmt.Sprintf("pane %s → %s", surface, session))
+	}
+	if targetHost == "" && (opts.TargetUser != "" || opts.TargetPort != 0 || opts.TargetIdentity != "") {
+		return a.fail(fmt.Errorf("--user, --port, and --identity require --host"))
 	}
 	if opts.Surface == "" {
 		opts.Surface, _ = core.CurrentSurface()

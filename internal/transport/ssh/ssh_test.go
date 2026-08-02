@@ -2,6 +2,8 @@ package ssh
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -67,5 +69,23 @@ func TestReverseSocketCleanupCommandQuotesExactPath(t *testing.T) {
 	}
 	if got != "rm -f -- '/tmp/relay-bridge-sess-a.sock'" {
 		t.Fatalf("cleanup = %q", got)
+	}
+}
+
+func TestConfiguredEndpointKeepsStrictNonInteractivePolicy(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	tr := New("100.108.118.32")
+	if err := tr.ConfigureEndpoint("dostos", 2222, "~/.ssh/viz"); err != nil {
+		t.Fatal(err)
+	}
+	args, err := tr.interactiveArgs("tmux attach-session -t =apex-v4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"BatchMode=yes", "StrictHostKeyChecking=yes", "IdentitiesOnly=yes", "-p 2222", "-i " + filepath.Join(os.Getenv("HOME"), ".ssh/viz"), "dostos@100.108.118.32"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("args %q missing %q", joined, want)
+		}
 	}
 }

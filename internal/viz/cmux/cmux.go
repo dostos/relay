@@ -211,24 +211,23 @@ func (v *Viz) attachCommand(req ports.Presentation) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("unknown visualization target policy %q", req.Target)
 	}
-	target := mapped.Host
-	sshArgs := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"}
-	if !vizTargetRE.MatchString(mapped.Host) || (mapped.User != "" && !vizTargetRE.MatchString(mapped.User)) || mapped.Port < 0 || mapped.Port > 65535 {
+	if !vizTargetRE.MatchString(mapped.Host) || (mapped.User != "" && !vizTargetRE.MatchString(mapped.User)) || mapped.Port < 0 || mapped.Port > 65535 || strings.ContainsAny(mapped.Identity, "\r\n\x00") {
 		return "", fmt.Errorf("invalid visualization target mapping for %q", req.Target)
 	}
-	if mapped.Port > 0 {
-		sshArgs = append(sshArgs, "-p", strconv.Itoa(mapped.Port))
+	relayBin := "relay"
+	if path, err := exec.LookPath(relayBin); err == nil {
+		relayBin = path
 	}
+	parts := []string{shellquote.Quote(relayBin), "resume", "--session", shellquote.Quote(req.TmuxName), "--host", shellquote.Quote(mapped.Host)}
 	if mapped.User != "" {
-		target = mapped.User + "@" + target
+		parts = append(parts, "--user", shellquote.Quote(mapped.User))
 	}
-	sshArgs = append(sshArgs, "-t", target, "--")
-	remoteTmux := "tmux attach-session -t " + shellquote.Quote("="+req.TmuxName)
-	parts := []string{"ssh"}
-	for _, arg := range sshArgs {
-		parts = append(parts, shellquote.Quote(arg))
+	if mapped.Port > 0 {
+		parts = append(parts, "--port", strconv.Itoa(mapped.Port))
 	}
-	parts = append(parts, shellquote.Quote(remoteTmux))
+	if mapped.Identity != "" {
+		parts = append(parts, "--identity", shellquote.Quote(mapped.Identity))
+	}
 	return strings.Join(parts, " "), nil
 }
 

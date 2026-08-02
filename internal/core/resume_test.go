@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,6 +11,60 @@ import (
 
 	"github.com/dostos/relay/internal/ports"
 )
+
+type resumePersist struct{ ports.Persistence }
+
+type projectionTransport struct {
+	*fakeTransport
+	user     string
+	port     int
+	identity string
+}
+
+func (t *projectionTransport) ConfigureEndpoint(user string, port int, identity string) error {
+	t.user, t.port, t.identity = user, port, identity
+	return nil
+}
+
+func (resumePersist) AttachCommand(h ports.PersistHandle, _ string) string {
+	return "tmux attach-session -t =" + h.Name
+}
+
+func TestProjectionResumeUsesExplicitTargetWithoutLocalAuthority(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	var target string
+	transport := &projectionTransport{fakeTransport: &fakeTransport{id: "hamburg"}}
+	svc := &SessionService{
+		Reg: &Registry{}, Persist: resumePersist{},
+		NewTransport: func(host string) (ports.Transport, error) {
+			target = host
+			return transport, nil
+		},
+	}
+	if err := svc.ResumeOpts(context.Background(), "phyzfuzz-feas-3", "", ResumeOpts{TargetHost: "hamburg", TargetUser: "jingyu", TargetPort: 2222, TargetIdentity: "~/.ssh/viz", Explicit: true}); err != nil {
+		t.Fatal(err)
+	}
+	if target != "hamburg" {
+		t.Fatalf("target=%q", target)
+	}
+	if transport.user != "jingyu" || transport.port != 2222 || transport.identity != "~/.ssh/viz" {
+		t.Fatalf("endpoint policy lost: %+v", transport)
+	}
+	sessions, err := svc.Reg.ListSessions()
+	if err != nil || len(sessions) != 0 {
+		t.Fatalf("projection resume created local authority: sessions=%v err=%v", sessions, err)
+	}
+}
+
+func TestProjectionResumeRejectsSSHOptionHost(t *testing.T) {
+	svc := &SessionService{Reg: &Registry{}, Persist: resumePersist{}, NewTransport: func(string) (ports.Transport, error) {
+		t.Fatal("invalid host reached transport")
+		return nil, nil
+	}}
+	if err := svc.ResumeOpts(context.Background(), "demo", "", ResumeOpts{TargetHost: "-oProxyCommand=bad"}); err == nil {
+		t.Fatal("SSH option accepted as host")
+	}
+}
 
 type testDiagnostic string
 

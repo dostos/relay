@@ -86,6 +86,12 @@ func (s *SessionService) Resume(ctx context.Context, persistName, cwd string) er
 // ResumeOpts controls attach reconnect behavior.
 type ResumeOpts struct {
 	NoReconnect bool // disable retry loop (also RELAY_AUTO_RECONNECT=0)
+	// TargetHost is the projection-supplied host. It lets a Viz-only client
+	// reconnect without copying the authoritative session registry locally.
+	TargetHost     string
+	TargetUser     string
+	TargetPort     int
+	TargetIdentity string
 	// Explicit is true when the caller passed --session (pins pane history).
 	Explicit bool
 	// Surface overrides auto-detect for pane history stamping.
@@ -101,9 +107,16 @@ func (s *SessionService) ResumeOpts(ctx context.Context, persistName, cwd string
 	if cwd != "" {
 		_ = os.Chdir(cwd)
 	}
-	hostID, remoteCWD, handle, presence, err := s.Reg.ResolveResumeTarget(persistName, cwd)
-	if err != nil {
-		return err
+	hostID, remoteCWD, handle, presence := opts.TargetHost, cwd, ports.PersistHandle{Kind: "tmux", Name: persistName}, PresenceDisconnected
+	if hostID != "" && (strings.HasPrefix(hostID, "-") || strings.ContainsAny(hostID, "\r\n\x00")) {
+		return fmt.Errorf("invalid resume host %q", hostID)
+	}
+	var err error
+	if hostID == "" {
+		hostID, remoteCWD, handle, presence, err = s.Reg.ResolveResumeTarget(persistName, cwd)
+		if err != nil {
+			return err
+		}
 	}
 	if presence == PresenceCleaned {
 		return err
@@ -132,13 +145,24 @@ func (s *SessionService) ResumeOpts(ctx context.Context, persistName, cwd string
 	if err != nil {
 		return err
 	}
+	if opts.TargetHost != "" {
+		configured, ok := t.(interface {
+			ConfigureEndpoint(string, int, string) error
+		})
+		if !ok {
+			return fmt.Errorf("transport for %s cannot apply visualization endpoint policy", connHost)
+		}
+		if err := configured.ConfigureEndpoint(opts.TargetUser, opts.TargetPort, opts.TargetIdentity); err != nil {
+			return err
+		}
+	}
 	if opts.BridgeLocalSocket != "" && opts.BridgeRemoteSocket != "" {
 		if forwarder, ok := t.(ports.ReverseUnixForwarder); ok {
 			forwarder.SetReverseUnixForward(opts.BridgeRemoteSocket, opts.BridgeLocalSocket)
 		}
 	}
 	// Rehydrate live local record when reconnecting a disconnect.
-	if presence == PresenceDisconnected {
+	if presence == PresenceDisconnected && opts.TargetHost == "" {
 		now := time.Now().UTC()
 		resumeID := ""
 		if e, lookupErr := LookupResume(connPersist); lookupErr == nil {

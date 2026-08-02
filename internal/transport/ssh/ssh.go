@@ -16,12 +16,27 @@ import (
 
 // Transport is an SSH-backed remote transport.
 type Transport struct {
-	Host string
+	Host        string
+	port        int
+	identity    string
+	strictBatch bool
 	// Stderr overrides the interactive session's stderr (nil → os.Stderr).
 	// Used by resume reconnect to filter ssh disconnect chatter.
 	Stderr              io.Writer
 	reverseRemoteSocket string
 	reverseLocalSocket  string
+}
+
+// ConfigureEndpoint pins projection-owned SSH policy for every reconnect.
+func (t *Transport) ConfigureEndpoint(user string, port int, identity string) error {
+	if strings.HasPrefix(t.Host, "-") || strings.ContainsAny(t.Host+user+identity, "\r\n\x00") || strings.HasPrefix(user, "-") || port < 0 || port > 65535 {
+		return fmt.Errorf("invalid visualization SSH endpoint")
+	}
+	if user != "" {
+		t.Host = user + "@" + t.Host
+	}
+	t.port, t.identity, t.strictBatch = port, identity, true
+	return nil
 }
 
 const maxStreamStderrBytes = 8 * 1024
@@ -264,6 +279,21 @@ func reverseSocketCleanupCommand(remoteSocket string) (string, error) {
 
 func (t *Transport) interactiveArgs(command string) ([]string, error) {
 	var args []string
+	if t.strictBatch {
+		args = append(args, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes")
+		if t.port > 0 {
+			args = append(args, "-p", fmt.Sprint(t.port))
+		}
+		if t.identity != "" {
+			identity := t.identity
+			if strings.HasPrefix(identity, "~/") {
+				if home, err := os.UserHomeDir(); err == nil {
+					identity = filepath.Join(home, strings.TrimPrefix(identity, "~/"))
+				}
+			}
+			args = append(args, "-o", "IdentitiesOnly=yes", "-i", identity)
+		}
+	}
 	if t.reverseRemoteSocket != "" && t.reverseLocalSocket != "" {
 		// A dedicated connection owns the reverse stream-local forwarding. Using
 		// a shared ControlMaster here would make forward lifetime depend on an
