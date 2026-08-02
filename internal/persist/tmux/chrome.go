@@ -27,7 +27,7 @@ tmux set-option -t "$SESS" status-right ' #[fg=#99f6e4]#S · #H '
 tmux set-option -t "$SESS" pane-active-border-style 'fg=#2dd4bf,bold'
 tmux set-option -t "$SESS" pane-border-style 'fg=#115e59'
 tmux set-option -t "$SESS" message-style 'bg=#134e4a,fg=#ccfbf1'
-`, shellquote.Quote(exactSession(h.Name)))
+`, shellquote.Quote(exactSessionScope(h.Name)))
 	_, stderr, err := t.Run(ctx, "", script)
 	if err != nil {
 		return fmt.Errorf("apply chrome: %w (%s)", err, stderr)

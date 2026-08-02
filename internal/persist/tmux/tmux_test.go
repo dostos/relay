@@ -14,18 +14,24 @@ type recordingTransport struct {
 	commands []string
 	stdout   string
 	outputs  []string
+	errs     []error
 	err      error
 }
 
 func (t *recordingTransport) ID() string { return "test" }
 func (t *recordingTransport) Run(_ context.Context, _, command string) (string, string, error) {
 	t.commands = append(t.commands, command)
+	callErr := t.err
+	if len(t.errs) > 0 {
+		callErr = t.errs[0]
+		t.errs = t.errs[1:]
+	}
 	if len(t.outputs) > 0 {
 		out := t.outputs[0]
 		t.outputs = t.outputs[1:]
-		return out, "", t.err
+		return out, "", callErr
 	}
-	return t.stdout, "", t.err
+	return t.stdout, "", callErr
 }
 
 func TestSendRetriesEnterUntilComposerClears(t *testing.T) {
@@ -49,6 +55,47 @@ func TestDestroyUsesExactSessionTarget(t *testing.T) {
 	}
 	if got := transport.commands[0]; !strings.Contains(got, "kill-session -t '=apex'") {
 		t.Fatalf("destroy command permits prefix matching: %q", got)
+	}
+}
+
+func TestRenameUsesExactSessionTarget(t *testing.T) {
+	transport := &recordingTransport{errs: []error{errors.New("not found"), nil}}
+	if err := New().Rename(context.Background(), transport, ports.PersistHandle{Name: "apex"}, ports.PersistHandle{Name: "apex-v4"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := transport.commands[1]; !strings.Contains(got, "rename-session -t '=apex'") {
+		t.Fatalf("rename command permits prefix matching: %q", got)
+	}
+}
+
+func TestInstallSensorsUsesSessionColonTarget(t *testing.T) {
+	transport := &recordingTransport{}
+	err := New().InstallSensors(context.Background(), transport, ports.PersistHandle{Name: "phyzfuzz-feas-alt"}, 45, func(kind string) (string, error) {
+		return "echo " + kind, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(transport.commands) != 1 {
+		t.Fatalf("commands = %v", transport.commands)
+	}
+	got := transport.commands[0]
+	if !strings.Contains(got, `SESS='=phyzfuzz-feas-alt:'`) {
+		t.Fatalf("sensors must target '=name:' for tmux 3.2a set-option, got %q", got)
+	}
+	if strings.Contains(got, `SESS='=phyzfuzz-feas-alt'`) && !strings.Contains(got, `SESS='=phyzfuzz-feas-alt:'`) {
+		t.Fatalf("bare '=name' breaks set-option on tmux 3.2a: %q", got)
+	}
+}
+
+func TestApplyChromeUsesSessionColonTarget(t *testing.T) {
+	transport := &recordingTransport{}
+	if err := New().ApplyChrome(context.Background(), transport, ports.PersistHandle{Name: "phyzfuzz-feas-alt"}); err != nil {
+		t.Fatal(err)
+	}
+	got := transport.commands[0]
+	if !strings.Contains(got, `SESS='=phyzfuzz-feas-alt:'`) {
+		t.Fatalf("chrome must target '=name:' for tmux 3.2a set-option, got %q", got)
 	}
 }
 

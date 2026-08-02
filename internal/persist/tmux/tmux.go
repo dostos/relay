@@ -30,9 +30,11 @@ func (p *Persist) Kind() string { return kind }
 
 // tmux otherwise accepts a unique prefix, which can make a retired "apex"
 // target the live "apex-v2" session. A leading '=' requires an exact session
-// match; pane targets also need ':' so tmux parses the value as session:window.
-func exactSession(name string) string { return "=" + name }
-func exactPane(name string) string    { return "=" + name + ":" }
+// match. Commands whose grammar expects a pane need the trailing ':' so tmux
+// resolves the active pane within that exact session.
+func exactSession(name string) string      { return "=" + name }
+func exactSessionScope(name string) string { return "=" + name + ":" }
+func exactPane(name string) string         { return exactSessionScope(name) }
 
 func (p *Persist) Create(ctx context.Context, t ports.Transport, name, cwd, command string) (ports.PersistHandle, error) {
 	if err := shellquote.ValidateSessionName(name); err != nil {
@@ -261,7 +263,7 @@ tmux set-option -t "$SESS" silence-action any
 tmux set-hook -t "$SESS" pane-died "run-shell -b %s"
 tmux set-hook -t "$SESS" alert-silence "run-shell -b %s"
 tmux set-option -t "$SESS" remain-on-exit on
-`, shellquote.Quote(exactSession(h.Name)), silenceSec,
+`, shellquote.Quote(exactSessionScope(h.Name)), silenceSec,
 		shellquote.Quote(exitCmd),
 		shellquote.Quote(idleCmd),
 	)
