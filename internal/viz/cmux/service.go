@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -219,6 +220,9 @@ func (v *Viz) Follow(ctx context.Context, follow bool) error {
 	if err != nil {
 		return err
 	}
+	if err := v.reconcileManagedSnapshot(ctx, snapshot); err != nil {
+		return err
+	}
 	followBit := 0
 	if follow {
 		followBit = 1
@@ -274,6 +278,54 @@ func (v *Viz) Follow(ctx context.Context, follow bool) error {
 	}
 	if err := cmd.Wait(); err != nil {
 		return fmt.Errorf("visualization control stream: %w (%s)", err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+// reconcileManagedSnapshot repairs panes the Viz client previously owned.
+// Authority membership alone does not opt a session into visualization, so
+// sessions without a binding remain headless. Parents are repaired first.
+func (v *Viz) reconcileManagedSnapshot(ctx context.Context, snapshot ports.AuthoritySnapshot) error {
+	items := append([]ports.Presentation(nil), snapshot.Items...)
+	byID := make(map[string]ports.Presentation, len(items))
+	for _, item := range items {
+		byID[item.SessionID] = item
+	}
+	depth := func(item ports.Presentation) int {
+		seen, n := map[string]bool{}, 0
+		for item.ParentSessionID != "" && !seen[item.ParentSessionID] {
+			seen[item.ParentSessionID] = true
+			parent, ok := byID[item.ParentSessionID]
+			if !ok {
+				break
+			}
+			n++
+			item = parent
+		}
+		return n
+	}
+	sort.Slice(items, func(i, j int) bool {
+		di, dj := depth(items[i]), depth(items[j])
+		if di != dj {
+			return di < dj
+		}
+		return items[i].SessionID < items[j].SessionID
+	})
+	locations, err := v.liveSurfaceLocations(ctx)
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		binding, err := v.loadBinding(item.SessionID)
+		if err != nil || binding.Deleted {
+			continue
+		}
+		if locations[binding.Surface].Workspace != "" {
+			continue
+		}
+		if _, err := v.ApplyProjection(ctx, ports.ProjectionEvent{V: 1, Revision: snapshot.Revision, Op: ports.ProjectionUpsert, Item: item}); err != nil {
+			return fmt.Errorf("repair visualization session %s: %w", item.SessionID, err)
+		}
 	}
 	return nil
 }

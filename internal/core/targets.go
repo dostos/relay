@@ -69,11 +69,7 @@ func ResolveTarget(hostID string) (*Target, error) {
 	if err != nil {
 		return nil, err
 	}
-	wanted := []string{hostID}
-	if hostID == LocalHostIDFromProfile() {
-		wanted = append(wanted, "self")
-	}
-	for _, alias := range wanted {
+	for _, alias := range []string{hostID} {
 		configured := false
 		for i := range targets {
 			configured = configured || targets[i].HostID == alias
