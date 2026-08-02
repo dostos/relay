@@ -137,7 +137,19 @@ type ResumeTarget struct {
 }
 
 type ResumeResolver interface {
-	ResolveProjectedResume(context.Context, string) (ResumeTarget, error)
+	ResolveProjectedResume(context.Context, string, ResumeResolveOpts) (ResumeTarget, error)
+}
+
+type ResumeResolveOpts struct {
+	AllowOffline bool
+}
+
+// ResumeResolution is the broker-safe authority response. SSH coordinates are
+// deliberately absent; the visualization host joins this to owner-local policy.
+type ResumeResolution struct {
+	SessionID string `json:"session_id"`
+	Target    string `json:"target"`
+	TmuxName  string `json:"tmux_name"`
 }
 
 // Viz presents sessions to a human. cmux is the default; may be a no-op.

@@ -3426,6 +3426,7 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 	}
 	var session, cwd, targetHost string
 	opts := core.ResumeOpts{}
+	offline := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--session", "-s":
@@ -3466,6 +3467,8 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 			}
 		case "--no-reconnect":
 			opts.NoReconnect = true
+		case "--offline":
+			offline = true
 		case "list":
 			return a.cmdResume(ctx, []string{"list"})
 		default:
@@ -3478,7 +3481,7 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 		}
 		name, paneCWD, surface, err := core.ResolveResumeFromPane()
 		if err != nil {
-			return a.fail(fmt.Errorf("%w\nusage: relay resume [--session NAME] [--host HOST] [--cwd DIR] [--no-reconnect]  |  relay resume list", err))
+			return a.fail(fmt.Errorf("%w\nusage: relay resume [--session NAME] [--host HOST] [--cwd DIR] [--no-reconnect] [--offline]  |  relay resume list", err))
 		}
 		session = name
 		opts.Surface = surface
@@ -3490,17 +3493,22 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 	if targetHost == "" && (opts.TargetUser != "" || opts.TargetPort != 0 || opts.TargetIdentity != "") {
 		return a.fail(fmt.Errorf("--user, --port, and --identity require --host"))
 	}
+	if offline && targetHost != "" {
+		return a.fail(fmt.Errorf("--offline cannot be combined with --host"))
+	}
+	projectionOnly := false
 	if targetHost == "" {
 		authorityErr := core.EnsureAuthorityReadable()
 		if authorityErr != nil && !errors.Is(authorityErr, core.ErrProjectionOnlyAuthority) {
 			return a.fail(authorityErr)
 		}
 		if errors.Is(authorityErr, core.ErrProjectionOnlyAuthority) {
+			projectionOnly = true
 			resolver, ok := a.Viz.(ports.ResumeResolver)
 			if !ok {
 				return a.fail(core.ErrProjectionOnlyAuthority)
 			}
-			target, err := resolver.ResolveProjectedResume(ctx, session)
+			target, err := resolver.ResolveProjectedResume(ctx, session, ports.ResumeResolveOpts{AllowOffline: offline})
 			if err != nil {
 				return a.fail(err)
 			}
@@ -3509,11 +3517,14 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 			targetHost = target.Host
 		}
 	}
+	if offline && !projectionOnly {
+		return a.fail(fmt.Errorf("--offline is only valid on a projection-only host"))
+	}
 	if opts.Surface == "" {
 		opts.Surface, _ = core.CurrentSurface()
 	}
 	var resumeSession *core.Session
-	if opts.Surface != "" {
+	if opts.Surface != "" && !projectionOnly {
 		if sess, findErr := a.Reg.FindByPersistName(session, cwd); findErr == nil {
 			resumeSession = sess
 			if binder, ok := a.Viz.(interface {
@@ -3531,11 +3542,13 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 		}
 	}
 	bridgeSessionID := ""
-	if sess, findErr := a.Reg.FindByPersistName(session, cwd); findErr == nil {
-		resumeSession = sess
-		bridgeSessionID = sess.ID
-	} else if entry, lookupErr := core.LookupResume(session); lookupErr == nil {
-		bridgeSessionID = entry.SessionID
+	if !projectionOnly {
+		if sess, findErr := a.Reg.FindByPersistName(session, cwd); findErr == nil {
+			resumeSession = sess
+			bridgeSessionID = sess.ID
+		} else if entry, lookupErr := core.LookupResume(session); lookupErr == nil {
+			bridgeSessionID = entry.SessionID
+		}
 	}
 	if bridgeSessionID != "" {
 		localSocket, bridgeErr := ensureDesktopBridge(ctx)

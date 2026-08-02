@@ -59,15 +59,66 @@ func TestProjectedResumeUsesAuthoritySnapshotAndLocalTargetPolicy(t *testing.T) 
 	if err := saveBytes(v.authoritySnapshotPath(), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	target, err := v.ResolveProjectedResume(context.Background(), "apex-v4")
+	item, err := v.resolveOfflineSnapshot("apex-v4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := v.localResumeTarget(item.Target)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if target.Host != "home.example" || target.User != "dostos" || target.Port != 2222 || target.Identity != filepath.Join(os.Getenv("HOME"), ".ssh/viz") {
 		t.Fatalf("resume target=%+v", target)
 	}
-	if _, err := v.ResolveProjectedResume(context.Background(), "missing"); err == nil {
+	if _, err := v.resolveOfflineSnapshot("missing"); err == nil {
 		t.Fatal("missing authoritative session was accepted")
+	}
+}
+
+func TestProjectedResumePrefersLiveAuthorityAndRequiresExplicitOffline(t *testing.T) {
+	state := t.TempDir()
+	home := t.TempDir()
+	binDir := t.TempDir()
+	t.Setenv("RELAY_STATE_DIR", state)
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ssh := filepath.Join(binDir, "ssh")
+	if err := os.WriteFile(ssh, []byte("#!/bin/sh\nprintf '%s\\n' '{\"session_id\":\"sess-live\",\"target\":\"home-relay\",\"tmux_name\":\"apex-v4\"}'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	v := &Viz{
+		ServiceID: "mac",
+		Control:   &targetConfig{Host: "control.example", Identity: "~/.ssh/control"},
+		Targets:   map[string]targetConfig{"home-relay": {Host: "home.example", Identity: "~/.ssh/attach"}},
+	}
+	target, err := v.ResolveProjectedResume(context.Background(), "apex-v4", ports.ResumeResolveOpts{})
+	if err != nil || target.Host != "home.example" {
+		t.Fatalf("live target=%+v err=%v", target, err)
+	}
+	if err := os.WriteFile(ssh, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal([]ports.Presentation{{SessionID: "sess-offline", Target: "home-relay", TmuxName: "apex-v4"}})
+	if err := saveBytes(v.authoritySnapshotPath(), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.ResolveProjectedResume(context.Background(), "apex-v4", ports.ResumeResolveOpts{}); err == nil {
+		t.Fatal("authority failure silently used offline state")
+	}
+	if _, err := v.ResolveProjectedResume(context.Background(), "apex-v4", ports.ResumeResolveOpts{AllowOffline: true}); err != nil {
+		t.Fatalf("explicit offline fallback failed: %v", err)
+	}
+}
+
+func TestProjectedResumeRejectsMalformedAuthorityResponse(t *testing.T) {
+	binDir := t.TempDir()
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := os.WriteFile(filepath.Join(binDir, "ssh"), []byte("#!/bin/sh\nprintf '%s\\n' '{\"session_id\":\"sess-live\",\"target\":\"home-relay\",\"tmux_name\":\"other\"}'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	v := &Viz{ServiceID: "mac", Control: &targetConfig{Host: "control.example", Identity: "/tmp/control"}}
+	if _, err := v.ResolveProjectedResume(context.Background(), "apex-v4", ports.ResumeResolveOpts{}); err == nil {
+		t.Fatal("mismatched authority identity accepted")
 	}
 }
 
