@@ -217,7 +217,16 @@ func (v *Viz) handleServiceEvent(ctx context.Context, event coord.Event) (string
 			Target:          stringMeta(event.Meta, "target"),
 			TmuxName:        stringMeta(event.Meta, "tmux_name"),
 		}
-		return v.PresentTarget(ctx, req)
+		surface, err := v.PresentTarget(ctx, req)
+		if err != nil {
+			return "", err
+		}
+		location := v.locationOfSurface(ctx, surface)
+		result, _ := json.Marshal(map[string]string{
+			"surface": surface, "workspace": location.Workspace, "pane": location.Pane,
+			"parent_session_id": req.ParentSessionID,
+		})
+		return string(result), nil
 	case "update_relayd":
 		return v.updateRelayd(ctx)
 	case "migrate_control":
