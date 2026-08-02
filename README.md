@@ -388,7 +388,8 @@ when its checkout is dirty or not on the configured branch. Otherwise relayd
 fetches the configured ref, builds both binaries in a detached staging
 worktree, verifies their stamped build, fast-forwards the checkout, and swaps
 the pair on the destination filesystem with rollback copies. It then
-acknowledges, advances its cursor, and lets launchd restart the follower.
+acknowledges with the installed commit in `result`, advances its cursor, and
+lets launchd restart the follower.
 `install.sh` is only for initial binary/service bootstrap. Both outbound control and target attachment are
 batch-only with strict host-key checking. If the Mac is asleep, requests wait
 durably while control work continues on home.
