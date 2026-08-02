@@ -139,7 +139,12 @@ func cmdControlServe() int {
 	defer cancel()
 	sock := core.DesktopBridgeSocketPath()
 	srv := &bridge.Server{SockPath: sock, RelayBin: relayBinary(), Build: coord.Build, Authorize: core.AuthorizeBridgeSource}
-	service := &controlbridge.Service{Registry: &core.Registry{}, BridgeSocket: sock, Stderr: os.Stderr}
+	registry := &core.Registry{}
+	viz := cmuxviz.New()
+	service := &controlbridge.Service{
+		Registry: registry, BridgeSocket: sock, Stderr: os.Stderr,
+		AckSync: func(ctx context.Context) error { return viz.SyncAcks(ctx, registry) },
+	}
 	go func() {
 		<-ctx.Done()
 		_ = srv.Close()

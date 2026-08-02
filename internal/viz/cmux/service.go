@@ -100,7 +100,11 @@ func (v *Viz) cursorPath() string {
 }
 
 func (v *Viz) loadCursor() int64 {
-	raw, err := os.ReadFile(v.cursorPath())
+	return loadSequence(v.cursorPath())
+}
+
+func loadSequence(path string) int64 {
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return 0
 	}
@@ -109,7 +113,10 @@ func (v *Viz) loadCursor() int64 {
 }
 
 func (v *Viz) saveCursor(seq int64) error {
-	path := v.cursorPath()
+	return saveSequence(v.cursorPath(), seq)
+}
+
+func saveSequence(path string, seq int64) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}

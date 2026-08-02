@@ -21,6 +21,7 @@ type Service struct {
 	Registry     *core.Registry
 	BridgeSocket string
 	Stderr       *os.File
+	AckSync      func(context.Context) error
 
 	mu      sync.Mutex
 	tunnels map[string]*tunnel
@@ -53,6 +54,11 @@ func (s *Service) Run(ctx context.Context) error {
 }
 
 func (s *Service) reconcile(ctx context.Context) error {
+	if s.AckSync != nil {
+		if err := s.AckSync(ctx); err != nil && s.Stderr != nil {
+			fmt.Fprintf(s.Stderr, "relayd viz ack reconcile: %v\n", err)
+		}
+	}
 	sessions, err := s.Registry.ListSessions()
 	if err != nil {
 		return err
