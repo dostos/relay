@@ -384,6 +384,9 @@ func (a *App) Run(args []string) int {
 	case "version", "-V", "--version":
 		fmt.Println("relay 0.1.0")
 		return 0
+	case "build":
+		fmt.Println(coord.Build)
+		return 0
 	case "host":
 		return a.cmdHost(ctx, filtered[1:])
 	case "auth":

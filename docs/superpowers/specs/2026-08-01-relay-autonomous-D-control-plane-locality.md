@@ -68,6 +68,9 @@ Home sends a typed `{session_id, target, tmux_name}` request to the optional Mac
 follower consumes requests through outbound strict SSH, resolves target SSH
 coordinates, and applies the user's local placement policy (default `rome`). A
 typed `update_relayd` signal uses owner-fixed repo/remote/branch policy and
-refuses dirty or non-fast-forward updates. State/socket cutover remains a
+refuses dirty, wrong-branch, or non-fast-forward updates. The relayd binary
+stages and build-verifies both executables, swaps them with rollback copies,
+and exits for launchd restart; runtime updates do not execute `install.sh`.
+State/socket cutover remains a
 separate verified step; until it completes, the existing desktop bridge stays
 authoritative.

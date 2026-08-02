@@ -16,6 +16,7 @@ import (
 	coordrelayd "github.com/dostos/relay/internal/coord/relayd"
 	"github.com/dostos/relay/internal/core"
 	"github.com/dostos/relay/internal/ports"
+	"github.com/dostos/relay/internal/selfupdate"
 	"github.com/dostos/relay/internal/shellquote"
 )
 
@@ -188,7 +189,7 @@ func (v *Viz) handleServiceEvent(ctx context.Context, event coord.Event) (string
 		}
 		return v.PresentTarget(ctx, req)
 	case "update_relayd":
-		return "updated", v.updateRelayd(ctx)
+		return v.updateRelayd(ctx)
 	case "viz_ack":
 		return "ignored", nil
 	default:
@@ -217,39 +218,22 @@ func (v *Viz) emitAck(ctx context.Context, event coord.Event, result string) err
 	return nil
 }
 
-func (v *Viz) updateRelayd(ctx context.Context) error {
+func (v *Viz) updateRelayd(ctx context.Context) (string, error) {
 	if v.Update == nil || strings.TrimSpace(v.Update.Repo) == "" {
-		return fmt.Errorf("visualization update policy is not configured")
+		return "", fmt.Errorf("visualization update policy is not configured")
 	}
-	repo := expandServicePath(v.Update.Repo)
-	remote := v.Update.Remote
-	if remote == "" {
-		remote = "origin"
+	home, _ := os.UserHomeDir()
+	result, err := selfupdate.Apply(ctx, selfupdate.Plan{
+		Repo:       expandServicePath(v.Update.Repo),
+		Remote:     v.Update.Remote,
+		Branch:     v.Update.Branch,
+		InstallDir: filepath.Join(home, ".local", "bin"),
+		StateDir:   core.StateRoot(),
+	})
+	if err != nil {
+		return "", err
 	}
-	branch := v.Update.Branch
-	if branch == "" {
-		branch = "master"
-	}
-	status := exec.CommandContext(ctx, "git", "-C", repo, "status", "--porcelain")
-	if out, err := status.Output(); err != nil {
-		return err
-	} else if len(bytes.TrimSpace(out)) != 0 {
-		return fmt.Errorf("refuse update: relay worktree is dirty")
-	}
-	for _, argv := range [][]string{
-		{"git", "-C", repo, "fetch", remote, branch},
-		{"git", "-C", repo, "merge", "--ff-only", remote + "/" + branch},
-		{filepath.Join(repo, "install.sh")},
-	} {
-		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-		if len(argv) == 1 {
-			cmd.Env = append(os.Environ(), "RELAY_VIZ_SELF_UPDATE=1")
-		}
-		if output, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("%s: %w (%s)", argv[0], err, strings.TrimSpace(string(output)))
-		}
-	}
-	return nil
+	return result.Build, nil
 }
 
 func expandServicePath(path string) string {

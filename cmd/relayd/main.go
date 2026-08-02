@@ -40,6 +40,8 @@ func main() {
 		os.Exit(cmdSubscribe(os.Args[2:]))
 	case "version", "-V", "--version":
 		fmt.Println("relayd", coord.Version)
+	case "build":
+		fmt.Println(coord.Build)
 	case "help", "-h", "--help":
 		usage()
 	default:
