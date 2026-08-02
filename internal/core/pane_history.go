@@ -54,14 +54,17 @@ func WritePaneBinding(b PaneBinding) error {
 	if b.UpdatedAt.IsZero() {
 		b.UpdatedAt = time.Now().UTC()
 	}
-	if err := os.MkdirAll(PanesDir(), 0o755); err != nil {
+	if err := os.MkdirAll(PanesDir(), 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(PanesDir(), 0o700); err != nil {
 		return err
 	}
 	raw, err := json.MarshalIndent(b, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(paneBindingPath(b.Surface), raw, 0o644)
+	return writeOwnerFile(paneBindingPath(b.Surface), raw)
 }
 
 // RememberPane writes a pinned binding from a live session + surface.

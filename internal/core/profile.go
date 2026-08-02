@@ -395,7 +395,7 @@ func (s *ProfileService) saveCache(hostID string, p *HostProfile) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(ProfileCachePath(hostID), b, 0o644)
+	return writeOwnerFile(ProfileCachePath(hostID), b)
 }
 
 // Probe runs remote checks for listed agents and writes results into the profile cache.

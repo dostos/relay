@@ -7,6 +7,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/dostos/relay/internal/shellquote"
 )
 
 var ErrSessionNotFound = errors.New("session not found")
@@ -81,7 +83,7 @@ func (r *Registry) saveSessions(s *sessionStore) error {
 		return err
 	}
 	tmp := SessionsPath() + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	if err := writeOwnerFile(tmp, b); err != nil {
 		return err
 	}
 	return os.Rename(tmp, SessionsPath())
@@ -106,6 +108,11 @@ func (r *Registry) putSessionLocked(sess *Session) error {
 	defer r.mu.Unlock()
 	if managerDeletionReserved(sess.SourceSessionID) {
 		return fmt.Errorf("manager %s is reserved for deletion", sess.SourceSessionID)
+	}
+	if sess.Persist.Name != "" && sess.Persist.Kind != LocalPersistKind {
+		if err := shellquote.ValidateSessionName(sess.Persist.Name); err != nil {
+			return fmt.Errorf("invalid persisted tmux name: %w", err)
+		}
 	}
 	s, err := r.loadSessions()
 	if err != nil {
@@ -204,7 +211,7 @@ func (r *Registry) putHandoffLocked(h *Handoff) error {
 		return err
 	}
 	tmp := handoffPath(h.ID) + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	if err := writeOwnerFile(tmp, b); err != nil {
 		return err
 	}
 	return os.Rename(tmp, handoffPath(h.ID))
@@ -288,8 +295,12 @@ func appendLedgerLocked(record map[string]any) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(LedgerPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(LedgerPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
+		return err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
 		return err
 	}
 	defer f.Close()

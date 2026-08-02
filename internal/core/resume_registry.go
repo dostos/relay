@@ -93,7 +93,7 @@ func saveResumeRegistry(f *resumeRegistryFile) error {
 		return err
 	}
 	tmp := ResumeRegistryPath() + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+	if err := writeOwnerFile(tmp, b); err != nil {
 		return err
 	}
 	return os.Rename(tmp, ResumeRegistryPath())

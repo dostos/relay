@@ -82,11 +82,21 @@ func sanitizeID(s string) string {
 // EnsureStateDirs creates local state directories.
 func EnsureStateDirs() error {
 	for _, d := range []string{StateRoot(), HandoffsDir(), ProfileCacheDir(), PanesDir(), BridgeTokensDir(), BridgeIdentitiesDir(), ParentInboxDir(), ParentWatchDir()} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return err
+		}
+		if err := os.Chmod(d, 0o700); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func writeOwnerFile(path string, data []byte) error {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
 }
 
 // RemoteHostProfilePath is the authoritative profile on a remote host (tilde form for ssh).
