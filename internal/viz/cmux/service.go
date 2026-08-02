@@ -235,33 +235,7 @@ func (v *Viz) Follow(ctx context.Context, follow bool) error {
 // files are recoverable, but no longer sit at paths a local Relay command can
 // mistake for current session, lineage, inbox, or credential authority.
 func retireLocalAuthorityState() error {
-	root := core.StateRoot()
-	marker := core.ProjectionOnlyMarkerPath()
-	archive := filepath.Join(root, "retired-local-authority", time.Now().UTC().Format("20060102T150405.000000000Z"))
-	createdArchive := false
-	paths := []string{
-		core.SessionsPath(), core.HandoffsDir(), core.ParentInboxDir(), core.ParentWatchDir(),
-		core.BridgeTokensDir(), core.BridgeIdentitiesDir(), core.ResumeRegistryPath(),
-		core.AuthorityDeletionDir(), core.DeletedManagerDir(), core.AuthorityReplacementPath(),
-	}
-	for _, source := range paths {
-		if _, err := os.Stat(source); os.IsNotExist(err) {
-			continue
-		} else if err != nil {
-			return err
-		}
-		if !createdArchive {
-			if err := os.MkdirAll(archive, 0o700); err != nil {
-				return err
-			}
-			createdArchive = true
-		}
-		target := filepath.Join(archive, filepath.Base(source))
-		if err := os.Rename(source, target); err != nil {
-			return fmt.Errorf("archive local authority %s: %w", source, err)
-		}
-	}
-	return os.WriteFile(marker, []byte("home control plane is authoritative\n"), 0o600)
+	return core.RetireLocalAuthorityState()
 }
 
 func (v *Viz) handleServiceEvent(ctx context.Context, event coord.Event) (string, error) {

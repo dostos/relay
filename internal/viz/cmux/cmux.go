@@ -79,6 +79,7 @@ type ManagedPane struct {
 	SessionID       string    `json:"session_id"`
 	SourceSessionID string    `json:"source_session_id,omitempty"`
 	PersistName     string    `json:"persist_name,omitempty"`
+	Target          string    `json:"target,omitempty"`
 	Surface         string    `json:"surface"`
 	Pane            string    `json:"pane,omitempty"`
 	Workspace       string    `json:"workspace,omitempty"`
@@ -1540,9 +1541,11 @@ func (v *Viz) ManagedPanes(ctx context.Context) ([]ManagedPane, error) {
 	}
 	locations, locationsErr := v.liveSurfaceLocations(ctx)
 	if locationsErr != nil {
-		locations = map[string]surfaceLocation{}
+		return nil, fmt.Errorf("inventory live cmux surfaces: %w", locationsErr)
 	}
 	panes := make([]ManagedPane, 0, len(entries))
+	liveOwner := make(map[string]int)
+	liveBinding := make(map[string]binding)
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
@@ -1570,6 +1573,7 @@ func (v *Viz) ManagedPanes(ctx context.Context) ([]ManagedPane, error) {
 				migrated = true
 			}
 		}
+		ownership := b
 		state := "disconnected"
 		if loc := locations[b.Surface]; loc.Workspace != "" {
 			state = "live"
@@ -1581,12 +1585,27 @@ func (v *Viz) ManagedPanes(ctx context.Context) ([]ManagedPane, error) {
 		if migrated {
 			_ = v.persistBinding(b.SessionID, b)
 		}
-		panes = append(panes, ManagedPane{
+		pane := ManagedPane{
 			SessionID: b.SessionID, SourceSessionID: b.SourceSessionID,
-			PersistName: extractSessionFlag(b.Attach), Surface: b.Surface,
+			PersistName: firstNonEmpty(b.TmuxName, extractSessionFlag(b.Attach)), Target: b.Target, Surface: b.Surface,
 			Pane: b.Pane, Workspace: b.Workspace, Mode: b.Mode,
 			State: state, CreatedAt: b.CreatedAt, UpdatedAt: b.UpdatedAt,
-		})
+		}
+		if state == "live" {
+			if owner, exists := liveOwner[b.Surface]; exists {
+				if preferBindingOwner(ownership, liveBinding[b.Surface]) {
+					panes[owner].State = "disconnected"
+					liveOwner[b.Surface] = len(panes)
+					liveBinding[b.Surface] = ownership
+				} else {
+					pane.State = "disconnected"
+				}
+			} else {
+				liveOwner[b.Surface] = len(panes)
+				liveBinding[b.Surface] = ownership
+			}
+		}
+		panes = append(panes, pane)
 	}
 	sort.Slice(panes, func(i, j int) bool {
 		if panes[i].Workspace != panes[j].Workspace {
@@ -1600,12 +1619,38 @@ func (v *Viz) ManagedPanes(ctx context.Context) ([]ManagedPane, error) {
 	return panes, nil
 }
 
+func preferBindingOwner(candidate, current binding) bool {
+	if candidate.Revision != current.Revision {
+		return candidate.Revision > current.Revision
+	}
+	if !candidate.UpdatedAt.Equal(current.UpdatedAt) {
+		return candidate.UpdatedAt.After(current.UpdatedAt)
+	}
+	return candidate.SessionID > current.SessionID
+}
+
 func (v *Viz) liveSurfaceLocations(ctx context.Context) (map[string]surfaceLocation, error) {
 	out, err := v.run(ctx, "tree", "--all", "--json")
 	if err != nil {
 		return nil, err
 	}
-	return parseSurfaceLocations([]byte(out)), nil
+	return parseLiveSurfaceLocations([]byte(out))
+}
+
+func parseLiveSurfaceLocations(out []byte) (map[string]surfaceLocation, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(out, &envelope); err != nil {
+		return nil, fmt.Errorf("cmux tree returned malformed JSON: %w", err)
+	}
+	windows, ok := envelope["windows"]
+	if !ok {
+		return nil, fmt.Errorf("cmux tree JSON is missing windows inventory")
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(windows, &items); err != nil {
+		return nil, fmt.Errorf("cmux tree windows inventory has incompatible schema: %w", err)
+	}
+	return parseSurfaceLocations(out), nil
 }
 
 // CaptureScreen reads the visible text of the pane bound to a session,

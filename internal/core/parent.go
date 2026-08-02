@@ -591,9 +591,15 @@ func readParentMessage(path string) (*ParentMessage, error) {
 }
 
 func (p *ParentService) ListMessages(parentID string, pendingOnly bool) ([]*ParentMessage, error) {
+	if err := EnsureAuthorityReadable(); err != nil {
+		return nil, err
+	}
 	dir := parentMessageDir(parentID)
 	entries, err := os.ReadDir(dir)
 	if os.IsNotExist(err) {
+		if err := EnsureAuthorityReadable(); err != nil {
+			return nil, err
+		}
 		return []*ParentMessage{}, nil
 	}
 	if err != nil {
@@ -611,12 +617,21 @@ func (p *ParentService) ListMessages(parentID string, pendingOnly bool) ([]*Pare
 		out = append(out, msg)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	if err := EnsureAuthorityReadable(); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
 func (p *ParentService) FindMessage(id string) (*ParentMessage, error) {
+	if err := EnsureAuthorityReadable(); err != nil {
+		return nil, err
+	}
 	parents, err := os.ReadDir(ParentInboxDir())
 	if os.IsNotExist(err) {
+		if err := EnsureAuthorityReadable(); err != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("parent message %q not found", id)
 	}
 	if err != nil {
@@ -628,8 +643,14 @@ func (p *ParentService) FindMessage(id string) (*ParentMessage, error) {
 		}
 		path := filepath.Join(ParentInboxDir(), parent.Name(), sanitizeID(id)+".json")
 		if msg, err := readParentMessage(path); err == nil {
+			if err := EnsureAuthorityReadable(); err != nil {
+				return nil, err
+			}
 			return msg, nil
 		}
+	}
+	if err := EnsureAuthorityReadable(); err != nil {
+		return nil, err
 	}
 	return nil, fmt.Errorf("parent message %q not found", id)
 }

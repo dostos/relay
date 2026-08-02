@@ -1054,6 +1054,9 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 	switch sub {
 	case "list":
 		list, err := a.Sessions.List()
+		if errors.Is(err, core.ErrProjectionOnlyAuthority) {
+			list, err = a.projectedSessions(ctx)
+		}
 		if err != nil {
 			return a.fail(err)
 		}
@@ -1315,6 +1318,31 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 	default:
 		return a.fail(fmt.Errorf("unknown session subcommand %q", sub))
 	}
+}
+
+func (a *App) projectedSessions(ctx context.Context) ([]*core.Session, error) {
+	manager, ok := a.Viz.(interface {
+		ManagedPanes(context.Context) ([]cmux.ManagedPane, error)
+	})
+	if !ok {
+		return nil, core.ErrProjectionOnlyAuthority
+	}
+	panes, err := manager.ManagedPanes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*core.Session, 0, len(panes))
+	for _, pane := range panes {
+		if pane.State != "live" || pane.SessionID == "" {
+			continue
+		}
+		out = append(out, &core.Session{
+			ID: pane.SessionID, HostID: pane.Target, Persist: ports.PersistHandle{Kind: "tmux", Name: pane.PersistName},
+			SourceSessionID: pane.SourceSessionID, VizSurfaceRef: pane.Surface,
+			Labels: map[string]string{"role": "projection", "authority": "home"}, CreatedAt: pane.CreatedAt, UpdatedAt: pane.UpdatedAt,
+		})
+	}
+	return out, nil
 }
 
 func afterDashDash(args []string) (string, bool) {

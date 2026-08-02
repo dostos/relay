@@ -282,9 +282,15 @@ type HistoryGraph struct {
 // LoadHistory reconstructs lineage from the append-only ledger. Malformed
 // legacy lines are ignored; existing handoff-only records remain readable.
 func LoadHistory() (*HistoryGraph, error) {
+	if err := EnsureAuthorityReadable(); err != nil {
+		return nil, err
+	}
 	f, err := os.Open(LedgerPath())
 	if err != nil {
 		if os.IsNotExist(err) {
+			if err := EnsureAuthorityReadable(); err != nil {
+				return nil, err
+			}
 			return &HistoryGraph{}, nil
 		}
 		return nil, err
@@ -376,6 +382,9 @@ func LoadHistory() (*HistoryGraph, error) {
 	sort.Slice(graph.Nodes, func(i, j int) bool { return graph.Nodes[i].CreatedAt.Before(graph.Nodes[j].CreatedAt) })
 	sort.Slice(graph.Edges, func(i, j int) bool { return graph.Edges[i].CreatedAt.Before(graph.Edges[j].CreatedAt) })
 	sort.Slice(graph.Communications, func(i, j int) bool { return graph.Communications[i].Seq < graph.Communications[j].Seq })
+	if err := EnsureAuthorityReadable(); err != nil {
+		return nil, err
+	}
 	return graph, nil
 }
 

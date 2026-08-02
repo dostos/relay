@@ -32,6 +32,71 @@ func TestVizServiceUsesRelayManagedReconnect(t *testing.T) {
 	}
 }
 
+func TestDuplicateSurfaceHasOneDeterministicLiveOwner(t *testing.T) {
+	now := time.Now().UTC()
+	old := binding{SessionID: "sess-old", Surface: "surface:1", Revision: 2, UpdatedAt: now}
+	newer := binding{SessionID: "sess-new", Surface: "surface:1", Revision: 3, UpdatedAt: now.Add(-time.Hour)}
+	if !preferBindingOwner(newer, old) {
+		t.Fatal("higher stream revision must own a crash-left duplicate surface")
+	}
+	if preferBindingOwner(old, newer) {
+		t.Fatal("older stream revision displaced current surface owner")
+	}
+	tieA := binding{SessionID: "sess-a", Surface: "surface:1", Revision: 3, UpdatedAt: now}
+	tieB := binding{SessionID: "sess-b", Surface: "surface:1", Revision: 3, UpdatedAt: now}
+	if !preferBindingOwner(tieB, tieA) || preferBindingOwner(tieA, tieB) {
+		t.Fatal("equal bindings do not have deterministic ownership")
+	}
+}
+
+func TestManagedPanesKeepsDurableOwnerAcrossLocationRefresh(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("RELAY_STATE_DIR", state)
+	bin := filepath.Join(t.TempDir(), "cmux")
+	tree := `{"windows":[{"workspaces":[{"ref":"workspace:new","panes":[{"ref":"pane:new","surfaces":[{"ref":"surface:1"}]}]}]}]}`
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nprintf '%s\\n' '"+tree+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	v := &Viz{Bin: bin}
+	now := time.Now().UTC()
+	for _, b := range []binding{
+		{SessionID: "sess-current", Surface: "surface:1", Workspace: "workspace:old", Pane: "pane:old", UpdatedAt: now},
+		{SessionID: "sess-stale", Surface: "surface:1", Workspace: "workspace:older", Pane: "pane:older", UpdatedAt: now.Add(-time.Hour)},
+	} {
+		if err := v.persistBinding(b.SessionID, b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	panes, err := v.ManagedPanes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := ""
+	for _, pane := range panes {
+		if pane.State == "live" {
+			if live != "" {
+				t.Fatalf("multiple live owners: %+v", panes)
+			}
+			live = pane.SessionID
+		}
+	}
+	if live != "sess-current" {
+		t.Fatalf("durable current owner lost after location refresh: live=%q panes=%+v", live, panes)
+	}
+}
+
+func TestLiveSurfaceInventoryRejectsValidWrongSchema(t *testing.T) {
+	for _, raw := range []string{`{}`, `null`, `[]`, `{"error":"unsupported"}`, `{"windows":{}}`} {
+		if locations, err := parseLiveSurfaceLocations([]byte(raw)); err == nil {
+			t.Fatalf("schema %s returned healthy inventory: %+v", raw, locations)
+		}
+	}
+	locations, err := parseLiveSurfaceLocations([]byte(`{"windows":[]}`))
+	if err != nil || len(locations) != 0 {
+		t.Fatalf("legitimate empty inventory rejected: %+v err=%v", locations, err)
+	}
+}
+
 func TestPresentTargetCarriesParentAnchorIntoLocalPolicy(t *testing.T) {
 	req := ports.Presentation{SessionID: "sess-child", ParentSessionID: "sess-parent", Target: "home", TmuxName: "child"}
 	if req.ParentSessionID != "sess-parent" {
@@ -383,5 +448,17 @@ func TestVizClientArchivesLocalAuthorityButKeepsProjectionState(t *testing.T) {
 	archives, _ = filepath.Glob(filepath.Join(state, "retired-local-authority", "*", "sessions.json"))
 	if len(archives) != 2 {
 		t.Fatalf("recreated authority was not quarantined: %v", archives)
+	}
+	for _, dir := range []string{"handoffs", "parent-inbox", "parent-watch"} {
+		if err := os.MkdirAll(filepath.Join(state, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := retireLocalAuthorityState(); err != nil {
+		t.Fatal(err)
+	}
+	archives, _ = filepath.Glob(filepath.Join(state, "retired-local-authority", "*"))
+	if len(archives) != 2 {
+		t.Fatalf("empty recreated directories caused another retirement: %v", archives)
 	}
 }

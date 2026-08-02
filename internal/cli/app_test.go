@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,7 +15,89 @@ import (
 	"github.com/dostos/relay/internal/bridge"
 	"github.com/dostos/relay/internal/core"
 	"github.com/dostos/relay/internal/ports"
+	cmuxviz "github.com/dostos/relay/internal/viz/cmux"
 )
+
+type projectedPaneViz struct {
+	ports.Viz
+	panes []cmuxviz.ManagedPane
+	err   error
+}
+
+func (v projectedPaneViz) ManagedPanes(context.Context) ([]cmuxviz.ManagedPane, error) {
+	return v.panes, v.err
+}
+
+func TestProjectionOnlyCLIUsesSnapshotOnlyForSessionList(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("RELAY_STATE_DIR", state)
+	if err := os.WriteFile(filepath.Join(state, ".viz-projection-only"), []byte("projection only\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := New()
+	a.Viz = projectedPaneViz{panes: []cmuxviz.ManagedPane{{SessionID: "sess-live", PersistName: "apex", Surface: "surface:1", State: "live"}}}
+	out := captureStdout(t, func() {
+		if code := a.Run([]string{"--json", "session", "list"}); code != 0 {
+			t.Fatalf("session list code=%d", code)
+		}
+	})
+	if !strings.Contains(out, `"sess-live"`) {
+		t.Fatalf("session projection missing from %q", out)
+	}
+	for _, args := range [][]string{{"--json", "handoff", "list"}, {"--json", "parent", "inbox", "sess-parent"}, {"--json", "history"}} {
+		out := captureStdout(t, func() {
+			if code := a.Run(args); code == 0 {
+				t.Fatalf("%v unexpectedly succeeded", args)
+			}
+		})
+		if !strings.Contains(out, core.ErrProjectionOnlyAuthority.Error()) {
+			t.Fatalf("%v did not fail closed: %q", args, out)
+		}
+	}
+}
+
+func TestProjectionSessionListDoesNotCollapseInventoryFailureToEmpty(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("RELAY_STATE_DIR", state)
+	if err := os.WriteFile(filepath.Join(state, ".viz-projection-only"), []byte("projection only\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := New()
+	a.Viz = projectedPaneViz{err: errors.New("cmux unavailable")}
+	out := captureStdout(t, func() {
+		if code := a.Run([]string{"--json", "session", "list"}); code == 0 {
+			t.Fatal("session list unexpectedly succeeded")
+		}
+	})
+	if !strings.Contains(out, "cmux unavailable") {
+		t.Fatalf("inventory error lost: %q", out)
+	}
+}
+
+func TestProjectedSessionListUsesLiveVizBindings(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("RELAY_STATE_DIR", state)
+	if err := os.WriteFile(filepath.Join(state, ".viz-projection-only"), []byte("projection only\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := New()
+	a.Viz = projectedPaneViz{panes: []cmuxviz.ManagedPane{
+		{SessionID: "sess-engram", SourceSessionID: "sess-apex", PersistName: "engram", Target: "c3", Surface: "surface:2", State: "live"},
+		{SessionID: "sess-old", PersistName: "old", Surface: "surface:3", State: "disconnected"},
+	}}
+	list, err := a.Sessions.List()
+	if !errors.Is(err, core.ErrProjectionOnlyAuthority) || list != nil {
+		t.Fatalf("authority read did not fail closed: list=%v err=%v", list, err)
+	}
+	projected, err := a.projectedSessions(context.Background())
+	if err != nil || len(projected) != 1 {
+		t.Fatalf("projection=%v err=%v", projected, err)
+	}
+	got := projected[0]
+	if got.ID != "sess-engram" || got.SourceSessionID != "sess-apex" || got.HostID != "c3" || got.Persist.Name != "engram" || got.VizSurfaceRef != "surface:2" {
+		t.Fatalf("projection fields lost: %+v", got)
+	}
+}
 
 func TestMain(m *testing.M) {
 	// Tests run inside relay-managed tmux panes too. Keep App.Run calls local so

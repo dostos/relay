@@ -10,6 +10,7 @@ import (
 )
 
 var ErrSessionNotFound = errors.New("session not found")
+var ErrProjectionOnlyAuthority = errors.New("local relay is visualization-only; authoritative registry is unavailable")
 
 // Registry is the local durable store for sessions and handoffs.
 type Registry struct {
@@ -24,8 +25,17 @@ type sessionStore struct {
 // EnsureAuthorityWritable is the single role boundary for durable control-plane
 // stores. Projection code writes only under viz/ and must never call it.
 func EnsureAuthorityWritable() error {
-	if _, err := os.Stat(ProjectionOnlyMarkerPath()); err == nil {
+	if _, err := os.Lstat(ProjectionOnlyMarkerPath()); err == nil {
 		return fmt.Errorf("local relay is visualization-only; authoritative registry mutation refused")
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+func EnsureAuthorityReadable() error {
+	if _, err := os.Lstat(ProjectionOnlyMarkerPath()); err == nil {
+		return ErrProjectionOnlyAuthority
 	} else if !os.IsNotExist(err) {
 		return err
 	}
@@ -36,11 +46,23 @@ func (r *Registry) loadSessions() (*sessionStore, error) {
 	if err := EnsureStateDirs(); err != nil {
 		return nil, err
 	}
+	if err := EnsureAuthorityReadable(); err != nil {
+		return nil, err
+	}
 	b, err := os.ReadFile(SessionsPath())
 	if err != nil {
 		if os.IsNotExist(err) {
+			// Retirement may have moved sessions.json after the first marker
+			// check. Never turn that transition into an authoritative empty
+			// registry.
+			if readableErr := EnsureAuthorityReadable(); readableErr != nil {
+				return nil, readableErr
+			}
 			return &sessionStore{Sessions: map[string]*Session{}}, nil
 		}
+		return nil, err
+	}
+	if err := EnsureAuthorityReadable(); err != nil {
 		return nil, err
 	}
 	var s sessionStore
@@ -191,9 +213,15 @@ func (r *Registry) putHandoffLocked(h *Handoff) error {
 func (r *Registry) GetHandoff(id string) (*Handoff, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if err := EnsureAuthorityReadable(); err != nil {
+		return nil, err
+	}
 	b, err := os.ReadFile(handoffPath(id))
 	if err != nil {
 		return nil, fmt.Errorf("handoff %q not found: %w", id, err)
+	}
+	if err := EnsureAuthorityReadable(); err != nil {
+		return nil, err
 	}
 	var h Handoff
 	if err := json.Unmarshal(b, &h); err != nil {
@@ -206,6 +234,9 @@ func (r *Registry) ListHandoffs() ([]*Handoff, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := EnsureStateDirs(); err != nil {
+		return nil, err
+	}
+	if err := EnsureAuthorityReadable(); err != nil {
 		return nil, err
 	}
 	entries, err := os.ReadDir(HandoffsDir())
@@ -225,6 +256,9 @@ func (r *Registry) ListHandoffs() ([]*Handoff, error) {
 		if json.Unmarshal(b, &h) == nil {
 			out = append(out, &h)
 		}
+	}
+	if err := EnsureAuthorityReadable(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
