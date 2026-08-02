@@ -142,6 +142,11 @@ Relay stays model-free throughout. It owns enrollment, rule resolution, and the
 audit; the judgment lives in the portable role at
 [`share/roles/relay-conductor.md`](share/roles/relay-conductor.md).
 
+For role-aware startup and verification, the vendor-neutral
+[`relay-role-bootstrap`](skills/relay-role-bootstrap/SKILL.md) skill selects
+apex, manager, worker, or procedural-operator semantics while using the same
+`relay agent` protocol for every agent runtime.
+
 **Governance runs where the control plane runs.** The registry, the parent
 inboxes, and the watcher processes all live on the machine that started the
 work — so if that machine sleeps, the router sleeps with it and an escalation

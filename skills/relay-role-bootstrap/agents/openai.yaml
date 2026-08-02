@@ -1,0 +1,4 @@
+interface:
+  display_name: "Relay Role Bootstrap"
+  short_description: "Boot verified role-aware Relay sessions"
+  default_prompt: "Use $relay-role-bootstrap to boot a verified goal-driven Relay session for the requested role."

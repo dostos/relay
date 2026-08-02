@@ -161,6 +161,26 @@ unlink_relay_skills "$HOME/.claude/skills"
 unlink_relay_skills "$HOME/.codex/skills"
 unlink_relay_skills "$HOME/.cursor/skills"
 
+# Role bootstrap is semantic policy above the compact wire protocol, so it is
+# useful to every agent runtime. Link the same vendor-neutral skill everywhere
+# without overwriting a user-owned directory or file.
+link_relay_role_skill() {
+  local dst="$1"
+  local src="$ROOT/skills/relay-role-bootstrap"
+  local link="$dst/relay-role-bootstrap"
+  [[ -d "$src" ]] || return 0
+  mkdir -p "$dst"
+  if [[ -e "$link" && ! -L "$link" ]]; then
+    echo "relay: preserving user-owned skill at $link" >&2
+    return 0
+  fi
+  ln -sfn "$src" "$link"
+}
+link_relay_role_skill "$HOME/.agents/skills"
+link_relay_role_skill "$HOME/.claude/skills"
+link_relay_role_skill "$HOME/.codex/skills"
+link_relay_role_skill "$HOME/.cursor/skills"
+
 # Register with cmux Vault so panes re-launch after cmux quit / Mac reboot.
 if command -v cmux >/dev/null 2>&1 || [[ -x /Applications/cmux.app/Contents/Resources/bin/cmux ]]; then
   if "$INSTALL_DIR/relay" install-cmux-restore >/dev/null 2>&1; then
