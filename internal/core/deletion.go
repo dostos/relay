@@ -20,6 +20,8 @@ type SessionDeletion struct {
 	Session            ports.Presentation `json:"session"`
 	Created            string             `json:"created_at"`
 	SuppressProjection bool               `json:"suppress_projection,omitempty"`
+	CleanPersistName   string             `json:"clean_persist_name,omitempty"`
+	ForgetBridgeID     string             `json:"forget_bridge_session_id,omitempty"`
 }
 
 func deletionDir() string       { return AuthorityDeletionDir() }
@@ -34,6 +36,12 @@ func DeleteSessionProjected(ctx context.Context, reg *Registry, viz ports.Viz, s
 // protected, commits authoritative deletion, then projects tombstones after
 // releasing the authority lock.
 func DeleteSessionsProjected(ctx context.Context, reg *Registry, viz ports.Viz, sessions []*Session, suppressProjection bool, teardown func() error) error {
+	return deleteSessionsProjected(ctx, reg, viz, sessions, suppressProjection, teardown, nil, teardown != nil)
+}
+
+type deletionAuthorizer func(*Session, []*Handoff) error
+
+func deleteSessionsProjected(ctx context.Context, reg *Registry, viz ports.Viz, sessions []*Session, suppressProjection bool, teardown func() error, authorize deletionAuthorizer, cleanupIdentity bool) error {
 	if reg == nil || len(sessions) == 0 {
 		return fmt.Errorf("session deletion requires registry and session")
 	}
@@ -58,9 +66,22 @@ func DeleteSessionsProjected(ctx context.Context, reg *Registry, viz ports.Viz, 
 	}
 	intents := make([]SessionDeletion, 0, len(sessions))
 	paths := make([]string, 0, len(sessions))
-	for _, sess := range sessions {
+	for i, requested := range sessions {
+		if requested == nil {
+			return fmt.Errorf("session deletion requires non-nil sessions")
+		}
+		sess, currentErr := reg.GetSession(requested.ID)
+		if currentErr != nil {
+			return currentErr
+		}
+		sessions[i] = sess
 		if sess == nil {
 			return fmt.Errorf("session deletion requires non-nil sessions")
+		}
+		if authorize != nil {
+			if err := authorize(sess, handoffs); err != nil {
+				return err
+			}
 		}
 		children, childErr := reg.DirectChildren(sess.ID)
 		if childErr != nil {
@@ -74,7 +95,14 @@ func DeleteSessionsProjected(ctx context.Context, reg *Registry, viz ports.Viz, 
 				return fmt.Errorf("session %s still owns nonterminal handoff %s", sess.ID, handoff.ID)
 			}
 		}
-		intent := SessionDeletion{V: 1, Created: time.Now().UTC().Format(time.RFC3339Nano), Session: projectionForSession(sess, sess.SourceSessionID, ports.ProjectionDelete).Item, SuppressProjection: suppressProjection}
+		intent := SessionDeletion{
+			V: 1, Created: time.Now().UTC().Format(time.RFC3339Nano),
+			Session:            projectionForSession(sess, sess.SourceSessionID, ports.ProjectionDelete).Item,
+			SuppressProjection: suppressProjection,
+		}
+		if cleanupIdentity {
+			intent.CleanPersistName, intent.ForgetBridgeID = sess.Persist.Name, sess.ID
+		}
 		path := filepath.Join(deletionDir(), sanitizeID(sess.ID)+".json")
 		if err := writeDurableJSONExclusive(path, intent); err != nil && !os.IsExist(err) {
 			return err
@@ -163,6 +191,16 @@ func RecoverSessionDeletions(ctx context.Context, reg *Registry, viz ports.Viz) 
 }
 
 func finishSessionDeletion(ctx context.Context, viz ports.Viz, path string, intent SessionDeletion) error {
+	if intent.CleanPersistName != "" {
+		if err := markResumeCleanedForSession(intent.CleanPersistName, intent.Session.SessionID, "destroyed"); err != nil {
+			return err
+		}
+	}
+	if intent.ForgetBridgeID != "" {
+		if err := forgetBridgeTokenChecked(intent.ForgetBridgeID); err != nil {
+			return err
+		}
+	}
 	if !intent.SuppressProjection && viz == nil {
 		return fmt.Errorf("visualization projection unavailable")
 	}

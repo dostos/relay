@@ -36,8 +36,12 @@ func TestProjectedDeleteSurvivesVizOutage(t *testing.T) {
 	if err := reg.PutSession(sess); err != nil {
 		t.Fatal(err)
 	}
+	RememberResume(sess)
+	if err := rememberBridgeToken(sess.ID, "br-delete"); err != nil {
+		t.Fatal(err)
+	}
 	viz := &deletionViz{fail: true}
-	if err := DeleteSessionProjected(context.Background(), reg, viz, sess, false); err != nil {
+	if err := DeleteSessionsProjected(context.Background(), reg, viz, []*Session{sess}, false, func() error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := reg.GetSession(sess.ID); err == nil {
@@ -47,6 +51,15 @@ func TestProjectedDeleteSurvivesVizOutage(t *testing.T) {
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("durable tombstone missing: entries=%v err=%v", entries, err)
 	}
+	resume, err := LookupResume(sess.Persist.Name)
+	if err != nil || resume.State != ResumeStateCleaned {
+		t.Fatalf("destroyed session remained resumable during viz outage: %+v err=%v", resume, err)
+	}
+	if _, err := os.Stat(bridgeTokenPath(sess.ID)); !os.IsNotExist(err) {
+		t.Fatalf("bridge token survived destructive commit: %v", err)
+	}
+	replacement := &Session{ID: "sess-replacement", HostID: "home", Persist: sess.Persist}
+	RememberResume(replacement)
 	viz.fail = false
 	pending, err := RecoverSessionDeletions(context.Background(), reg, viz)
 	if err != nil || pending != 0 {
@@ -55,6 +68,13 @@ func TestProjectedDeleteSurvivesVizOutage(t *testing.T) {
 	entries, _ = os.ReadDir(deletionDir())
 	if len(entries) != 0 {
 		t.Fatalf("completed tombstone remains: %v", entries)
+	}
+	resume, err = LookupResume(sess.Persist.Name)
+	if err != nil || resume.State != ResumeStateResumable || resume.SessionID != replacement.ID {
+		t.Fatalf("deletion replay clobbered replacement resume identity: %+v err=%v", resume, err)
+	}
+	if _, err := os.Stat(bridgeTokenPath(sess.ID)); !os.IsNotExist(err) {
+		t.Fatalf("bridge token survived recovered deletion: %v", err)
 	}
 }
 

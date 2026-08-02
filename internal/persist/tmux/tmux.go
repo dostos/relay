@@ -106,14 +106,21 @@ func (p *Persist) Exists(ctx context.Context, t ports.Transport, h ports.Persist
 	// identities. Compare the listed name exactly so renaming
 	// "engram-apps-..." to "engram" does not mistake the source for a
 	// conflicting destination.
-	_, _, err := t.Run(ctx, "", fmt.Sprintf(
-		"tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -Fqx -- %s",
-		shellquote.Quote(h.Name),
+	stdout, stderr, err := t.Run(ctx, "", fmt.Sprintf(
+		"if tmux has-session -t %s 2>/dev/null; then printf relay-live; else printf relay-absent; fi",
+		shellquote.Quote(exactSession(h.Name)),
 	))
 	if err != nil {
-		return false, nil
+		return false, fmt.Errorf("tmux existence probe: %w (%s)", err, strings.TrimSpace(stderr))
 	}
-	return true, nil
+	switch strings.TrimSpace(stdout) {
+	case "relay-live":
+		return true, nil
+	case "relay-absent":
+		return false, nil
+	default:
+		return false, fmt.Errorf("tmux existence probe returned malformed result")
+	}
 }
 
 func (p *Persist) Destroy(ctx context.Context, t ports.Transport, h ports.PersistHandle) error {

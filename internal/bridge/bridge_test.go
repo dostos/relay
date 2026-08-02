@@ -64,7 +64,7 @@ func TestBridgeAllowlist(t *testing.T) {
 		}
 	}
 	for _, argv := range [][]string{
-		{"host", "bootstrap", "-H", "c1"}, {"auth", "copy"}, {"session", "destroy", "sess-x"},
+		{"host", "bootstrap", "-H", "c1"}, {"auth", "copy"},
 		{"session", "send", "sess-x", "--", "review"},
 		{"parent", "register", "--surface", "surface:1"}, {"parent", "link", "sess-p", "ho-1"},
 		{"parent", "retire", "sess-p"}, {"parent", "watch", "ho-1"}, {"policy", "list"},
@@ -78,6 +78,7 @@ func TestBridgeAllowlist(t *testing.T) {
 func TestDesktopInvokeEnvDropsStaleCmuxCaller(t *testing.T) {
 	got := strings.Join(desktopInvokeEnv([]string{
 		"PATH=/bin", "CMUX_WORKSPACE_ID=workspace:old", "CMUX_SURFACE_REF=surface:old", "RELAY_CMUX_BIN=/cmux",
+		SourceSessionEnv + "=sess-poison", SourceTokenEnv + "=token-poison",
 	}), "\n")
 	if strings.Contains(got, "workspace:old") || strings.Contains(got, "surface:old") {
 		t.Fatalf("stale caller context survived: %s", got)
@@ -85,10 +86,13 @@ func TestDesktopInvokeEnvDropsStaleCmuxCaller(t *testing.T) {
 	if !strings.Contains(got, "PATH=/bin") || !strings.Contains(got, "RELAY_CMUX_BIN=/cmux") {
 		t.Fatalf("unrelated environment was removed: %s", got)
 	}
+	if strings.Contains(got, "sess-poison") || strings.Contains(got, "token-poison") {
+		t.Fatalf("stale authenticated source survived: %s", got)
+	}
 }
 
 func TestSerializeInvocationDoesNotBlockWaits(t *testing.T) {
-	for _, argv := range [][]string{{"c1", "named"}, {"agent", "start", "c1", "codex", "--", "x"}, {"agent", "done", "ho-1"}, {"resolve", "pm-1", "yes"}} {
+	for _, argv := range [][]string{{"c1", "named"}, {"agent", "start", "c1", "codex", "--", "x"}, {"agent", "done", "ho-1"}, {"resolve", "pm-1", "yes"}, {"session", "cleanup", "sess-child"}} {
 		if !serializeInvocation(argv) {
 			t.Fatalf("expected %v to serialize", argv)
 		}
@@ -96,6 +100,24 @@ func TestSerializeInvocationDoesNotBlockWaits(t *testing.T) {
 	for _, argv := range [][]string{{"agent", "wait", "ho-1"}, {"agent", "capture", "ho-1"}, {"log", "0"}, {"history"}} {
 		if serializeInvocation(argv) {
 			t.Fatalf("expected %v not to serialize", argv)
+		}
+	}
+}
+
+func TestBridgeAllowsOnlyScopedSessionDestroyShape(t *testing.T) {
+	for _, argv := range [][]string{
+		{"session", "cleanup", "sess-child"},
+	} {
+		if err := validateArgv(argv); err != nil {
+			t.Fatalf("argv %v rejected: %v", argv, err)
+		}
+	}
+	for _, argv := range [][]string{
+		{"session", "list"}, {"session", "get", "sess-child"},
+		{"session", "destroy", "sess-child"}, {"session", "cleanup", "sess-child", "--unknown"},
+	} {
+		if err := validateArgv(argv); err == nil {
+			t.Fatalf("argv %v must be rejected", argv)
 		}
 	}
 }

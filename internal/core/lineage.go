@@ -135,15 +135,23 @@ func rememberBridgeToken(sessionID, token string) error {
 }
 
 func forgetBridgeToken(sessionID string) {
+	_ = forgetBridgeTokenChecked(sessionID)
+}
+
+func forgetBridgeTokenChecked(sessionID string) error {
 	if EnsureAuthorityWritable() != nil {
-		return
+		return EnsureAuthorityWritable()
 	}
 	unlock, err := lockAuthorityWrite()
 	if err != nil {
-		return
+		return err
 	}
 	defer unlock()
-	_ = os.Remove(bridgeTokenPath(sessionID))
+	err = os.Remove(bridgeTokenPath(sessionID))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
 
 // AuthorizeBridgeSource binds a forwarded request to the unguessable token

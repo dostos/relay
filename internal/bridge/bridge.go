@@ -255,7 +255,7 @@ func serializeInvocation(argv []string) bool {
 		return true
 	}
 	switch filtered[0] + " " + filtered[1] {
-	case "agent start", "agent done", "handoff finalize", "handoff reconcile", "parent reply", "parent ack", "parent state", "parent retire":
+	case "agent start", "agent done", "handoff finalize", "handoff reconcile", "parent reply", "parent ack", "parent state", "parent retire", "session cleanup":
 		return true
 	}
 	// `relay handoff -H …` is the launch form; its second token is a flag.
@@ -267,6 +267,10 @@ func desktopInvokeEnv(env []string) []string {
 		"CMUX_WORKSPACE_ID": true,
 		"CMUX_SURFACE_REF":  true,
 		"CMUX_SURFACE":      true,
+		SourceSessionEnv:    true,
+		SourceHostEnv:       true,
+		SourcePersistEnv:    true,
+		SourceTokenEnv:      true,
 	}
 	out := make([]string, 0, len(env))
 	for _, entry := range env {
@@ -317,6 +321,11 @@ func validateArgv(argv []string) error {
 		return nil
 	}
 	switch filtered[0] {
+	case "session":
+		if len(filtered) != 3 || filtered[1] != "cleanup" || strings.HasPrefix(filtered[2], "-") {
+			return fmt.Errorf("only relay session cleanup ID is allowed through the desktop bridge")
+		}
+		return nil
 	case "resume":
 		// Session discovery must use the host probe, not the optimistic local
 		// registry. Keep interactive resume and registry mutation desktop-only.

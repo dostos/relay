@@ -539,14 +539,62 @@ func (s *SessionService) Destroy(ctx context.Context, id string, keepRemote bool
 			return err
 		}
 		// Intentional teardown — cmux must not treat this as a reconnectable drop.
-		MarkResumeCleaned(sess.Persist.Name, "destroyed")
-		forgetBridgeToken(sess.ID)
 		return nil
 	} else {
 		// Local unbound; remote kept → disconnected/resumable.
 		RememberResume(sess)
 	}
-	return DeleteSessionProjected(ctx, s.Reg, s.Viz, sess, false)
+	return deleteSessionsProjected(ctx, s.Reg, s.Viz, []*Session{sess}, false, nil, nil, false)
+}
+
+// CleanupFailedChild lets an authenticated manager retire only its own failed
+// direct handoff child. Authorization and deletion reservation share the same
+// authority transaction, preventing lineage races.
+func (s *SessionService) CleanupFailedChild(ctx context.Context, managerID, childID string) error {
+	var current *Session
+	authorize := func(sess *Session, handoffs []*Handoff) error {
+		if _, err := s.Reg.GetSession(managerID); err != nil {
+			return fmt.Errorf("authenticated manager is no longer authoritative: %w", err)
+		}
+		if sess.SourceSessionID != managerID {
+			return fmt.Errorf("session cleanup is limited to an authenticated manager's direct children")
+		}
+		if sess.CreatedByHandoffID == "" || sess.Labels["role"] != "handoff" {
+			return fmt.Errorf("session %s is not a handoff child", sess.ID)
+		}
+		for _, handoff := range handoffs {
+			if handoff.ID == sess.CreatedByHandoffID && !handoffTerminal(handoff) {
+				return fmt.Errorf("session %s belongs to active handoff %s", sess.ID, handoff.ID)
+			}
+		}
+		current = sess
+		return nil
+	}
+	teardown := func() error {
+		if current == nil {
+			return fmt.Errorf("session cleanup authorization did not resolve target")
+		}
+		t, err := s.transportFor(current)
+		if err != nil {
+			return err
+		}
+		exists, err := s.Persist.Exists(ctx, t, current.Persist)
+		if err != nil {
+			return err
+		}
+		if exists {
+			if err := s.Persist.Destroy(ctx, t, current.Persist); err != nil {
+				return err
+			}
+		}
+		clearBridgeIdentity(ctx, t, current.ID)
+		return nil
+	}
+	target := []*Session{{ID: childID}}
+	if err := deleteSessionsProjected(ctx, s.Reg, s.Viz, target, false, teardown, authorize, true); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ReplaceCreate kills any existing remote session with opts.Name (and local

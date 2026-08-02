@@ -73,15 +73,7 @@ func loadResumeRegistry() (*resumeRegistryFile, error) {
 	return &f, nil
 }
 
-func saveResumeRegistry(f *resumeRegistryFile) error {
-	if err := EnsureAuthorityWritable(); err != nil {
-		return err
-	}
-	unlock, err := lockAuthorityWrite()
-	if err != nil {
-		return err
-	}
-	defer unlock()
+func saveResumeRegistryLocked(f *resumeRegistryFile) error {
 	cutoff := time.Now().UTC().Add(-60 * 24 * time.Hour)
 	for k, e := range f.Entries {
 		if e.UpdatedAt.Before(cutoff) {
@@ -97,6 +89,25 @@ func saveResumeRegistry(f *resumeRegistryFile) error {
 		return err
 	}
 	return os.Rename(tmp, ResumeRegistryPath())
+}
+
+func updateResumeRegistry(mutate func(*resumeRegistryFile) error) error {
+	if err := EnsureAuthorityWritable(); err != nil {
+		return err
+	}
+	unlock, err := lockAuthorityWrite()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	f, err := loadResumeRegistry()
+	if err != nil {
+		return err
+	}
+	if err := mutate(f); err != nil {
+		return err
+	}
+	return saveResumeRegistryLocked(f)
 }
 
 // RememberResume marks a session resumable (create/present/disconnect path).
@@ -115,38 +126,45 @@ func RenameResumePersist(oldName string, sess *Session) error {
 	if err := shellquote.ValidateSessionName(sess.Persist.Name); err != nil {
 		return err
 	}
-	f, err := loadResumeRegistry()
-	if err != nil {
-		return err
-	}
-	delete(f.Entries, oldName)
-	f.Entries[sess.Persist.Name] = ResumeEntry{
-		HostID: sess.HostID, SessionID: sess.ID, RemoteCWD: sess.RemoteCWD,
-		RepoRef: sess.RepoRef, State: ResumeStateResumable,
-		Reason: "renamed", UpdatedAt: time.Now().UTC(),
-	}
-	return saveResumeRegistry(f)
+	return updateResumeRegistry(func(f *resumeRegistryFile) error {
+		delete(f.Entries, oldName)
+		f.Entries[sess.Persist.Name] = ResumeEntry{
+			HostID: sess.HostID, SessionID: sess.ID, RemoteCWD: sess.RemoteCWD,
+			RepoRef: sess.RepoRef, State: ResumeStateResumable,
+			Reason: "renamed", UpdatedAt: time.Now().UTC(),
+		}
+		return nil
+	})
 }
 
 // MarkResumeCleaned records intentional teardown — resume must refuse.
 func MarkResumeCleaned(persistName, reason string) {
+	_ = markResumeCleaned(persistName, reason)
+}
+
+func markResumeCleaned(persistName, reason string) error {
+	return markResumeCleanedForSession(persistName, "", reason)
+}
+
+func markResumeCleanedForSession(persistName, sessionID, reason string) error {
 	if err := shellquote.ValidateSessionName(persistName); err != nil {
-		return
+		return err
 	}
-	f, err := loadResumeRegistry()
-	if err != nil {
-		return
-	}
-	e := f.Entries[persistName]
-	e.State = ResumeStateCleaned
-	if reason == "" {
-		reason = "destroyed"
-	}
-	e.Reason = reason
-	e.UpdatedAt = time.Now().UTC()
-	// keep host/cwd for diagnostics
-	f.Entries[persistName] = e
-	_ = saveResumeRegistry(f)
+	return updateResumeRegistry(func(f *resumeRegistryFile) error {
+		e := f.Entries[persistName]
+		if sessionID != "" && e.SessionID != "" && e.SessionID != sessionID {
+			return nil
+		}
+		e.State = ResumeStateCleaned
+		if reason == "" {
+			reason = "destroyed"
+		}
+		e.Reason = reason
+		e.UpdatedAt = time.Now().UTC()
+		// keep host/cwd for diagnostics
+		f.Entries[persistName] = e
+		return nil
+	})
 }
 
 func upsertResume(sess *Session, state ResumeState, reason string) {
@@ -156,20 +174,13 @@ func upsertResume(sess *Session, state ResumeState, reason string) {
 	if err := shellquote.ValidateSessionName(sess.Persist.Name); err != nil {
 		return
 	}
-	f, err := loadResumeRegistry()
-	if err != nil {
-		return
-	}
-	f.Entries[sess.Persist.Name] = ResumeEntry{
-		HostID:    sess.HostID,
-		SessionID: sess.ID,
-		RemoteCWD: sess.RemoteCWD,
-		RepoRef:   sess.RepoRef,
-		State:     state,
-		Reason:    reason,
-		UpdatedAt: time.Now().UTC(),
-	}
-	_ = saveResumeRegistry(f)
+	_ = updateResumeRegistry(func(f *resumeRegistryFile) error {
+		f.Entries[sess.Persist.Name] = ResumeEntry{
+			HostID: sess.HostID, SessionID: sess.ID, RemoteCWD: sess.RemoteCWD,
+			RepoRef: sess.RepoRef, State: state, Reason: reason, UpdatedAt: time.Now().UTC(),
+		}
+		return nil
+	})
 }
 
 // PruneResume drops registry entries. When cleanedOnly is set only cleaned
@@ -178,10 +189,6 @@ func upsertResume(sess *Session, state ResumeState, reason string) {
 // removed persist names. Bounds the tombstone growth that otherwise only clears
 // on the 60-day sweep in saveResumeRegistry.
 func PruneResume(cleanedOnly bool, olderThan time.Duration) ([]string, error) {
-	f, err := loadResumeRegistry()
-	if err != nil {
-		return nil, err
-	}
 	// A negative duration would put the cutoff in the future and match every
 	// entry — treat it as "no age filter" instead.
 	if olderThan < 0 {
@@ -189,22 +196,20 @@ func PruneResume(cleanedOnly bool, olderThan time.Duration) ([]string, error) {
 	}
 	cutoff := time.Now().UTC().Add(-olderThan)
 	var removed []string
-	for k, e := range f.Entries {
-		if cleanedOnly && e.State != ResumeStateCleaned {
-			continue
+	err := updateResumeRegistry(func(f *resumeRegistryFile) error {
+		for k, e := range f.Entries {
+			if cleanedOnly && e.State != ResumeStateCleaned {
+				continue
+			}
+			if olderThan > 0 && e.UpdatedAt.After(cutoff) {
+				continue
+			}
+			removed = append(removed, k)
+			delete(f.Entries, k)
 		}
-		if olderThan > 0 && e.UpdatedAt.After(cutoff) {
-			continue
-		}
-		removed = append(removed, k)
-		delete(f.Entries, k)
-	}
-	if len(removed) > 0 {
-		if err := saveResumeRegistry(f); err != nil {
-			return nil, err
-		}
-	}
-	return removed, nil
+		return nil
+	})
+	return removed, err
 }
 
 // LookupResume finds a registry entry (any state).

@@ -497,6 +497,7 @@ Sessions (explicit id; no guesswork):
   relay session attach ID             Interactive (humans only)
   relay session destroy ID [--keep-remote] [--keep-viz]
                                       Also closes the presented cmux pane; --keep-viz leaves it.
+  relay session cleanup ID            Manager-only cleanup of a failed direct child
   relay session sensors ID [--silence SEC]   Reinstall quiet idle/exit hooks
 
 Handoffs (goal-based / long-running):
@@ -1292,6 +1293,18 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 		// a headless/unbound session simply has no binding to close.
 		if closeViz && a.Viz != nil {
 			_ = a.Viz.Close(ctx, args[1])
+		}
+		return 0
+	case "cleanup":
+		if len(args) != 2 {
+			return a.fail(fmt.Errorf("usage: relay session cleanup ID"))
+		}
+		managerID := strings.TrimSpace(os.Getenv(bridge.SourceSessionEnv))
+		if managerID == "" {
+			return a.fail(fmt.Errorf("session cleanup requires an authenticated manager pane"))
+		}
+		if err := a.Sessions.CleanupFailedChild(ctx, managerID, args[1]); err != nil {
+			return a.fail(err)
 		}
 		return 0
 	case "sensors":

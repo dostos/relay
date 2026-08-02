@@ -59,7 +59,7 @@ func TestDestroyUsesExactSessionTarget(t *testing.T) {
 }
 
 func TestRenameUsesExactSessionTarget(t *testing.T) {
-	transport := &recordingTransport{errs: []error{errors.New("not found"), nil}}
+	transport := &recordingTransport{outputs: []string{"relay-absent", ""}}
 	if err := New().Rename(context.Background(), transport, ports.PersistHandle{Name: "apex"}, ports.PersistHandle{Name: "apex-v4"}); err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func (t *recordingTransport) Interactive(context.Context, string) error { return
 func (t *recordingTransport) InteractiveCommand(string) string          { return "" }
 
 func TestExistsUsesExactSessionName(t *testing.T) {
-	transport := &recordingTransport{err: errors.New("not found")}
+	transport := &recordingTransport{stdout: "relay-absent"}
 	exists, err := New().Exists(context.Background(), transport, ports.PersistHandle{Name: "engram"})
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +127,14 @@ func TestExistsUsesExactSessionName(t *testing.T) {
 		t.Fatalf("commands = %v", transport.commands)
 	}
 	command := transport.commands[0]
-	if !strings.Contains(command, "list-sessions") || !strings.Contains(command, "grep -Fqx -- 'engram'") {
+	if !strings.Contains(command, "has-session -t '=engram'") {
 		t.Fatalf("expected exact name lookup, got %q", command)
+	}
+}
+
+func TestExistsDoesNotTreatTransportFailureAsMissing(t *testing.T) {
+	transport := &recordingTransport{err: errors.New("ssh unavailable")}
+	if _, err := New().Exists(context.Background(), transport, ports.PersistHandle{Name: "engram"}); err == nil {
+		t.Fatal("transport failure was reported as an absent session")
 	}
 }
