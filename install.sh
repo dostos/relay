@@ -116,7 +116,7 @@ else
     else
       echo "relay: WARNING - supervisor restart did not restore all watchers; run: relay supervise --check" >&2
     fi
-  elif ! RELAY_BRIDGE_LOCAL_INVOKE=1 "$INSTALL_DIR/relay" supervise --check >/dev/null 2>&1; then
+  elif [[ ! -f "$STATE_ROOT/.viz-projection-only" ]] && ! RELAY_BRIDGE_LOCAL_INVOKE=1 "$INSTALL_DIR/relay" supervise --check >/dev/null 2>&1; then
     echo "relay: WARNING - live handoffs have no watcher and no supervisor installation was detected." >&2
     echo "relay:   inspect: relay supervise --check" >&2
   fi

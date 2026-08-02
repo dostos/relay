@@ -175,19 +175,29 @@ func validVizAck(meta map[string]any) bool {
 			return false
 		}
 	}
-	if meta["request_kind"] != "project" || meta["op"] != "upsert" {
-		return false
-	}
 	seq, ok := meta["request_seq"].(float64)
 	if !ok || seq < 1 || seq != float64(int64(seq)) {
 		return false
 	}
-	session, ok := meta["session_id"].(string)
-	if !ok || len(session) < 1 || len(session) > 128 || strings.ContainsAny(session, "\r\n\x00") {
-		return false
-	}
 	result, ok := meta["result"].(string)
 	if !ok || len(result) < 1 || len(result) > 8192 {
+		return false
+	}
+	build, ok := meta["build"].(string)
+	if !ok || len(build) < 1 || len(build) > 128 || strings.ContainsAny(build, "\r\n\x00") {
+		return false
+	}
+	kind, _ := meta["request_kind"].(string)
+	if kind == "update_relayd" || kind == "retire_control" {
+		_, hasSession := meta["session_id"]
+		_, hasOp := meta["op"]
+		return !hasSession && !hasOp && !strings.ContainsRune(result, '\x00')
+	}
+	if kind != "project" || meta["op"] != "upsert" {
+		return false
+	}
+	session, ok := meta["session_id"].(string)
+	if !ok || len(session) < 1 || len(session) > 128 || strings.ContainsAny(session, "\r\n\x00") {
 		return false
 	}
 	var receipt struct {
