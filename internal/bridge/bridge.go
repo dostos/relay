@@ -317,6 +317,13 @@ func validateArgv(argv []string) error {
 		return nil
 	}
 	switch filtered[0] {
+	case "resume":
+		// Session discovery must use the host probe, not the optimistic local
+		// registry. Keep interactive resume and registry mutation desktop-only.
+		if len(filtered) == 3 && filtered[1] == "list" && filtered[2] == "--probe" {
+			return nil
+		}
+		return fmt.Errorf("only relay resume list --probe is allowed through the desktop bridge")
 	case "parent":
 		if len(filtered) < 2 {
 			return fmt.Errorf("parent subcommand required")

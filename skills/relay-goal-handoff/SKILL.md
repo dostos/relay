@@ -21,9 +21,12 @@ Read these references as needed:
 2. Infer the immediate parent from the authenticated current session. Ask for a
    parent only when no authenticated edge exists and the choice changes where
    decisions go. Never ask the user to name a role.
-3. Inspect `relay session list` and `relay handoff list`. Reuse a healthy goal
-   session or restart its handoff when appropriate; do not duplicate work based
-   only on a display name.
+3. Run `relay resume list --probe` and `relay handoff list`. Treat only
+   `remote_alive: true` as confirmed active. `host_reachable: false` means
+   unknown, never dead. Do not inspect `sessions.json`, resume registry files,
+   or unprobed `relay session list` to decide liveness. Reuse a confirmed-live
+   goal session or restart its handoff when appropriate; do not duplicate work
+   based only on a display name.
 4. Classify the task and choose the execution form using `selection.md`.
 5. Convert the request into the goal contract from `goal-contract.md`. Preserve
    user constraints verbatim, but avoid prescribing ordinary implementation
@@ -41,6 +44,10 @@ Read these references as needed:
    poll, repeatedly capture, rewrite the plan, or send unsolicited tactical
    instructions. Intervene only for a child request, a violated boundary, a
    verified stall, or new user intent.
+
+The immediate manager owns the conclusion: accept, redirect, restart, or ask
+upward. A child supplies evidence and recommendations but does not make its
+manager's acceptance decision or report past that manager.
 
 Stop on every trust, login, security, or permission gate. Surface it to the
 human without sending text or Enter.

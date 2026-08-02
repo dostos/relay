@@ -43,6 +43,12 @@ func TestRejectInteractiveForward(t *testing.T) {
 	if err := validateArgv([]string{"resume", "--session", "x"}); err == nil {
 		t.Fatal("expected resume to be rejected")
 	}
+	if err := validateArgv([]string{"resume", "list"}); err == nil {
+		t.Fatal("expected unprobed resume list to be rejected")
+	}
+	if err := validateArgv([]string{"resume", "reap", "--dry-run"}); err == nil {
+		t.Fatal("expected resume mutation to be rejected")
+	}
 	if err := validateArgv([]string{"session", "attach", "x"}); err == nil {
 		t.Fatal("expected session attach to be rejected")
 	}
@@ -51,6 +57,7 @@ func TestRejectInteractiveForward(t *testing.T) {
 func TestBridgeAllowlist(t *testing.T) {
 	for _, argv := range [][]string{
 		{"c1", "named"}, {"agent", "start", "c1", "codex", "--", "x"}, {"resolve", "pm-1", "yes"}, {"log", "0"}, {"--json", "history"},
+		{"resume", "list", "--probe"}, {"--json", "resume", "list", "--probe"},
 	} {
 		if err := validateArgv(argv); err != nil {
 			t.Fatalf("expected %v to be allowed: %v", argv, err)
