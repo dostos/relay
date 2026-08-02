@@ -74,6 +74,14 @@ func loadResumeRegistry() (*resumeRegistryFile, error) {
 }
 
 func saveResumeRegistry(f *resumeRegistryFile) error {
+	if err := EnsureAuthorityWritable(); err != nil {
+		return err
+	}
+	unlock, err := lockAuthorityWrite()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	cutoff := time.Now().UTC().Add(-60 * 24 * time.Hour)
 	for k, e := range f.Entries {
 		if e.UpdatedAt.Before(cutoff) {

@@ -31,6 +31,7 @@ type GCHostResult struct {
 	Host           string   `json:"host"`
 	Reachable      bool     `json:"reachable"`
 	ReapedSessions []string `json:"reaped_sessions,omitempty"`
+	HeldSessions   []string `json:"held_sessions,omitempty"`
 	GCedChannels   []string `json:"gced_channels,omitempty"`
 	KeptSessions   int      `json:"kept_sessions"`
 	KeptChannels   int      `json:"kept_channels"`
@@ -43,7 +44,7 @@ type GCReport struct {
 	PaneFilesRemoved   int            `json:"pane_files_removed"`
 	VizBindingsRemoved int            `json:"viz_bindings_removed"`
 	TombstonesPruned   int            `json:"tombstones_pruned"`
-	LineageRepaired    []string       `json:"lineage_repaired,omitempty"`
+	DanglingLineage    []string       `json:"dangling_lineage,omitempty"`
 }
 
 type channelStat struct {
@@ -98,9 +99,7 @@ func (m *MaintenanceService) GC(ctx context.Context, hosts []string, channelTTL 
 		}()
 	}
 	wg.Wait()
-	if !dryRun {
-		report.LineageRepaired = m.repairDanglingLineage()
-	}
+	report.DanglingLineage = m.danglingLineage()
 
 	// Local: prune the tombstones (including ones this sweep just created).
 	if !dryRun {
@@ -111,7 +110,7 @@ func (m *MaintenanceService) GC(ctx context.Context, hosts []string, channelTTL 
 	return report, nil
 }
 
-func (m *MaintenanceService) repairDanglingLineage() []string {
+func (m *MaintenanceService) danglingLineage() []string {
 	if m.Reg == nil {
 		return nil
 	}
@@ -120,42 +119,16 @@ func (m *MaintenanceService) repairDanglingLineage() []string {
 		return nil
 	}
 	byID := map[string]*Session{}
-	var apex *Session
 	for _, sess := range sessions {
 		byID[sess.ID] = sess
-		if sess.Labels[ApexLabel] == "true" {
-			apex = sess
-		}
 	}
-	if apex == nil {
-		return nil
-	}
-	handoffs, _ := m.Reg.ListHandoffs()
-	bySession := map[string]*Handoff{}
-	for _, ho := range handoffs {
-		bySession[ho.SessionID] = ho
-	}
-	var repaired []string
+	var dangling []string
 	for _, sess := range sessions {
-		if sess.ID == apex.ID || sess.SourceSessionID == "" || byID[sess.SourceSessionID] != nil {
-			continue
+		if sess.SourceSessionID != "" && byID[sess.SourceSessionID] == nil {
+			dangling = append(dangling, sess.ID)
 		}
-		sess.SourceSessionID, sess.SourceHostID, sess.SourcePersistName = apex.ID, apex.HostID, apex.Persist.Name
-		sess.UpdatedAt = time.Now().UTC()
-		if m.Reg.PutSession(sess) != nil {
-			continue
-		}
-		if ho := bySession[sess.ID]; ho != nil {
-			ho.SourceSessionID, ho.SourceHostID, ho.SourcePersistName = apex.ID, apex.HostID, apex.Persist.Name
-			ho.UpdatedAt = sess.UpdatedAt
-			_ = m.Reg.PutHandoff(ho)
-		}
-		if binder, ok := m.Viz.(interface{ ReparentBinding(string, string) error }); ok {
-			_ = binder.ReparentBinding(sess.ID, apex.ID)
-		}
-		repaired = append(repaired, sess.ID)
 	}
-	return repaired
+	return dangling
 }
 
 func (m *MaintenanceService) registryHosts() []string {
@@ -209,14 +182,18 @@ func (m *MaintenanceService) gcHost(ctx context.Context, host string, channelTTL
 			res.KeptSessions++
 			continue
 		}
+		if children, childErr := m.Reg.DirectChildren(s.ID); childErr != nil || len(children) > 0 {
+			res.HeldSessions = append(res.HeldSessions, s.Persist.Name)
+			continue
+		}
 		res.ReapedSessions = append(res.ReapedSessions, s.Persist.Name)
 		if dryRun {
 			continue
 		}
-		if m.Viz != nil {
-			_ = m.Viz.Close(ctx, s.ID)
+		if err := DeleteSessionProjected(ctx, m.Reg, m.Viz, s, false); err != nil {
+			res.HeldSessions = append(res.HeldSessions, s.Persist.Name)
+			continue
 		}
-		_ = m.Reg.DeleteSession(s.ID)
 		MarkResumeCleaned(s.Persist.Name, "gc: remote tmux absent")
 		RemovePaneBindingsForPersist(s.Persist.Name)
 	}
@@ -228,6 +205,10 @@ func (m *MaintenanceService) gcHost(ctx context.Context, host string, channelTTL
 	now := time.Now().Unix()
 	var toGC []string
 	for _, c := range channels {
+		if strings.HasPrefix(c.name, "relay-viz-") {
+			res.KeptChannels++
+			continue
+		}
 		stale := c.lines == 0 || (channelTTL > 0 && now-c.mtime > int64(channelTTL.Seconds()))
 		if stale {
 			res.GCedChannels = append(res.GCedChannels, c.name)

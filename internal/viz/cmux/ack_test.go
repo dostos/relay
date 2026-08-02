@@ -21,9 +21,9 @@ func TestApplyPresentationAckReplacesQueuedReference(t *testing.T) {
 	if err := reg.PutSession(sess); err != nil {
 		t.Fatal(err)
 	}
-	result, _ := json.Marshal(map[string]string{"surface": "surface:42", "workspace": "workspace:9", "pane": "pane:2"})
+	result, _ := json.Marshal(map[string]any{"session_id": sess.ID, "revision": int64(17), "surface": "surface:42"})
 	event := coord.Event{Seq: 3, Kind: "viz_ack", Meta: map[string]any{
-		"request_seq": float64(17), "request_kind": "present", "result": string(result),
+		"request_seq": float64(17), "request_kind": "project", "op": "upsert", "session_id": sess.ID, "result": string(result),
 	}}
 	if err := applyPresentationAck(reg, event); err != nil {
 		t.Fatal(err)
@@ -52,7 +52,7 @@ func TestApplyPresentationAckIgnoresRetiredSession(t *testing.T) {
 	}
 }
 
-func TestApplyPresentationAckAcceptsLegacyBareSurface(t *testing.T) {
+func TestApplyPresentationAckRefusesLegacyBareSurface(t *testing.T) {
 	t.Setenv("RELAY_STATE_DIR", t.TempDir())
 	reg := &core.Registry{}
 	sess := &core.Session{ID: "sess-old", VizSurfaceRef: "viz:queued:1", CreatedAt: time.Now().UTC()}
@@ -66,7 +66,35 @@ func TestApplyPresentationAckAcceptsLegacyBareSurface(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ := reg.GetSession(sess.ID)
-	if got.VizSurfaceRef != "surface:256" {
+	if got.VizSurfaceRef != "viz:queued:1" {
 		t.Fatalf("viz ref = %q", got.VizSurfaceRef)
+	}
+}
+
+func TestApplyProjectionAckRequiresMatchingSessionAndRevision(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	reg := &core.Registry{}
+	sess := &core.Session{ID: "sess-current", VizSurfaceRef: "viz:queued:22", CreatedAt: time.Now().UTC()}
+	if err := reg.PutSession(sess); err != nil {
+		t.Fatal(err)
+	}
+	result, _ := json.Marshal(map[string]any{"session_id": sess.ID, "revision": int64(22), "surface": "surface:279"})
+	event := coord.Event{Kind: "viz_ack", Meta: map[string]any{
+		"request_seq": float64(22), "request_kind": "project", "op": "upsert", "session_id": sess.ID, "result": string(result),
+	}}
+	if err := applyPresentationAck(reg, event); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := reg.GetSession(sess.ID)
+	if got.VizSurfaceRef != "surface:279" {
+		t.Fatalf("viz ref=%q", got.VizSurfaceRef)
+	}
+
+	sess.VizSurfaceRef = "viz:queued:23"
+	_ = reg.PutSession(sess)
+	event.Meta["request_seq"] = float64(23)
+	event.Meta["result"] = string(result) // still revision 22
+	if err := applyPresentationAck(reg, event); err == nil {
+		t.Fatal("mismatched projection receipt must fail")
 	}
 }

@@ -3,14 +3,15 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/dostos/relay/internal/bridge"
@@ -35,6 +36,8 @@ func main() {
 		os.Exit(cmdBridge(os.Args[2:]))
 	case "viz":
 		os.Exit(cmdViz(os.Args[2:]))
+	case "viz-broker":
+		os.Exit(cmdVizBroker(os.Args[2:]))
 	case "control":
 		os.Exit(cmdControl(os.Args[2:]))
 	case "ping":
@@ -70,13 +73,103 @@ Usage:
                                Optional visualization service (local policy)
   relayd viz sync             Consume queued requests from the control host
   relayd viz follow           Keep consuming while the Mac is awake
-  relayd control export|import|serve
+  relayd viz-broker --service NAME
+                               Forced-command endpoint for a Viz-only SSH key
+  relayd control export|serve
                                Secure control-state migration over stdin/stdout
   relayd ping
   relayd status
   relayd emit -s SESS --kind KIND [--meta JSON]
   relayd subscribe -s SESS [--from N] [-f]
 `)
+}
+
+// cmdVizBroker is deliberately tiny enough to use as an authorized_keys
+// forced command. The key can only subscribe to its projection stream and
+// append acknowledgements to that stream's ack channel; it cannot invoke a
+// shell or any other relayd operation.
+func cmdVizBroker(args []string) int {
+	service := ""
+	if len(args) == 2 && args[0] == "--service" {
+		service = args[1]
+	}
+	if service == "" || !strings.HasPrefix(service, "relay-viz-") {
+		fmt.Fprintln(os.Stderr, "relayd viz-broker: valid --service required")
+		return 2
+	}
+	fields := strings.Fields(strings.TrimSpace(os.Getenv("SSH_ORIGINAL_COMMAND")))
+	if len(fields) == 4 && fields[0] == "viz-subscribe" && fields[1] == service {
+		from, err := strconv.ParseInt(fields[2], 10, 64)
+		follow := fields[3] == "1"
+		if err != nil || from < 0 || (fields[3] != "0" && fields[3] != "1") {
+			fmt.Fprintln(os.Stderr, "relayd viz-broker: invalid cursor")
+			return 2
+		}
+		if err := relayd.SubscribeLocal(sockPath(), service, from, follow, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
+	if len(fields) == 3 && fields[0] == "viz-ack" && fields[1] == service {
+		raw, err := base64.RawURLEncoding.DecodeString(fields[2])
+		if err != nil || len(raw) > 64<<10 {
+			fmt.Fprintln(os.Stderr, "relayd viz-broker: invalid acknowledgement")
+			return 2
+		}
+		var meta map[string]any
+		if json.Unmarshal(raw, &meta) != nil {
+			fmt.Fprintln(os.Stderr, "relayd viz-broker: invalid acknowledgement")
+			return 2
+		}
+		if !validVizAck(meta) {
+			fmt.Fprintln(os.Stderr, "relayd viz-broker: acknowledgement schema refused")
+			return 2
+		}
+		resp, err := relayd.EmitLocal(sockPath(), service+"-ack", "viz_ack", meta)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(resp)
+		return 0
+	}
+	fmt.Fprintln(os.Stderr, "relayd viz-broker: command refused")
+	return 126
+}
+
+func validVizAck(meta map[string]any) bool {
+	for key := range meta {
+		switch key {
+		case "request_seq", "request_kind", "result", "build", "session_id", "op":
+		default:
+			return false
+		}
+	}
+	if meta["request_kind"] != "project" || meta["op"] != "upsert" {
+		return false
+	}
+	seq, ok := meta["request_seq"].(float64)
+	if !ok || seq < 1 || seq != float64(int64(seq)) {
+		return false
+	}
+	session, ok := meta["session_id"].(string)
+	if !ok || len(session) < 1 || len(session) > 128 || strings.ContainsAny(session, "\r\n\x00") {
+		return false
+	}
+	result, ok := meta["result"].(string)
+	if !ok || len(result) < 1 || len(result) > 8192 {
+		return false
+	}
+	var receipt struct {
+		SessionID string `json:"session_id"`
+		Revision  int64  `json:"revision"`
+		Surface   string `json:"surface"`
+	}
+	if json.Unmarshal([]byte(result), &receipt) != nil {
+		return false
+	}
+	return receipt.SessionID == session && receipt.Revision == int64(seq) && strings.HasPrefix(receipt.Surface, "surface:") && len(receipt.Surface) <= 128
 }
 
 func cmdControl(args []string) int {
@@ -97,20 +190,6 @@ func cmdControl(args []string) int {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
-		return 0
-	case "import":
-		var bundle controlstate.Bundle
-		decoder := json.NewDecoder(io.LimitReader(os.Stdin, 64<<20))
-		if err := decoder.Decode(&bundle); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return 1
-		}
-		summary, err := controlstate.Import(&core.Registry{}, &bundle)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return 1
-		}
-		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "summary": summary})
 		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "relayd control: unknown command %q\n", args[0])

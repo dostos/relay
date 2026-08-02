@@ -58,8 +58,12 @@ type updateConfig struct {
 
 type binding struct {
 	V               int       `json:"v"`
+	Revision        int64     `json:"stream_revision,omitempty"`
+	Deleted         bool      `json:"deleted,omitempty"`
 	SessionID       string    `json:"session_id"`
 	SourceSessionID string    `json:"source_session_id,omitempty"`
+	Target          string    `json:"target,omitempty"`
+	TmuxName        string    `json:"tmux_name,omitempty"`
 	Surface         string    `json:"surface"`
 	Pane            string    `json:"pane,omitempty"`
 	Workspace       string    `json:"workspace,omitempty"`
@@ -139,20 +143,84 @@ func (v *Viz) PresentTarget(ctx context.Context, req ports.Presentation) (string
 	return v.Present(ctx, req.SessionID, attach, ports.Layout{Mode: "remote", SourceSessionID: req.ParentSessionID})
 }
 
+func (v *Viz) ApplyProjection(ctx context.Context, event ports.ProjectionEvent) (string, error) {
+	if event.V != 1 || event.Revision < 0 {
+		return "", fmt.Errorf("invalid visualization projection version/revision")
+	}
+	if strings.TrimSpace(event.Item.SessionID) == "" || len(event.Item.SessionID) > 128 || strings.ContainsAny(event.Item.SessionID, "\r\n\x00") {
+		return "", fmt.Errorf("invalid projection session id")
+	}
+	if event.Item.ParentSessionID != "" && (len(event.Item.ParentSessionID) > 128 || strings.ContainsAny(event.Item.ParentSessionID, "\r\n\x00")) {
+		return "", fmt.Errorf("invalid projection anchor session id")
+	}
+	if v.ServiceID != "" && v.Control == nil {
+		switch event.Op {
+		case ports.ProjectionUpsert:
+			seq, err := v.queuePresentation(event.Item)
+			return fmt.Sprintf("viz:queued:%d", seq), err
+		case ports.ProjectionFocus:
+			return "", v.queueFocus(event.Item)
+		case ports.ProjectionDelete:
+			return "", v.queueClose(event.Item.SessionID)
+		default:
+			return "", fmt.Errorf("unsupported visualization projection operation %q", event.Op)
+		}
+	}
+	if current, err := v.loadBinding(event.Item.SessionID); err == nil && current.Revision >= event.Revision {
+		return current.Surface, nil
+	}
+	switch event.Op {
+	case ports.ProjectionUpsert, ports.ProjectionFocus:
+		if err := validatePresentation(event.Item); err != nil {
+			return "", err
+		}
+		surface, err := v.PresentTarget(ctx, event.Item)
+		if err != nil {
+			return "", err
+		}
+		b, err := v.lookup(event.Item.SessionID)
+		if err != nil {
+			return "", err
+		}
+		b.Revision, b.Deleted = event.Revision, false
+		b.SourceSessionID, b.Target, b.TmuxName = event.Item.ParentSessionID, event.Item.Target, event.Item.TmuxName
+		if err := v.persistBinding(event.Item.SessionID, b); err != nil {
+			return "", err
+		}
+		if event.Op == ports.ProjectionFocus {
+			return surface, v.focusSurface(ctx, b)
+		}
+		return surface, nil
+	case ports.ProjectionDelete:
+		if err := v.Close(ctx, event.Item.SessionID); err != nil {
+			return "", err
+		}
+		now := time.Now().UTC()
+		b := binding{V: 2, Revision: event.Revision, Deleted: true, SessionID: event.Item.SessionID, CreatedAt: now, UpdatedAt: now}
+		if err := v.persistBinding(event.Item.SessionID, b); err != nil {
+			return "", err
+		}
+		return "", nil
+	default:
+		return "", fmt.Errorf("unsupported visualization projection operation %q", event.Op)
+	}
+}
+
 func (v *Viz) attachCommand(req ports.Presentation) (string, error) {
-	target := req.Target
+	mapped, ok := v.Targets[req.Target]
+	if !ok {
+		return "", fmt.Errorf("unknown visualization target policy %q", req.Target)
+	}
+	target := mapped.Host
 	sshArgs := []string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"}
-	if mapped, ok := v.Targets[target]; ok {
-		if !vizTargetRE.MatchString(mapped.Host) || (mapped.User != "" && !vizTargetRE.MatchString(mapped.User)) || mapped.Port < 0 || mapped.Port > 65535 {
-			return "", fmt.Errorf("invalid visualization target mapping for %q", target)
-		}
-		if mapped.Port > 0 {
-			sshArgs = append(sshArgs, "-p", strconv.Itoa(mapped.Port))
-		}
-		target = mapped.Host
-		if mapped.User != "" {
-			target = mapped.User + "@" + target
-		}
+	if !vizTargetRE.MatchString(mapped.Host) || (mapped.User != "" && !vizTargetRE.MatchString(mapped.User)) || mapped.Port < 0 || mapped.Port > 65535 {
+		return "", fmt.Errorf("invalid visualization target mapping for %q", req.Target)
+	}
+	if mapped.Port > 0 {
+		sshArgs = append(sshArgs, "-p", strconv.Itoa(mapped.Port))
+	}
+	if mapped.User != "" {
+		target = mapped.User + "@" + target
 	}
 	sshArgs = append(sshArgs, "-t", target, "--")
 	remoteTmux := "tmux attach-session -t " + shellquote.Quote("="+req.TmuxName)
@@ -404,14 +472,7 @@ func (v *Viz) NotifyParent(ctx context.Context, sessionID string, notice core.Pa
 		flash = append(flash, "--workspace", b.Workspace)
 	}
 	_, _ = v.run(ctx, flash...)
-	sess, _ := (&core.Registry{}).GetSession(sessionID)
-	if sess == nil || sess.Labels["wake_mode"] != "inject" {
-		return nil
-	}
-	if _, err := v.run(ctx, surfaceCommand("send", b.Surface, b.Workspace, "--", body)...); err != nil {
-		return err
-	}
-	return v.submitInjected(ctx, sessionID, b, notice.MessageID)
+	return nil
 }
 
 // surfaceCommand keeps multi-step input directed at the same pane even when
@@ -479,12 +540,6 @@ func (v *Viz) BindSurface(ctx context.Context, sessionID, attachCmd, surface str
 	v.mu.Unlock()
 	if err := v.persistBinding(sessionID, b); err != nil {
 		return "", err
-	}
-	reg := &core.Registry{}
-	if sess, err := reg.GetSession(sessionID); err == nil {
-		sess.VizSurfaceRef = surface
-		sess.UpdatedAt = time.Now().UTC()
-		_ = reg.PutSession(sess)
 	}
 	v.rememberPane(sessionID, surface, sessName)
 	return surface, nil
@@ -897,10 +952,6 @@ func firstNonEmpty(values ...string) string {
 }
 
 func (v *Viz) rememberPane(sessionID, surface, persistName string) {
-	if sess, err := (&core.Registry{}).GetSession(sessionID); err == nil {
-		core.RememberPane(surface, sess, true)
-		return
-	}
 	cwd, _ := os.Getwd()
 	core.RememberPanePersist(surface, persistName, "", "", cwd, true)
 }
@@ -917,28 +968,9 @@ func extractSessionFlag(cmd string) string {
 
 func (v *Viz) Focus(ctx context.Context, sessionID string) error {
 	b, err := v.lookup(sessionID)
-	if err == nil {
-		locations, locationsErr := v.liveSurfaceLocations(ctx)
-		if locationsErr != nil {
-			return locationsErr
-		}
-		if locations[b.Surface].Workspace != "" {
-			return v.focusSurface(ctx, b)
-		}
-		v.invalidateBinding(sessionID, b)
+	if err != nil {
+		return err
 	}
-	sess, findErr := (&core.Registry{}).GetSession(sessionID)
-	if findErr != nil {
-		return findErr
-	}
-	surface := v.surfaceForPersist(ctx, sess.Persist.Name)
-	if surface == "" {
-		return fmt.Errorf("no live viz surface for session %s", sessionID)
-	}
-	if _, bindErr := v.BindSurface(ctx, sessionID, core.ResumeLaunchCmd(sess.Persist.Name), surface); bindErr != nil {
-		return bindErr
-	}
-	b, _ = v.lookup(sessionID)
 	return v.focusSurface(ctx, b)
 }
 
@@ -948,12 +980,6 @@ func (v *Viz) invalidateBinding(sessionID string, b binding) {
 	v.mu.Unlock()
 	_ = os.Remove(bindPath(sessionID))
 	_ = core.RemovePaneBinding(b.Surface)
-	reg := &core.Registry{}
-	if sess, err := reg.GetSession(sessionID); err == nil && sess.VizSurfaceRef == b.Surface {
-		sess.VizSurfaceRef = ""
-		sess.UpdatedAt = time.Now().UTC()
-		_ = reg.PutSession(sess)
-	}
 }
 
 // surfaceForPersist returns a live relay surface only for an exact checkpoint
@@ -1136,55 +1162,50 @@ func (v *Viz) SaveRestorable(ctx context.Context) (int, error) {
 	}
 	saved := 0
 	for ref := range live {
-		name, _, cwd := v.relayCheckpoint(ctx, ref)
+		name, cmd, cwd := v.relayCheckpoint(ctx, ref)
 		if name == "" {
 			continue
 		}
-		sess, findErr := (&core.Registry{}).FindByPersistName(name, cwd)
-		displayName := name
-		if findErr == nil {
-			displayName = core.SessionDisplayName(sess)
+		if cmd == "" {
+			cmd = v.attachForSurface(ref)
 		}
-		// cmux returns a shell-rendered command from resume get. Reusing that
-		// value compounds quoting on every save, so always regenerate the
-		// canonical Relay argv from the checkpoint identity.
-		cmd := core.ResumeLaunchCmd(name)
+		if cmd == "" {
+			continue
+		}
 		if _, err := v.run(ctx, "surface", "resume", "set",
 			"--surface", ref,
 			"--kind", "relay",
-			"--name", brandTitle(displayName),
+			"--name", brandTitle(name),
 			"--checkpoint", name,
 			"--", cmd,
 		); err == nil {
-			_ = v.brandSurface(ctx, ref, displayName)
+			_ = v.brandSurface(ctx, ref, name)
 			if cwd == "" {
 				cwd, _ = os.Getwd()
 			}
-			if findErr == nil {
-				core.RememberPane(ref, sess, true)
-				loc := v.locationOfSurface(ctx, ref)
-				b := binding{
-					V: 2, SessionID: sess.ID, Surface: ref, Pane: loc.Pane,
-					Workspace: loc.Workspace, Attach: cmd, Mode: "current",
-					CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
-				}
-				if old, lookupErr := v.lookup(sess.ID); lookupErr == nil {
-					b.SourceSessionID = old.SourceSessionID
-					if !old.CreatedAt.IsZero() {
-						b.CreatedAt = old.CreatedAt
-					}
-					if old.Mode != "" {
-						b.Mode = old.Mode
-					}
-				}
-				_ = v.persistBinding(sess.ID, b)
-			} else {
-				core.RememberPanePersist(ref, name, "", "", cwd, true)
-			}
+			core.RememberPanePersist(ref, name, "", "", cwd, true)
 			saved++
 		}
 	}
 	return saved, nil
+}
+
+func (v *Viz) attachForSurface(surface string) string {
+	entries, _ := os.ReadDir(filepath.Join(core.StateRoot(), "viz"))
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(core.StateRoot(), "viz", entry.Name()))
+		if err != nil {
+			continue
+		}
+		var b binding
+		if json.Unmarshal(raw, &b) == nil && b.Surface == surface {
+			return b.Attach
+		}
+	}
+	return ""
 }
 
 func (v *Viz) relayBoundSurfaces(ctx context.Context) map[string]bool {
@@ -1458,7 +1479,37 @@ func (v *Viz) persistBinding(sessionID string, b binding) error {
 		b.CreatedAt = b.UpdatedAt
 	}
 	raw, _ := json.MarshalIndent(b, "", "  ")
-	return os.WriteFile(bindPath(sessionID), raw, 0o600)
+	path := bindPath(sessionID)
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".binding-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(raw); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func (v *Viz) loadBinding(sessionID string) (binding, error) {
@@ -1489,14 +1540,7 @@ func (v *Viz) ManagedPanes(ctx context.Context) ([]ManagedPane, error) {
 		return nil, err
 	}
 	locations, locationsErr := v.liveSurfaceLocations(ctx)
-	if locationsErr == nil {
-		v.clearGhostRegistrySurfaces(locations)
-		v.adoptUnboundSurfaces(ctx, locations)
-		entries, err = os.ReadDir(dir)
-		if err != nil {
-			return nil, err
-		}
-	} else {
+	if locationsErr != nil {
 		locations = map[string]surfaceLocation{}
 	}
 	panes := make([]ManagedPane, 0, len(entries))
@@ -1534,9 +1578,6 @@ func (v *Viz) ManagedPanes(ctx context.Context) ([]ManagedPane, error) {
 				b.Workspace, b.Pane, b.UpdatedAt = loc.Workspace, loc.Pane, time.Now().UTC()
 				migrated = true
 			}
-		} else if locationsErr == nil {
-			v.invalidateBinding(b.SessionID, b)
-			continue
 		}
 		if migrated {
 			_ = v.persistBinding(b.SessionID, b)
@@ -1560,60 +1601,12 @@ func (v *Viz) ManagedPanes(ctx context.Context) ([]ManagedPane, error) {
 	return panes, nil
 }
 
-// clearGhostRegistrySurfaces starts from authoritative rows, not binding
-// files, so a deleted binding cannot leave a dead surface advertised forever.
-func (v *Viz) clearGhostRegistrySurfaces(locations map[string]surfaceLocation) {
-	reg := &core.Registry{}
-	sessions, err := reg.ListSessions()
-	if err != nil {
-		return
-	}
-	for _, sess := range sessions {
-		ref := sess.VizSurfaceRef
-		if !strings.HasPrefix(ref, "surface:") || locations[ref].Workspace != "" {
-			continue
-		}
-		sess.VizSurfaceRef = ""
-		sess.UpdatedAt = time.Now().UTC()
-		_ = reg.PutSession(sess)
-		_ = core.RemovePaneBinding(ref)
-	}
-}
-
 func (v *Viz) liveSurfaceLocations(ctx context.Context) (map[string]surfaceLocation, error) {
 	out, err := v.run(ctx, "tree", "--all", "--json")
 	if err != nil {
 		return nil, err
 	}
 	return parseSurfaceLocations([]byte(out)), nil
-}
-
-func (v *Viz) adoptUnboundSurfaces(ctx context.Context, locations map[string]surfaceLocation) {
-	refs := make([]string, 0, len(locations))
-	for ref := range locations {
-		refs = append(refs, ref)
-	}
-	sort.Strings(refs)
-	reg := &core.Registry{}
-	for _, ref := range refs {
-		name, _, cwd := v.relayCheckpoint(ctx, ref)
-		if name == "" {
-			continue
-		}
-		sess, err := reg.FindByPersistName(name, cwd)
-		if err != nil {
-			continue
-		}
-		if current, lookupErr := v.lookup(sess.ID); lookupErr == nil {
-			if locations[current.Surface].Workspace != "" {
-				continue
-			}
-			v.invalidateBinding(sess.ID, current)
-		}
-		if _, err := v.BindSurface(ctx, sess.ID, core.ResumeLaunchCmd(name), ref); err != nil {
-			continue
-		}
-	}
 }
 
 // CaptureScreen reads the visible text of the pane bound to a session,

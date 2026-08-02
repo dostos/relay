@@ -12,6 +12,7 @@ import (
 	"github.com/dostos/relay/internal/coord"
 	coordrelayd "github.com/dostos/relay/internal/coord/relayd"
 	"github.com/dostos/relay/internal/core"
+	"github.com/dostos/relay/internal/ports"
 )
 
 func (v *Viz) ackCursorPath() string {
@@ -55,7 +56,8 @@ func (v *Viz) SyncAcks(ctx context.Context, reg *core.Registry) error {
 }
 
 func applyPresentationAck(reg *core.Registry, event coord.Event) error {
-	if stringMeta(event.Meta, "request_kind") != "present" {
+	kind := stringMeta(event.Meta, "request_kind")
+	if kind != "project" || stringMeta(event.Meta, "op") != string(ports.ProjectionUpsert) {
 		return nil
 	}
 	requestSeq, err := metaSequence(event.Meta["request_seq"])
@@ -64,11 +66,11 @@ func applyPresentationAck(reg *core.Registry, event coord.Event) error {
 	}
 	rawResult := stringMeta(event.Meta, "result")
 	var result struct {
-		Surface string `json:"surface"`
+		SessionID string `json:"session_id"`
+		Revision  int64  `json:"revision"`
+		Surface   string `json:"surface"`
 	}
-	if strings.HasPrefix(rawResult, "surface:") {
-		result.Surface = rawResult // compatibility with the first Viz client
-	} else if err := json.Unmarshal([]byte(rawResult), &result); err != nil {
+	if err := json.Unmarshal([]byte(rawResult), &result); err != nil {
 		return fmt.Errorf("invalid visualization ack result for request %d", requestSeq)
 	}
 	if strings.TrimSpace(result.Surface) == "" {
@@ -82,6 +84,9 @@ func applyPresentationAck(reg *core.Registry, event coord.Event) error {
 	for _, sess := range sessions {
 		if sess.VizSurfaceRef != queued {
 			continue
+		}
+		if result.SessionID != sess.ID || result.Revision != requestSeq || stringMeta(event.Meta, "session_id") != sess.ID {
+			return fmt.Errorf("visualization ack identity mismatch for request %d", requestSeq)
 		}
 		sess.VizSurfaceRef = result.Surface
 		sess.UpdatedAt = time.Now().UTC()

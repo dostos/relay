@@ -102,7 +102,32 @@ func TestGCDryRunNoMutation(t *testing.T) {
 	}
 }
 
-func TestRepairDanglingLineageMovesOnlyPreviouslyManagedSessionsToApex(t *testing.T) {
+func TestGCRefusesToReapManagerWithLiveChild(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	reg := &Registry{}
+	now := time.Now().UTC()
+	parent := &Session{ID: "s-parent", HostID: "h-ok", Persist: ports.PersistHandle{Kind: "tmux", Name: "gone-parent"}, CreatedAt: now}
+	child := &Session{ID: "s-child", HostID: "h-ok", Persist: ports.PersistHandle{Kind: "tmux", Name: "alive-child"}, SourceSessionID: parent.ID, CreatedAt: now}
+	_ = reg.PutSession(parent)
+	_ = reg.PutSession(child)
+	out := "@TMUX\nalive-child\n@CHAN\n"
+	sessions := &SessionService{Reg: reg, NewTransport: func(string) (ports.Transport, error) {
+		return &fakeTransport{id: "h-ok", outputs: map[string]string{"h-ok": out}}, nil
+	}}
+	m := &MaintenanceService{Sessions: sessions, Reg: reg, NewTransport: sessions.NewTransport}
+	report, err := m.GC(context.Background(), []string{"h-ok"}, 0, true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Hosts[0].HeldSessions) != 1 || report.Hosts[0].HeldSessions[0] != "gone-parent" {
+		t.Fatalf("report=%+v", report.Hosts[0])
+	}
+	if _, err := reg.GetSession(parent.ID); err != nil {
+		t.Fatal("manager with children was reaped")
+	}
+}
+
+func TestGCDiagnosesDanglingLineageWithoutChangingAuthority(t *testing.T) {
 	t.Setenv("RELAY_STATE_DIR", t.TempDir())
 	reg := &Registry{}
 	now := time.Now().UTC()
@@ -114,19 +139,15 @@ func TestRepairDanglingLineageMovesOnlyPreviouslyManagedSessionsToApex(t *testin
 			t.Fatal(err)
 		}
 	}
-	if err := reg.PutHandoff(&Handoff{ID: "ho-orphan", SessionID: orphan.ID, SourceSessionID: "sess-dead", Status: StatusRunning, CreatedAt: now}); err != nil {
-		t.Fatal(err)
-	}
 	m := &MaintenanceService{Reg: reg}
-	repaired := m.repairDanglingLineage()
-	if len(repaired) != 1 || repaired[0] != orphan.ID {
-		t.Fatalf("repaired=%v", repaired)
+	dangling := m.danglingLineage()
+	if len(dangling) != 1 || dangling[0] != orphan.ID {
+		t.Fatalf("dangling=%v", dangling)
 	}
 	gotOrphan, _ := reg.GetSession(orphan.ID)
 	gotRoot, _ := reg.GetSession(root.ID)
-	gotHandoff, _ := reg.GetHandoff("ho-orphan")
-	if gotOrphan.SourceSessionID != apex.ID || gotHandoff.SourceSessionID != apex.ID {
-		t.Fatalf("orphan session=%+v handoff=%+v", gotOrphan, gotHandoff)
+	if gotOrphan.SourceSessionID != "sess-dead" {
+		t.Fatalf("diagnostic changed authority: %+v", gotOrphan)
 	}
 	if gotRoot.SourceSessionID != "" {
 		t.Fatalf("intentional root was annexed: %+v", gotRoot)

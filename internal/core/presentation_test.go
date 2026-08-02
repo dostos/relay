@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"reflect"
 	"testing"
 
 	"github.com/dostos/relay/internal/ports"
@@ -13,8 +12,8 @@ type targetViz struct {
 	req ports.Presentation
 }
 
-func (v *targetViz) PresentTarget(_ context.Context, req ports.Presentation) (string, error) {
-	v.req = req
+func (v *targetViz) ApplyProjection(_ context.Context, event ports.ProjectionEvent) (string, error) {
+	v.req = event.Item
 	return "surface:1", nil
 }
 
@@ -26,7 +25,7 @@ func TestPresentSessionSendsIdentityWithoutPlacement(t *testing.T) {
 		t.Fatalf("ref=%q err=%v", ref, err)
 	}
 	want := (ports.Presentation{SessionID: sess.ID, ParentSessionID: sess.SourceSessionID, Target: sess.HostID, TmuxName: sess.Persist.Name})
-	if !reflect.DeepEqual(viz.req, want) {
+	if viz.req != want {
 		t.Fatalf("request=%+v want=%+v", viz.req, want)
 	}
 }

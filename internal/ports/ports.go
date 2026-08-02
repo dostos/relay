@@ -81,17 +81,31 @@ type Layout struct {
 // display. Geometry is deliberately absent: it belongs to user policy on the
 // visualization host.
 type Presentation struct {
-	SessionID       string            `json:"session_id"`
-	ParentSessionID string            `json:"parent_session_id,omitempty"`
-	Target          string            `json:"target"`
-	TmuxName        string            `json:"tmux_name"`
-	RemoteCWD       string            `json:"remote_cwd,omitempty"`
-	RepoRef         string            `json:"repo_ref,omitempty"`
-	Labels          map[string]string `json:"labels,omitempty"`
+	SessionID       string `json:"session_id"`
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+	Target          string `json:"target"`
+	TmuxName        string `json:"tmux_name"`
 }
 
-type TargetPresenter interface {
-	PresentTarget(ctx context.Context, req Presentation) (surfaceRef string, err error)
+type ProjectionOp string
+
+const (
+	ProjectionUpsert ProjectionOp = "upsert"
+	ProjectionDelete ProjectionOp = "delete"
+	ProjectionFocus  ProjectionOp = "focus"
+)
+
+// ProjectionEvent is display-only state emitted by the authoritative host.
+// Revision is the durable visualization-stream sequence, not authority data.
+type ProjectionEvent struct {
+	V        int          `json:"v"`
+	Revision int64        `json:"stream_revision"`
+	Op       ProjectionOp `json:"op"`
+	Item     Presentation `json:"item"`
+}
+
+type ProjectionSink interface {
+	ApplyProjection(context.Context, ProjectionEvent) (surfaceRef string, err error)
 }
 
 // Viz presents sessions to a human. cmux is the default; may be a no-op.

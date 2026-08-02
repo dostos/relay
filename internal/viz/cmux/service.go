@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -15,7 +16,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/dostos/relay/internal/controlstate"
 	"github.com/dostos/relay/internal/coord"
 	coordrelayd "github.com/dostos/relay/internal/coord/relayd"
 	"github.com/dostos/relay/internal/core"
@@ -45,14 +45,12 @@ func (v *Viz) queuePresentation(req ports.Presentation) (int64, error) {
 	if !v.queueAvailable() {
 		return 0, fmt.Errorf("visualization request queue unavailable")
 	}
-	resp, err := coordrelayd.EmitLocal(localRelaydSocket(), v.serviceChannel(), "present", map[string]any{
+	resp, err := coordrelayd.EmitLocal(localRelaydSocket(), v.serviceChannel(), "project", map[string]any{
+		"op":                string(ports.ProjectionUpsert),
 		"session_id":        req.SessionID,
 		"parent_session_id": req.ParentSessionID,
 		"target":            req.Target,
 		"tmux_name":         req.TmuxName,
-		"remote_cwd":        req.RemoteCWD,
-		"repo_ref":          req.RepoRef,
-		"labels":            req.Labels,
 	})
 	if err != nil {
 		return 0, err
@@ -64,8 +62,20 @@ func (v *Viz) queueClose(sessionID string) error {
 	if !v.queueAvailable() {
 		return fmt.Errorf("visualization request queue unavailable")
 	}
-	_, err := coordrelayd.EmitLocal(localRelaydSocket(), v.serviceChannel(), "close", map[string]any{
+	_, err := coordrelayd.EmitLocal(localRelaydSocket(), v.serviceChannel(), "project", map[string]any{
+		"op":         string(ports.ProjectionDelete),
 		"session_id": sessionID,
+	})
+	return err
+}
+
+func (v *Viz) queueFocus(req ports.Presentation) error {
+	if !v.queueAvailable() {
+		return fmt.Errorf("visualization request queue unavailable")
+	}
+	_, err := coordrelayd.EmitLocal(localRelaydSocket(), v.serviceChannel(), "project", map[string]any{
+		"op": string(ports.ProjectionFocus), "session_id": req.SessionID,
+		"parent_session_id": req.ParentSessionID, "target": req.Target, "tmux_name": req.TmuxName,
 	})
 	return err
 }
@@ -78,17 +88,6 @@ func (v *Viz) QueueUpdate() (int64, error) {
 		return 0, fmt.Errorf("update signals are emitted by the control host")
 	}
 	resp, err := coordrelayd.EmitLocal(localRelaydSocket(), v.serviceChannel(), "update_relayd", nil)
-	if err != nil {
-		return 0, err
-	}
-	return resp.Seq, nil
-}
-
-func (v *Viz) QueueControlMigration() (int64, error) {
-	if v.ServiceID == "" || v.Control != nil {
-		return 0, fmt.Errorf("control migration is requested by the destination control host")
-	}
-	resp, err := coordrelayd.EmitLocal(localRelaydSocket(), v.serviceChannel(), "migrate_control", nil)
 	if err != nil {
 		return 0, err
 	}
@@ -176,10 +175,14 @@ func (v *Viz) Follow(ctx context.Context, follow bool) error {
 	if v.ServiceID == "" || v.Control == nil {
 		return fmt.Errorf("visualization service_id and control are required")
 	}
-	command := v.remoteRelayd(fmt.Sprintf("subscribe -s %s --from %d", shellquote.Quote(v.serviceChannel()), v.loadCursor()))
-	if follow {
-		command += " -f"
+	if err := retireLocalAuthorityState(); err != nil {
+		return err
 	}
+	followBit := 0
+	if follow {
+		followBit = 1
+	}
+	command := fmt.Sprintf("viz-subscribe %s %d %d", v.serviceChannel(), v.loadCursor(), followBit)
 	args, err := v.controlSSHArgs(command)
 	if err != nil {
 		return err
@@ -228,20 +231,60 @@ func (v *Viz) Follow(ctx context.Context, follow bool) error {
 	return nil
 }
 
+// retireLocalAuthorityState makes the Viz host projection-only. The archived
+// files are recoverable, but no longer sit at paths a local Relay command can
+// mistake for current session, lineage, inbox, or credential authority.
+func retireLocalAuthorityState() error {
+	root := core.StateRoot()
+	marker := core.ProjectionOnlyMarkerPath()
+	archive := filepath.Join(root, "retired-local-authority", time.Now().UTC().Format("20060102T150405.000000000Z"))
+	createdArchive := false
+	paths := []string{
+		core.SessionsPath(), core.HandoffsDir(), core.ParentInboxDir(), core.ParentWatchDir(),
+		core.BridgeTokensDir(), core.BridgeIdentitiesDir(), core.ResumeRegistryPath(),
+		core.AuthorityDeletionDir(), core.DeletedManagerDir(), core.AuthorityReplacementPath(),
+	}
+	for _, source := range paths {
+		if _, err := os.Stat(source); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		if !createdArchive {
+			if err := os.MkdirAll(archive, 0o700); err != nil {
+				return err
+			}
+			createdArchive = true
+		}
+		target := filepath.Join(archive, filepath.Base(source))
+		if err := os.Rename(source, target); err != nil {
+			return fmt.Errorf("archive local authority %s: %w", source, err)
+		}
+	}
+	return os.WriteFile(marker, []byte("home control plane is authoritative\n"), 0o600)
+}
+
 func (v *Viz) handleServiceEvent(ctx context.Context, event coord.Event) (string, error) {
 	switch event.Kind {
-	case "present":
-		req := ports.Presentation{
-			SessionID:       stringMeta(event.Meta, "session_id"),
-			ParentSessionID: stringMeta(event.Meta, "parent_session_id"),
-			Target:          stringMeta(event.Meta, "target"),
-			TmuxName:        stringMeta(event.Meta, "tmux_name"),
-			RemoteCWD:       stringMeta(event.Meta, "remote_cwd"),
-			RepoRef:         stringMeta(event.Meta, "repo_ref"),
-			Labels:          stringMapMeta(event.Meta["labels"]),
+	case "project":
+		projection := ports.ProjectionEvent{
+			V: 1, Revision: event.Seq, Op: ports.ProjectionOp(stringMeta(event.Meta, "op")),
+			Item: presentationFromMeta(event.Meta),
 		}
-		v.rememberAuthoritativeSession(req)
-		surface, err := v.PresentTarget(ctx, req)
+		surface, err := v.ApplyProjection(ctx, projection)
+		if err != nil {
+			return "", err
+		}
+		location := v.locationOfSurface(ctx, surface)
+		result, _ := json.Marshal(map[string]any{
+			"session_id": projection.Item.SessionID, "revision": projection.Revision,
+			"surface": surface, "workspace": location.Workspace, "pane": location.Pane,
+			"parent_session_id": projection.Item.ParentSessionID,
+		})
+		return string(result), nil
+	case "present":
+		req := presentationFromMeta(event.Meta)
+		surface, err := v.ApplyProjection(ctx, ports.ProjectionEvent{V: 1, Revision: event.Seq, Op: ports.ProjectionUpsert, Item: req})
 		if err != nil {
 			return "", err
 		}
@@ -252,14 +295,12 @@ func (v *Viz) handleServiceEvent(ctx context.Context, event coord.Event) (string
 		})
 		return string(result), nil
 	case "close":
-		if err := v.Close(ctx, stringMeta(event.Meta, "session_id")); err != nil {
+		if _, err := v.ApplyProjection(ctx, ports.ProjectionEvent{V: 1, Revision: event.Seq, Op: ports.ProjectionDelete, Item: presentationFromMeta(event.Meta)}); err != nil {
 			return "", err
 		}
 		return "closed", nil
 	case "update_relayd":
 		return v.updateRelayd(ctx)
-	case "migrate_control":
-		return v.migrateControl(ctx)
 	case "retire_control":
 		return v.retireControl(ctx)
 	case "viz_ack":
@@ -269,37 +310,11 @@ func (v *Viz) handleServiceEvent(ctx context.Context, event coord.Event) (string
 	}
 }
 
-func (v *Viz) rememberAuthoritativeSession(req ports.Presentation) {
-	reg := &core.Registry{}
-	now := time.Now().UTC()
-	sess, err := reg.GetSession(req.SessionID)
-	if err != nil {
-		sess = &core.Session{ID: req.SessionID, CreatedAt: now}
+func presentationFromMeta(meta map[string]any) ports.Presentation {
+	return ports.Presentation{
+		SessionID: stringMeta(meta, "session_id"), ParentSessionID: stringMeta(meta, "parent_session_id"),
+		Target: stringMeta(meta, "target"), TmuxName: stringMeta(meta, "tmux_name"),
 	}
-	sess.HostID = req.Target
-	sess.RemoteCWD = req.RemoteCWD
-	sess.RepoRef = req.RepoRef
-	sess.Persist = ports.PersistHandle{Kind: "tmux", Name: req.TmuxName}
-	sess.SourceSessionID = req.ParentSessionID
-	if req.Labels != nil {
-		sess.Labels = req.Labels
-	}
-	sess.UpdatedAt = now
-	_ = reg.PutSession(sess)
-}
-
-func stringMapMeta(value any) map[string]string {
-	raw, ok := value.(map[string]any)
-	if !ok {
-		return nil
-	}
-	out := map[string]string{}
-	for key, value := range raw {
-		if text, ok := value.(string); ok {
-			out[key] = text
-		}
-	}
-	return out
 }
 
 func (v *Viz) retireControl(ctx context.Context) (string, error) {
@@ -384,45 +399,20 @@ func isLegacyBridgeCommand(command string) bool {
 	return len(fields) >= 2 && filepath.Base(fields[0]) == "relayd" && fields[1] == "bridge"
 }
 
-func (v *Viz) migrateControl(ctx context.Context) (string, error) {
-	bundle, err := controlstate.Export(&core.Registry{})
-	if err != nil {
-		return "", err
-	}
-	raw, err := json.Marshal(bundle)
-	if err != nil {
-		return "", err
-	}
-	args, err := v.controlSSHArgs(v.remoteRelayd("control import"))
-	if err != nil {
-		return "", err
-	}
-	cmd := exec.CommandContext(ctx, "ssh", args...)
-	cmd.Stdin = bytes.NewReader(raw)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("control import: %w (%s)", err, strings.TrimSpace(stderr.String()))
-	}
-	var response struct {
-		OK      bool                 `json:"ok"`
-		Summary controlstate.Summary `json:"summary"`
-	}
-	if json.Unmarshal(stdout.Bytes(), &response) != nil || !response.OK {
-		return "", fmt.Errorf("invalid control import response: %s", strings.TrimSpace(stdout.String()))
-	}
-	result, _ := json.Marshal(response.Summary)
-	return string(result), nil
-}
-
 func stringMeta(meta map[string]any, key string) string {
 	value, _ := meta[key].(string)
 	return value
 }
 
 func (v *Viz) emitAck(ctx context.Context, event coord.Event, result string) error {
-	meta, _ := json.Marshal(map[string]any{"request_seq": event.Seq, "request_kind": event.Kind, "result": result, "build": coord.Build})
-	command := v.remoteRelayd("emit -s " + shellquote.Quote(v.serviceChannel()+"-ack") + " --kind viz_ack --meta " + shellquote.Quote(string(meta)))
+	if event.Kind != "project" || stringMeta(event.Meta, "op") != string(ports.ProjectionUpsert) {
+		return nil
+	}
+	meta, _ := json.Marshal(map[string]any{
+		"request_seq": event.Seq, "request_kind": event.Kind, "result": result, "build": coord.Build,
+		"session_id": stringMeta(event.Meta, "session_id"), "op": stringMeta(event.Meta, "op"),
+	})
+	command := "viz-ack " + v.serviceChannel() + " " + base64.RawURLEncoding.EncodeToString(meta)
 	args, err := v.controlSSHArgs(command)
 	if err != nil {
 		return err

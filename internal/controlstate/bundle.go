@@ -89,6 +89,9 @@ func Export(reg *core.Registry) (*Bundle, error) {
 }
 
 func Import(reg *core.Registry, bundle *Bundle) (*Summary, error) {
+	if err := core.EnsureAuthorityWritable(); err != nil {
+		return nil, err
+	}
 	if bundle == nil || bundle.V != 1 {
 		return nil, fmt.Errorf("unsupported control bundle")
 	}

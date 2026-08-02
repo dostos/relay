@@ -1,6 +1,10 @@
 package core
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -8,6 +12,30 @@ import (
 
 	"github.com/dostos/relay/internal/ports"
 )
+
+type replacementProjectionViz struct {
+	fail  bool
+	items []ports.Presentation
+}
+
+func (*replacementProjectionViz) Kind() string                   { return "test" }
+func (*replacementProjectionViz) Available(context.Context) bool { return true }
+func (*replacementProjectionViz) Present(context.Context, string, string, ports.Layout) (string, error) {
+	return "", nil
+}
+func (*replacementProjectionViz) Focus(context.Context, string) error                  { return nil }
+func (*replacementProjectionViz) Close(context.Context, string) error                  { return nil }
+func (*replacementProjectionViz) Layout(context.Context) (string, error)               { return "", nil }
+func (*replacementProjectionViz) SaveRestorable(context.Context) (int, error)          { return 0, nil }
+func (*replacementProjectionViz) RestoreSaved(context.Context) (int, error)            { return 0, nil }
+func (*replacementProjectionViz) BrandLabels(context.Context, map[string]string) error { return nil }
+func (v *replacementProjectionViz) ApplyProjection(_ context.Context, event ports.ProjectionEvent) (string, error) {
+	if v.fail {
+		return "", errors.New("viz offline")
+	}
+	v.items = append(v.items, event.Item)
+	return "queued", nil
+}
 
 func newRootTestService(t *testing.T) (*RootService, *Registry) {
 	t.Helper()
@@ -268,6 +296,132 @@ func TestApexCanBeReleasedAndReplaced(t *testing.T) {
 	got, _ := reg.GetSession("sess-proj-a")
 	if got.Labels[ApexLabel] != "true" {
 		t.Fatalf("new apex not labelled: %v", got.Labels)
+	}
+}
+
+func TestReplaceApexMovesDirectChildrenAndHandoffs(t *testing.T) {
+	root, reg := newRootTestService(t)
+	if _, err := root.Adopt("sess-apex"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.Enroll("sess-proj-a"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	worker := &Session{ID: "sess-worker", SourceSessionID: "sess-apex", CreatedByHandoffID: "ho-worker", CreatedAt: now}
+	handoff := &Handoff{ID: "ho-worker", SessionID: worker.ID, SourceSessionID: "sess-apex", Status: StatusRunning, CreatedAt: now}
+	if err := reg.PutSession(worker); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.PutHandoff(handoff); err != nil {
+		t.Fatal(err)
+	}
+	result, err := root.Replace(context.Background(), &ParentService{Reg: reg}, "sess-apex", "sess-proj-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Reparented) != 2 {
+		t.Fatalf("replacement=%+v", result)
+	}
+	for _, id := range []string{"sess-proj-a", "sess-worker"} {
+		got, _ := reg.GetSession(id)
+		if got.SourceSessionID != "sess-proj-b" {
+			t.Fatalf("%s parent=%s", id, got.SourceSessionID)
+		}
+	}
+	gotHandoff, _ := reg.GetHandoff("ho-worker")
+	if gotHandoff.SourceSessionID != "sess-proj-b" {
+		t.Fatalf("handoff parent=%s", gotHandoff.SourceSessionID)
+	}
+	old, _ := reg.GetSession("sess-apex")
+	next, _ := reg.GetSession("sess-proj-b")
+	if old.Labels[ApexLabel] != "" || next.Labels[ApexLabel] != "true" {
+		t.Fatalf("old=%v next=%v", old.Labels, next.Labels)
+	}
+	if _, err := os.Stat(replacementIntentPath()); !os.IsNotExist(err) {
+		t.Fatalf("replacement intent remains: %v", err)
+	}
+}
+
+func TestReplaceApexRejectsSameSession(t *testing.T) {
+	root, _ := newRootTestService(t)
+	if _, err := root.Adopt("sess-apex"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.Replace(context.Background(), &ParentService{Reg: root.Reg}, "sess-apex", "sess-apex"); err == nil {
+		t.Fatal("same-session replacement must be rejected")
+	}
+}
+
+func TestRecoverReplacementConvergesSessionAndHandoffIndependently(t *testing.T) {
+	root, reg := newRootTestService(t)
+	if _, err := root.Adopt("sess-apex"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	child := &Session{ID: "sess-worker", SourceSessionID: "sess-proj-b", CreatedByHandoffID: "ho-worker", CreatedAt: now}
+	handoff := &Handoff{ID: "ho-worker", SessionID: child.ID, SourceSessionID: "sess-apex", Status: StatusRunning, CreatedAt: now}
+	if err := reg.PutSession(child); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.PutHandoff(handoff); err != nil {
+		t.Fatal(err)
+	}
+	intent := ManagerReplacement{V: 1, ID: "replace-crash", OldID: "sess-apex", NewID: "sess-proj-b", Children: []string{child.ID}, Created: now.Format(time.RFC3339Nano)}
+	raw, _ := json.Marshal(intent)
+	if err := os.WriteFile(replacementIntentPath(), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.RecoverReplacement(context.Background(), &ParentService{Reg: reg}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := reg.GetHandoff(handoff.ID)
+	if got.SourceSessionID != "sess-proj-b" {
+		t.Fatalf("handoff parent=%s", got.SourceSessionID)
+	}
+}
+
+func TestReplacementRecoveryUsesConvergedProjectionSnapshot(t *testing.T) {
+	root, reg := newRootTestService(t)
+	if _, err := root.Adopt("sess-apex"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.Enroll("sess-proj-a"); err != nil {
+		t.Fatal(err)
+	}
+	viz := &replacementProjectionViz{fail: true}
+	parents := &ParentService{Reg: reg, Viz: viz}
+	result, err := root.Replace(context.Background(), parents, "sess-apex", "sess-proj-b")
+	if err != nil || !result.ProjectionPending {
+		t.Fatalf("replace=%+v err=%v", result, err)
+	}
+	raw, err := os.ReadFile(replacementIntentPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var intent ManagerReplacement
+	if json.Unmarshal(raw, &intent) != nil || !intent.AuthorityConverged || len(intent.Projections) == 0 {
+		t.Fatalf("replacement not durably converged: %+v", intent)
+	}
+	if err := reg.DeleteSession("sess-proj-a"); err != nil {
+		t.Fatal(err)
+	}
+	viz.fail = false
+	result, err = root.RecoverReplacement(context.Background(), parents)
+	if err != nil || result.ProjectionPending {
+		t.Fatalf("recover=%+v err=%v", result, err)
+	}
+	found := false
+	for _, item := range viz.items {
+		if item.SessionID == "sess-proj-a" && item.ParentSessionID == "sess-proj-b" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("stored child projection not replayed: %+v", viz.items)
+	}
+	if _, err := os.Stat(replacementIntentPath()); !os.IsNotExist(err) {
+		t.Fatalf("completed intent remains: %v", err)
 	}
 }
 

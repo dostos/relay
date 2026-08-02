@@ -379,6 +379,16 @@ func (a *App) Run(args []string) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// Complete any durable authority transition before another command can
+	// observe or mutate a half-replaced hierarchy.
+	if a.Roots != nil && a.Parents != nil {
+		if _, err := a.Roots.RecoverReplacement(ctx, a.Parents); err != nil {
+			return a.fail(fmt.Errorf("recover authority replacement: %w", err))
+		}
+	}
+	if _, err := core.RecoverSessionDeletions(ctx, a.Reg, a.Viz); err != nil {
+		return a.fail(fmt.Errorf("recover session deletion: %w", err))
+	}
 	switch filtered[0] {
 	case "help", "-h", "--help":
 		return a.cmdHelp()
@@ -2219,7 +2229,7 @@ func (a *App) cmdRoot(ctx context.Context, args []string) int {
 	a.JSON = true
 	a.CompactJSON = true
 	if len(args) == 0 {
-		return a.fail(fmt.Errorf("usage: relay root adopt|release|enroll|unenroll|status|rules|digest …"))
+		return a.fail(fmt.Errorf("usage: relay root adopt|replace|release|enroll|unenroll|status|rules|digest …"))
 	}
 	// The digest is the human's decision queue and names every governed
 	// subtree, so it must never be readable by an arbitrary session. The bridge
@@ -2232,6 +2242,19 @@ func (a *App) cmdRoot(ctx context.Context, args []string) int {
 		}
 	}
 	sub, rest := args[0], args[1:]
+	if sub == "replace" {
+		if strings.TrimSpace(os.Getenv(bridge.SourceSessionEnv)) != "" {
+			return a.fail(fmt.Errorf("apex replacement requires direct human control-plane authority"))
+		}
+		if len(rest) != 2 || strings.HasPrefix(rest[0], "-") || strings.HasPrefix(rest[1], "-") {
+			return a.fail(fmt.Errorf("usage: relay root replace OLD_SESSION NEW_SESSION"))
+		}
+		result, err := a.Roots.Replace(ctx, a.Parents, rest[0], rest[1])
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "replacement": result}))
+	}
 	positional := ""
 	after := int64(0)
 	for i := 0; i < len(rest); i++ {
@@ -3101,17 +3124,6 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 		return a.fail(fmt.Errorf("viz adapter unavailable (is cmux running?)"))
 	}
 	switch args[0] {
-	case "migrate-control":
-		migrator, ok := a.Viz.(interface{ QueueControlMigration() (int64, error) })
-		if !ok {
-			return a.fail(fmt.Errorf("viz adapter does not expose control migration"))
-		}
-		seq, err := migrator.QueueControlMigration()
-		if err != nil {
-			return a.fail(err)
-		}
-		a.JSON = true
-		return a.errOut(a.out(map[string]any{"ok": true, "seq": seq, "kind": "migrate_control"}))
 	case "retire-control":
 		retirer, ok := a.Viz.(interface{ QueueControlRetirement() (int64, error) })
 		if !ok {
@@ -3245,8 +3257,13 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 		if len(args) < 2 {
 			return a.fail(fmt.Errorf("session id required"))
 		}
-		if err := a.Viz.Focus(ctx, args[1]); err != nil {
+		sess, err := a.Sessions.Get(args[1])
+		if err != nil {
 			return a.fail(err)
+		}
+		_, focusErr := core.ProjectSession(ctx, a.Viz, sess, ports.ProjectionFocus)
+		if focusErr != nil {
+			return a.fail(focusErr)
 		}
 		return 0
 	case "close":

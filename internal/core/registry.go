@@ -2,19 +2,34 @@ package core
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
 	"time"
 )
 
+var ErrSessionNotFound = errors.New("session not found")
+
 // Registry is the local durable store for sessions and handoffs.
 type Registry struct {
-	mu sync.Mutex
+	mu   sync.Mutex
+	txMu sync.RWMutex
 }
 
 type sessionStore struct {
 	Sessions map[string]*Session `json:"sessions"`
+}
+
+// EnsureAuthorityWritable is the single role boundary for durable control-plane
+// stores. Projection code writes only under viz/ and must never call it.
+func EnsureAuthorityWritable() error {
+	if _, err := os.Stat(ProjectionOnlyMarkerPath()); err == nil {
+		return fmt.Errorf("local relay is visualization-only; authoritative registry mutation refused")
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func (r *Registry) loadSessions() (*sessionStore, error) {
@@ -51,8 +66,25 @@ func (r *Registry) saveSessions(s *sessionStore) error {
 }
 
 func (r *Registry) PutSession(sess *Session) error {
+	r.txMu.RLock()
+	defer r.txMu.RUnlock()
+	if err := EnsureAuthorityWritable(); err != nil {
+		return err
+	}
+	unlock, err := lockAuthorityWrite()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return r.putSessionLocked(sess)
+}
+
+func (r *Registry) putSessionLocked(sess *Session) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if managerDeletionReserved(sess.SourceSessionID) {
+		return fmt.Errorf("manager %s is reserved for deletion", sess.SourceSessionID)
+	}
 	s, err := r.loadSessions()
 	if err != nil {
 		return err
@@ -71,7 +103,7 @@ func (r *Registry) GetSession(id string) (*Session, error) {
 	}
 	sess, ok := s.Sessions[id]
 	if !ok {
-		return nil, fmt.Errorf("session %q not found", id)
+		return nil, fmt.Errorf("%w: %q", ErrSessionNotFound, id)
 	}
 	cp := *sess
 	return &cp, nil
@@ -93,6 +125,20 @@ func (r *Registry) ListSessions() ([]*Session, error) {
 }
 
 func (r *Registry) DeleteSession(id string) error {
+	r.txMu.RLock()
+	defer r.txMu.RUnlock()
+	if err := EnsureAuthorityWritable(); err != nil {
+		return err
+	}
+	unlock, err := lockAuthorityWrite()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return r.deleteSessionLocked(id)
+}
+
+func (r *Registry) deleteSessionLocked(id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s, err := r.loadSessions()
@@ -108,8 +154,25 @@ func handoffPath(id string) string {
 }
 
 func (r *Registry) PutHandoff(h *Handoff) error {
+	r.txMu.RLock()
+	defer r.txMu.RUnlock()
+	if err := EnsureAuthorityWritable(); err != nil {
+		return err
+	}
+	unlock, err := lockAuthorityWrite()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return r.putHandoffLocked(h)
+}
+
+func (r *Registry) putHandoffLocked(h *Handoff) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if managerDeletionReserved(h.SourceSessionID) {
+		return fmt.Errorf("manager %s is reserved for deletion", h.SourceSessionID)
+	}
 	if err := EnsureStateDirs(); err != nil {
 		return err
 	}
@@ -172,6 +235,18 @@ func stringsHasSuffix(s, suf string) bool {
 
 // AppendLedger writes one JSON line to the durable start/end ledger.
 func AppendLedger(record map[string]any) error {
+	if err := EnsureAuthorityWritable(); err != nil {
+		return err
+	}
+	unlock, err := lockAuthorityWrite()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return appendLedgerLocked(record)
+}
+
+func appendLedgerLocked(record map[string]any) error {
 	if err := EnsureStateDirs(); err != nil {
 		return err
 	}

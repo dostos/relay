@@ -95,7 +95,9 @@ func (s *SessionService) OpenNamed(ctx context.Context, opts CreateOpts) (*Sessi
 			RememberResume(sess)
 			return sess, false, nil
 		}
-		_ = s.Reg.DeleteSession(sess.ID)
+		if err := s.deleteLeafProjected(ctx, sess); err != nil {
+			return nil, false, err
+		}
 	}
 	if exists {
 		sess, err := s.Adopt(ctx, opts)
@@ -499,28 +501,44 @@ func (s *SessionService) Destroy(ctx context.Context, id string, keepRemote bool
 	if isLocalParent(sess) {
 		return fmt.Errorf("refuse unguarded local parent destruction; use relay parent retire %s", id)
 	}
+	if children, childErr := s.Reg.DirectChildren(id); childErr != nil {
+		return childErr
+	} else if len(children) > 0 {
+		return fmt.Errorf("refuse session destruction with %d direct child(ren); replace or reparent the manager first", len(children))
+	}
 	if !keepRemote {
 		t, err := s.transportFor(sess)
 		if err != nil {
 			return err
 		}
-		_ = s.Persist.Destroy(ctx, t, sess.Persist)
+		err = DeleteSessionsProjected(ctx, s.Reg, s.Viz, []*Session{sess}, false, func() error {
+			if err := s.Persist.Destroy(ctx, t, sess.Persist); err != nil {
+				return err
+			}
+			clearBridgeIdentity(ctx, t, sess.ID)
+			return nil
+		})
+		if err != nil {
+			return err
+		}
 		// Intentional teardown — cmux must not treat this as a reconnectable drop.
 		MarkResumeCleaned(sess.Persist.Name, "destroyed")
-		clearBridgeIdentity(ctx, t, sess.ID)
 		forgetBridgeToken(sess.ID)
+		return nil
 	} else {
 		// Local unbound; remote kept → disconnected/resumable.
 		RememberResume(sess)
 	}
-	return s.Reg.DeleteSession(id)
+	return DeleteSessionProjected(ctx, s.Reg, s.Viz, sess, false)
 }
 
 // ReplaceCreate kills any existing remote session with opts.Name (and local
 // registry rows for it), then Create. Used by ephemeral flows like auth login.
 func (s *SessionService) ReplaceCreate(ctx context.Context, opts CreateOpts) (*Session, error) {
 	if opts.Name != "" && opts.HostID != "" {
-		_ = s.KillPersist(ctx, opts.HostID, opts.Name)
+		if err := s.KillPersist(ctx, opts.HostID, opts.Name); err != nil {
+			return nil, err
+		}
 	}
 	return s.Create(ctx, opts)
 }
@@ -539,16 +557,55 @@ func (s *SessionService) KillPersist(ctx context.Context, hostID, persistName st
 		return err
 	}
 	h := ports.PersistHandle{Kind: s.Persist.Kind(), Name: safe}
-	_ = s.Persist.Destroy(ctx, t, h)
-	MarkResumeCleaned(safe, "replaced")
 	list, err := s.Reg.ListSessions()
 	if err != nil {
-		return nil
+		return err
 	}
+	var matching []*Session
 	for _, sess := range list {
 		if sess.HostID == hostID && sess.Persist.Name == safe {
-			forgetBridgeToken(sess.ID)
-			_ = s.Reg.DeleteSession(sess.ID)
+			if err := s.validateLeaf(sess); err != nil {
+				return err
+			}
+			matching = append(matching, sess)
+		}
+	}
+	if len(matching) > 0 {
+		if err := DeleteSessionsProjected(ctx, s.Reg, s.Viz, matching, false, func() error { return s.Persist.Destroy(ctx, t, h) }); err != nil {
+			return err
+		}
+	} else if err := s.Persist.Destroy(ctx, t, h); err != nil {
+		return err
+	}
+	MarkResumeCleaned(safe, "replaced")
+	for _, sess := range matching {
+		forgetBridgeToken(sess.ID)
+	}
+	return nil
+}
+
+func (s *SessionService) deleteLeafProjected(ctx context.Context, sess *Session) error {
+	if err := s.validateLeaf(sess); err != nil {
+		return err
+	}
+	return DeleteSessionProjected(ctx, s.Reg, s.Viz, sess, false)
+}
+
+func (s *SessionService) validateLeaf(sess *Session) error {
+	children, err := s.Reg.DirectChildren(sess.ID)
+	if err != nil {
+		return err
+	}
+	if len(children) > 0 {
+		return fmt.Errorf("session %s still manages %d direct child session(s)", sess.ID, len(children))
+	}
+	handoffs, err := s.Reg.ListHandoffs()
+	if err != nil {
+		return err
+	}
+	for _, handoff := range handoffs {
+		if handoff.SourceSessionID == sess.ID && !handoffTerminal(handoff) {
+			return fmt.Errorf("session %s still owns nonterminal handoff %s", sess.ID, handoff.ID)
 		}
 	}
 	return nil

@@ -117,6 +117,14 @@ func loadBridgeIdentityForPersist(persistName string) (*BridgeIdentity, error) {
 }
 
 func rememberBridgeToken(sessionID, token string) error {
+	if err := EnsureAuthorityWritable(); err != nil {
+		return err
+	}
+	unlock, err := lockAuthorityWrite()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if sessionID == "" || token == "" {
 		return fmt.Errorf("bridge session and token required")
 	}
@@ -127,6 +135,14 @@ func rememberBridgeToken(sessionID, token string) error {
 }
 
 func forgetBridgeToken(sessionID string) {
+	if EnsureAuthorityWritable() != nil {
+		return
+	}
+	unlock, err := lockAuthorityWrite()
+	if err != nil {
+		return
+	}
+	defer unlock()
 	_ = os.Remove(bridgeTokenPath(sessionID))
 }
 

@@ -27,6 +27,9 @@ const (
 	AgentBlocked AgentState = "blocked"
 	// AgentAbsent means no agent is running — typically a bare shell.
 	AgentAbsent AgentState = "absent"
+	// AgentUnknown means Relay could not verify the pane. It never authorizes
+	// replacement or input because it may represent connectivity or trust loss.
+	AgentUnknown AgentState = "unknown"
 )
 
 // AgentReadiness reports an agent pane's state and why.
@@ -106,11 +109,11 @@ func ClassifyAgentPane(capture string) AgentReadiness {
 // AgentReadinessFor captures a session's pane and classifies it.
 func (r *RootService) AgentReadinessFor(ctx context.Context, sessions *SessionService, sessionID string) AgentReadiness {
 	if sessions == nil {
-		return AgentReadiness{State: AgentAbsent, Reason: "no session service to inspect the pane"}
+		return AgentReadiness{State: AgentUnknown, Reason: "no session service to inspect the pane"}
 	}
 	capture, err := sessions.Capture(ctx, sessionID, 40)
 	if err != nil {
-		return AgentReadiness{State: AgentAbsent, Reason: "could not capture the pane: " + err.Error()}
+		return AgentReadiness{State: AgentUnknown, Reason: "could not capture the pane: " + err.Error()}
 	}
 	return ClassifyAgentPane(capture)
 }

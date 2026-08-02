@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/dostos/relay/internal/coord"
-	"github.com/dostos/relay/internal/core"
 	"github.com/dostos/relay/internal/ports"
 )
 
@@ -46,6 +45,13 @@ func TestPresentationRejectsShellTargets(t *testing.T) {
 	err := validatePresentation(ports.Presentation{SessionID: "sess-1", Target: "home; touch /tmp/no", TmuxName: "safe"})
 	if err == nil {
 		t.Fatal("shell syntax in a visualization target must be rejected")
+	}
+}
+
+func TestAttachCommandRejectsUnknownTargetPolicy(t *testing.T) {
+	v := &Viz{Targets: map[string]targetConfig{"home": {Host: "home.example"}}}
+	if _, err := v.attachCommand(ports.Presentation{SessionID: "sess-1", Target: "raw-host", TmuxName: "safe"}); err == nil {
+		t.Fatal("unknown policy key must not become a raw ssh destination")
 	}
 }
 
@@ -261,12 +267,13 @@ func TestCloseServiceEventRemovesLocalBinding(t *testing.T) {
 	if err := v.persistBinding("sess-old", binding{SessionID: "sess-old", Surface: "surface:99"}); err != nil {
 		t.Fatal(err)
 	}
-	result, err := v.handleServiceEvent(context.Background(), coord.Event{Kind: "close", Meta: map[string]any{"session_id": "sess-old"}})
+	result, err := v.handleServiceEvent(context.Background(), coord.Event{Seq: 1, Kind: "close", Meta: map[string]any{"session_id": "sess-old"}})
 	if err != nil || result != "closed" {
 		t.Fatalf("result=%q err=%v", result, err)
 	}
-	if _, err := os.Stat(bindPath("sess-old")); !os.IsNotExist(err) {
-		t.Fatalf("binding still exists: %v", err)
+	tombstone, err := v.loadBinding("sess-old")
+	if err != nil || !tombstone.Deleted || tombstone.Revision != 1 || tombstone.Surface != "" {
+		t.Fatalf("tombstone=%+v err=%v", tombstone, err)
 	}
 }
 
@@ -287,16 +294,13 @@ fi
 	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC()
-	sess := &core.Session{ID: "sess-apex", HostID: "home", Persist: ports.PersistHandle{Kind: "tmux", Name: "apex-v3"}, VizSurfaceRef: "surface:243", CreatedAt: now, UpdatedAt: now}
-	if err := (&core.Registry{}).PutSession(sess); err != nil {
-		t.Fatal(err)
-	}
+	sessionID := "sess-apex"
+	attach := "relay resume --session apex-v3"
 	v := &Viz{Bin: bin, bindings: map[string]binding{}}
-	if err := v.persistBinding(sess.ID, binding{SessionID: sess.ID, Surface: "surface:243", Attach: core.ResumeLaunchCmd("apex-v3")}); err != nil {
+	if err := v.persistBinding(sessionID, binding{SessionID: sessionID, Surface: "surface:243", Attach: attach}); err != nil {
 		t.Fatal(err)
 	}
-	surface, err := v.Present(context.Background(), sess.ID, core.ResumeLaunchCmd("apex-v3"), ports.Layout{})
+	surface, err := v.Present(context.Background(), sessionID, attach, ports.Layout{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,49 +317,68 @@ fi
 	if !strings.Contains(string(logRaw), "surface resume set --surface surface:7") {
 		t.Fatalf("adopted pane was not stamped:\n%s", logRaw)
 	}
-	stored, err := (&core.Registry{}).GetSession(sess.ID)
-	if err != nil || stored.VizSurfaceRef != surface {
-		t.Fatalf("registry surface=%q err=%v", stored.VizSurfaceRef, err)
-	}
 }
 
-func TestGhostRegistrySurfaceClearsWithoutBindingFile(t *testing.T) {
+func TestProjectionTombstoneRejectsOlderReplay(t *testing.T) {
 	t.Setenv("RELAY_STATE_DIR", t.TempDir())
 	now := time.Now().UTC()
-	reg := &core.Registry{}
-	ghost := &core.Session{ID: "sess-ghost", Persist: ports.PersistHandle{Kind: "tmux", Name: "apex"}, VizSurfaceRef: "surface:243", CreatedAt: now, UpdatedAt: now}
-	live := &core.Session{ID: "sess-live", Persist: ports.PersistHandle{Kind: "tmux", Name: "apex-v3"}, VizSurfaceRef: "surface:279", CreatedAt: now, UpdatedAt: now}
-	for _, sess := range []*core.Session{ghost, live} {
-		if err := reg.PutSession(sess); err != nil {
-			t.Fatal(err)
-		}
+	v := &Viz{Bin: "/definitely/missing/cmux", Control: &targetConfig{Host: "home"}, bindings: map[string]binding{}}
+	if err := v.persistBinding("sess-old", binding{SessionID: "sess-old", Revision: 10, Deleted: true, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
 	}
-	New().clearGhostRegistrySurfaces(map[string]surfaceLocation{
-		"surface:279": {Workspace: "workspace:38", Pane: "pane:209"},
-	})
-	gotGhost, _ := reg.GetSession(ghost.ID)
-	gotLive, _ := reg.GetSession(live.ID)
-	if gotGhost.VizSurfaceRef != "" {
-		t.Fatalf("ghost ref remains: %q", gotGhost.VizSurfaceRef)
+	surface, err := v.ApplyProjection(context.Background(), ports.ProjectionEvent{V: 1, Revision: 9, Op: ports.ProjectionUpsert, Item: ports.Presentation{SessionID: "sess-old", Target: "home", TmuxName: "old"}})
+	if err != nil || surface != "" {
+		t.Fatalf("stale replay surface=%q err=%v", surface, err)
 	}
-	if gotLive.VizSurfaceRef != "surface:279" {
-		t.Fatalf("live ref changed: %q", gotLive.VizSurfaceRef)
-	}
-}
-
-func TestPresentationSnapshotKeepsAuthoritativeSessionID(t *testing.T) {
-	t.Setenv("RELAY_STATE_DIR", t.TempDir())
-	v := New()
-	v.rememberAuthoritativeSession(ports.Presentation{
-		SessionID: "sess-home", ParentSessionID: "sess-apex", Target: "home-relay",
-		TmuxName: "apex-v3", RemoteCWD: "/work", RepoRef: "/repo",
-		Labels: map[string]string{"agent": "cursor-auto"},
-	})
-	got, err := (&core.Registry{}).GetSession("sess-home")
+	got, err := v.loadBinding("sess-old")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ID != "sess-home" || got.Persist.Name != "apex-v3" || got.SourceSessionID != "sess-apex" || got.Labels["agent"] != "cursor-auto" {
-		t.Fatalf("replica=%+v", got)
+	if !got.Deleted || got.Revision != 10 {
+		t.Fatalf("tombstone regressed: %+v", got)
+	}
+}
+
+func TestVizClientArchivesLocalAuthorityButKeepsProjectionState(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("RELAY_STATE_DIR", state)
+	for _, path := range []string{"sessions.json", "handoffs", "parent-inbox", "bridge-tokens"} {
+		full := filepath.Join(state, path)
+		if filepath.Ext(path) != "" {
+			if err := os.WriteFile(full, []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := os.MkdirAll(full, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	vizDir := filepath.Join(state, "viz")
+	if err := os.MkdirAll(vizDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := retireLocalAuthorityState(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(state, "sessions.json")); !os.IsNotExist(err) {
+		t.Fatalf("sessions authority remains: %v", err)
+	}
+	archives, err := filepath.Glob(filepath.Join(state, "retired-local-authority", "*", "sessions.json"))
+	if err != nil || len(archives) != 1 {
+		t.Fatalf("sessions archive missing: paths=%v err=%v", archives, err)
+	}
+	if _, err := os.Stat(vizDir); err != nil {
+		t.Fatalf("projection state was removed: %v", err)
+	}
+	// The marker is an invariant, not a one-shot migration: authority state
+	// recreated later is quarantined on the next follower start too.
+	if err := os.WriteFile(filepath.Join(state, "sessions.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := retireLocalAuthorityState(); err != nil {
+		t.Fatal(err)
+	}
+	archives, _ = filepath.Glob(filepath.Join(state, "retired-local-authority", "*", "sessions.json"))
+	if len(archives) != 2 {
+		t.Fatalf("recreated authority was not quarantined: %v", archives)
 	}
 }

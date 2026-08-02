@@ -133,13 +133,6 @@ type ParentEventRouter interface {
 	RouteChildEvent(context.Context, *Handoff, coord.Event) (*ParentMessage, error)
 }
 
-// ChildParentBinder is an optional visualization capability used when an
-// operator repairs lineage for an already-presented child. The durable cmux
-// binding must follow the same parent edge or pane listings become misleading.
-type ChildParentBinder interface {
-	ReparentBinding(childSessionID, parentSessionID string) error
-}
-
 type ParentService struct {
 	Reg          *Registry
 	Sessions     *SessionService
@@ -375,12 +368,12 @@ func (p *ParentService) ReparentChild(parentID, handoffID string) (*Handoff, str
 	if oldParentID == "" {
 		linked, linkErr := p.LinkChild(parentID, handoffID)
 		if linkErr == nil {
-			p.reparentPaneBinding(linked.SessionID, parentID)
+			_ = p.reparentPaneBinding(linked.SessionID, parentID)
 		}
 		return linked, "", linkErr
 	}
 	if oldParentID == parentID {
-		p.reparentPaneBinding(ho.SessionID, parentID)
+		_ = p.reparentPaneBinding(ho.SessionID, parentID)
 		return ho, oldParentID, nil
 	}
 	child, err := p.Reg.GetSession(ho.SessionID)
@@ -398,7 +391,9 @@ func (p *ParentService) ReparentChild(parentID, handoffID string) (*Handoff, str
 	if err := p.Reg.PutHandoff(ho); err != nil {
 		return nil, oldParentID, err
 	}
-	p.reparentPaneBinding(child.ID, parentID)
+	if err := p.reparentPaneBinding(child.ID, parentID); err != nil {
+		return ho, oldParentID, err
+	}
 	if messages, listErr := p.ListMessages(oldParentID, true); listErr == nil {
 		for _, msg := range messages {
 			if msg.HandoffID != handoffID {
@@ -438,10 +433,33 @@ func validateManagerEdge(reg *Registry, parent, child *Session) error {
 	return nil
 }
 
-func (p *ParentService) reparentPaneBinding(childSessionID, parentSessionID string) {
-	if binder, ok := p.Viz.(ChildParentBinder); ok {
-		_ = binder.ReparentBinding(childSessionID, parentSessionID)
+func (p *ParentService) reparentPaneBinding(childSessionID, parentSessionID string) error {
+	if p.Viz == nil || p.Reg == nil {
+		return nil
 	}
+	child, err := p.Reg.GetSession(childSessionID)
+	if err != nil {
+		return err
+	}
+	ref, err := PresentSession(context.Background(), p.Viz, child, ResumeLaunchCmd(child.Persist.Name), ports.Layout{Mode: "remote", SourceSessionID: parentSessionID})
+	if err != nil {
+		return err
+	}
+	child.VizSurfaceRef = ref
+	return p.Reg.PutSession(child)
+}
+
+func (p *ParentService) projectPane(item ports.Presentation) error {
+	if p.Viz == nil {
+		return nil
+	}
+	if sink, ok := p.Viz.(ports.ProjectionSink); ok {
+		_, err := sink.ApplyProjection(context.Background(), ports.ProjectionEvent{V: 1, Op: ports.ProjectionUpsert, Item: item})
+		return err
+	}
+	sess := &Session{ID: item.SessionID, HostID: item.Target, SourceSessionID: item.ParentSessionID, Persist: ports.PersistHandle{Name: item.TmuxName}}
+	_, err := PresentSession(context.Background(), p.Viz, sess, ResumeLaunchCmd(item.TmuxName), ports.Layout{Mode: "remote", SourceSessionID: item.ParentSessionID})
+	return err
 }
 
 func handoffTerminal(ho *Handoff) bool {
@@ -517,6 +535,18 @@ func compactText(text string) string {
 }
 
 func writeParentMessage(msg *ParentMessage, exclusive bool) error {
+	if err := EnsureAuthorityWritable(); err != nil {
+		return err
+	}
+	unlock, err := lockAuthorityWrite()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return writeParentMessageLocked(msg, exclusive)
+}
+
+func writeParentMessageLocked(msg *ParentMessage, exclusive bool) error {
 	if msg == nil || msg.ParentSessionID == "" || msg.ID == "" {
 		return fmt.Errorf("parent message identity required")
 	}
@@ -1467,12 +1497,31 @@ func (p *ParentService) Retire(ctx context.Context, sessionID string, dryRun, fo
 	if err != nil || (!gate.Eligible && !force) || dryRun {
 		return gate, err
 	}
-	if p.Viz != nil && !keepViz {
-		if err := p.Viz.Close(ctx, sessionID); err != nil {
-			return gate, err
+	children, childErr := p.Reg.DirectChildren(sessionID)
+	if childErr != nil {
+		return gate, childErr
+	}
+	if len(children) > 0 {
+		return gate, fmt.Errorf("session %s still manages %d direct child session(s); replace or reparent it first", sessionID, len(children))
+	}
+	handoffs, handoffErr := p.Reg.ListHandoffs()
+	if handoffErr != nil {
+		return gate, handoffErr
+	}
+	for _, handoff := range handoffs {
+		if handoff.SourceSessionID == sessionID && !handoffTerminal(handoff) {
+			return gate, fmt.Errorf("session %s still owns nonterminal handoff %s", sessionID, handoff.ID)
 		}
 	}
-	if err := p.Reg.DeleteSession(sessionID); err != nil {
+	var deletionViz ports.Viz
+	if !keepViz {
+		deletionViz = p.Viz
+	}
+	sess, sessErr := p.Reg.GetSession(sessionID)
+	if sessErr != nil {
+		return gate, sessErr
+	}
+	if err := DeleteSessionProjected(ctx, p.Reg, deletionViz, sess, keepViz); err != nil {
 		return gate, err
 	}
 	gate.Closed = true

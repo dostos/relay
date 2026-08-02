@@ -24,7 +24,7 @@ type fakeParentNotifier struct {
 
 type fakeRetirementViz struct {
 	closed    []string
-	reparents map[string]string
+	presented map[string]ports.Layout
 }
 
 type recordingPersistence struct {
@@ -48,8 +48,12 @@ func (p *recordingPersistence) Send(_ context.Context, _ ports.Transport, _ port
 
 func (f *fakeRetirementViz) Kind() string                   { return "test" }
 func (f *fakeRetirementViz) Available(context.Context) bool { return true }
-func (f *fakeRetirementViz) Present(context.Context, string, string, ports.Layout) (string, error) {
-	return "", nil
+func (f *fakeRetirementViz) Present(_ context.Context, sessionID, _ string, layout ports.Layout) (string, error) {
+	if f.presented == nil {
+		f.presented = map[string]ports.Layout{}
+	}
+	f.presented[sessionID] = layout
+	return "viz:queued:1", nil
 }
 func (f *fakeRetirementViz) Focus(context.Context, string) error { return nil }
 func (f *fakeRetirementViz) Close(_ context.Context, sessionID string) error {
@@ -64,13 +68,6 @@ func (f *fakeRetirementViz) RestoreSaved(context.Context) (int, error) {
 	return 0, nil
 }
 func (f *fakeRetirementViz) BrandLabels(context.Context, map[string]string) error { return nil }
-func (f *fakeRetirementViz) ReparentBinding(childSessionID, parentSessionID string) error {
-	if f.reparents == nil {
-		f.reparents = map[string]string{}
-	}
-	f.reparents[childSessionID] = parentSessionID
-	return nil
-}
 
 func (f *fakeParentNotifier) BindLocalParent(_ context.Context, sessionID, surface string) (string, error) {
 	f.bound = append(f.bound, sessionID+"@"+surface)
@@ -377,8 +374,8 @@ func TestReparentChildMovesPendingInboxAndHistoryEdge(t *testing.T) {
 	if err != nil || storedChild.SourceSessionID != newParent.ID {
 		t.Fatalf("child=%+v err=%v", storedChild, err)
 	}
-	if viz.reparents[child.ID] != newParent.ID {
-		t.Fatalf("pane parent=%q", viz.reparents[child.ID])
+	if viz.presented[child.ID].SourceSessionID != newParent.ID {
+		t.Fatalf("projection parent=%q", viz.presented[child.ID].SourceSessionID)
 	}
 	oldInbox, _ := service.ListMessages(oldParent.ID, true)
 	newInbox, _ := service.ListMessages(newParent.ID, true)
@@ -405,8 +402,8 @@ func TestReparentChildRefreshesPaneBindingWhenLineageAlreadyCorrect(t *testing.T
 	if _, _, err := service.ReparentChild(parent.ID, ho.ID); err != nil {
 		t.Fatal(err)
 	}
-	if viz.reparents[child.ID] != parent.ID {
-		t.Fatalf("pane binding not refreshed: %v", viz.reparents)
+	if viz.presented[child.ID].SourceSessionID != parent.ID {
+		t.Fatalf("projection not refreshed: %v", viz.presented)
 	}
 }
 
@@ -755,6 +752,25 @@ func TestSessionDestroyCannotBypassParentGate(t *testing.T) {
 	}
 	if err := service.Sessions.Destroy(context.Background(), parent.ID, false); err == nil || !strings.Contains(err.Error(), "parent retire") {
 		t.Fatalf("unguarded destroy error = %v", err)
+	}
+}
+
+func TestForcedRetireCannotOrphanDirectChild(t *testing.T) {
+	service, _, reg := newParentTestService(t)
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "parent"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	child := &Session{ID: "sess-child", SourceSessionID: parent.ID, HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "child"}, CreatedAt: now}
+	if err := reg.PutSession(parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.PutSession(child); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Retire(context.Background(), parent.ID, false, true, true); err == nil || !strings.Contains(err.Error(), "direct child") {
+		t.Fatalf("forced retirement error=%v", err)
+	}
+	if _, err := reg.GetSession(parent.ID); err != nil {
+		t.Fatalf("parent was deleted: %v", err)
 	}
 }
 

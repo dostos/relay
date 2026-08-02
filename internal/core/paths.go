@@ -39,7 +39,13 @@ func ConfigRoot() string {
 
 func PolicyPath() string { return filepath.Join(ConfigRoot(), "policy.yaml") }
 
-func SessionsPath() string            { return filepath.Join(StateRoot(), "sessions.json") }
+func SessionsPath() string             { return filepath.Join(StateRoot(), "sessions.json") }
+func ProjectionOnlyMarkerPath() string { return filepath.Join(StateRoot(), ".viz-projection-only") }
+func AuthorityDeletionDir() string     { return filepath.Join(StateRoot(), "authority-deletions") }
+func DeletedManagerDir() string        { return filepath.Join(StateRoot(), "deleted-managers") }
+func AuthorityReplacementPath() string {
+	return filepath.Join(StateRoot(), "authority-replacement.json")
+}
 func HandoffsDir() string             { return filepath.Join(StateRoot(), "handoffs") }
 func LedgerPath() string              { return filepath.Join(StateRoot(), "handoffs", "ledger.jsonl") }
 func DesktopBridgeSocketPath() string { return filepath.Join(StateRoot(), "desktop-bridge.sock") }
