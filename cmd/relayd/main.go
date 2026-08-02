@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strconv"
 	"syscall"
 
 	"github.com/dostos/relay/internal/bridge"
+	"github.com/dostos/relay/internal/controlstate"
 	"github.com/dostos/relay/internal/coord"
 	"github.com/dostos/relay/internal/coord/relayd"
 	"github.com/dostos/relay/internal/core"
@@ -30,6 +32,8 @@ func main() {
 		os.Exit(cmdBridge(os.Args[2:]))
 	case "viz":
 		os.Exit(cmdViz(os.Args[2:]))
+	case "control":
+		os.Exit(cmdControl(os.Args[2:]))
 	case "ping":
 		os.Exit(cmdPing())
 	case "status":
@@ -63,11 +67,50 @@ Usage:
                                Optional visualization service (local policy)
   relayd viz sync             Consume queued requests from the control host
   relayd viz follow           Keep consuming while the Mac is awake
+  relayd control export|import
+                               Secure control-state migration over stdin/stdout
   relayd ping
   relayd status
   relayd emit -s SESS --kind KIND [--meta JSON]
   relayd subscribe -s SESS [--from N] [-f]
 `)
+}
+
+func cmdControl(args []string) int {
+	if len(args) != 1 {
+		fmt.Fprintln(os.Stderr, "relayd control: export or import required")
+		return 2
+	}
+	switch args[0] {
+	case "export":
+		bundle, err := controlstate.Export(&core.Registry{})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(bundle); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	case "import":
+		var bundle controlstate.Bundle
+		decoder := json.NewDecoder(io.LimitReader(os.Stdin, 64<<20))
+		if err := decoder.Decode(&bundle); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		summary, err := controlstate.Import(&core.Registry{}, &bundle)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": true, "summary": summary})
+		return 0
+	default:
+		fmt.Fprintf(os.Stderr, "relayd control: unknown command %q\n", args[0])
+		return 2
+	}
 }
 
 func cmdViz(args []string) int {

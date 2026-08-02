@@ -3066,6 +3066,17 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 		return a.fail(fmt.Errorf("viz adapter unavailable (is cmux running?)"))
 	}
 	switch args[0] {
+	case "migrate-control":
+		migrator, ok := a.Viz.(interface{ QueueControlMigration() (int64, error) })
+		if !ok {
+			return a.fail(fmt.Errorf("viz adapter does not expose control migration"))
+		}
+		seq, err := migrator.QueueControlMigration()
+		if err != nil {
+			return a.fail(err)
+		}
+		a.JSON = true
+		return a.errOut(a.out(map[string]any{"ok": true, "seq": seq, "kind": "migrate_control"}))
 	case "update":
 		updater, ok := a.Viz.(interface{ QueueUpdate() (int64, error) })
 		if !ok {

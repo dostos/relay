@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dostos/relay/internal/controlstate"
 	"github.com/dostos/relay/internal/coord"
 	coordrelayd "github.com/dostos/relay/internal/coord/relayd"
 	"github.com/dostos/relay/internal/core"
@@ -60,6 +61,17 @@ func (v *Viz) QueueUpdate() (int64, error) {
 		return 0, fmt.Errorf("update signals are emitted by the control host")
 	}
 	resp, err := coordrelayd.EmitLocal(localRelaydSocket(), v.serviceChannel(), "update_relayd", nil)
+	if err != nil {
+		return 0, err
+	}
+	return resp.Seq, nil
+}
+
+func (v *Viz) QueueControlMigration() (int64, error) {
+	if v.ServiceID == "" || v.Control != nil {
+		return 0, fmt.Errorf("control migration is requested by the destination control host")
+	}
+	resp, err := coordrelayd.EmitLocal(localRelaydSocket(), v.serviceChannel(), "migrate_control", nil)
 	if err != nil {
 		return 0, err
 	}
@@ -190,11 +202,44 @@ func (v *Viz) handleServiceEvent(ctx context.Context, event coord.Event) (string
 		return v.PresentTarget(ctx, req)
 	case "update_relayd":
 		return v.updateRelayd(ctx)
+	case "migrate_control":
+		return v.migrateControl(ctx)
 	case "viz_ack":
 		return "ignored", nil
 	default:
 		return "", fmt.Errorf("unsupported visualization event %q", event.Kind)
 	}
+}
+
+func (v *Viz) migrateControl(ctx context.Context) (string, error) {
+	bundle, err := controlstate.Export(&core.Registry{})
+	if err != nil {
+		return "", err
+	}
+	raw, err := json.Marshal(bundle)
+	if err != nil {
+		return "", err
+	}
+	args, err := v.controlSSHArgs(v.remoteRelayd("control import"))
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	cmd.Stdin = bytes.NewReader(raw)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("control import: %w (%s)", err, strings.TrimSpace(stderr.String()))
+	}
+	var response struct {
+		OK      bool                 `json:"ok"`
+		Summary controlstate.Summary `json:"summary"`
+	}
+	if json.Unmarshal(stdout.Bytes(), &response) != nil || !response.OK {
+		return "", fmt.Errorf("invalid control import response: %s", strings.TrimSpace(stdout.String()))
+	}
+	result, _ := json.Marshal(response.Summary)
+	return string(result), nil
 }
 
 func stringMeta(meta map[string]any, key string) string {
