@@ -33,6 +33,11 @@ RELAY_BRIDGE_LOCAL_INVOKE=1 "$INSTALL_DIR/relay" version
 STATE_ROOT="${RELAY_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/relay}"
 RELAYD_SOCK_PATH="${RELAYD_SOCK:-$STATE_ROOT/relayd.sock}"
 
+# An abandoned service-manager prototype left these files claiming a dead PID
+# and stopped daemon. No current binary reads or writes them; keeping them
+# creates a second, permanently stale status authority beside live probes.
+rm -f "$STATE_ROOT/relayd-services.json" "$STATE_ROOT/relayd-services.lock"
+
 # Replacing relayd on disk does not replace a running daemon. Worse, Unix
 # listeners can survive an unlinked socket while a second daemon binds the new
 # path, leaving two healthy-looking process trees split across event buses.
