@@ -134,6 +134,34 @@ func (s *SupervisorService) NeedsWatch() ([]*Handoff, error) {
 // handoff flock means a duplicate would fail anyway, and a standalone
 // `relay parent watch` keeps working alongside the supervisor.
 func (s *SupervisorService) Reconcile(ctx context.Context) (int, error) {
+	if s.RepairSensors != nil {
+		sessions, err := s.Reg.ListSessions()
+		if err != nil {
+			return 0, err
+		}
+		for _, sess := range sessions {
+			if sess == nil || sess.Persist.Kind == LocalPersistKind || (sess.Labels["agent"] == "" && sess.Labels["apex"] != "true") {
+				continue
+			}
+			s.mu.Lock()
+			_, repaired := s.sensors[sess.ID]
+			s.mu.Unlock()
+			if repaired {
+				continue
+			}
+			if err := s.RepairSensors(ctx, sess.ID); err != nil {
+				s.emit("sensor_repair_error", sess.ID, err)
+				continue
+			}
+			s.mu.Lock()
+			if s.sensors == nil {
+				s.sensors = map[string]struct{}{}
+			}
+			s.sensors[sess.ID] = struct{}{}
+			s.mu.Unlock()
+			s.emit("sensors_repaired", sess.ID, nil)
+		}
+	}
 	pending, err := s.NeedsWatch()
 	if err != nil {
 		return 0, err
@@ -148,24 +176,6 @@ func (s *SupervisorService) Reconcile(ctx context.Context) (int, error) {
 
 	started := 0
 	for _, ho := range pending {
-		if s.RepairSensors != nil {
-			s.mu.Lock()
-			_, repaired := s.sensors[ho.SessionID]
-			s.mu.Unlock()
-			if !repaired {
-				if err := s.RepairSensors(ctx, ho.SessionID); err != nil {
-					s.emit("sensor_repair_error", ho.ID, err)
-				} else {
-					s.mu.Lock()
-					if s.sensors == nil {
-						s.sensors = map[string]struct{}{}
-					}
-					s.sensors[ho.SessionID] = struct{}{}
-					s.mu.Unlock()
-					s.emit("sensors_repaired", ho.ID, nil)
-				}
-			}
-		}
 		s.mu.Lock()
 		if s.running == nil {
 			s.running = map[string]struct{}{}

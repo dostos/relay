@@ -94,18 +94,18 @@ func TestReconcileDoesNotDoubleStartTheSameHandoff(t *testing.T) {
 
 func TestReconcileRepairsSensorsOncePerSession(t *testing.T) {
 	sup, reg := newSupervisorFixture(t)
-	putSupervisedHandoff(t, reg, "ho-live", "running", "sess-manager")
+	now := time.Now().UTC()
+	if err := reg.PutSession(&Session{ID: "sess-agent", HostID: "c1", Persist: ports.PersistHandle{Kind: "tmux", Name: "agent"}, Labels: map[string]string{"agent": "codex"}, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
 	calls := 0
 	sup.RepairSensors = func(_ context.Context, sessionID string) error {
 		calls++
-		if sessionID != "sess-child-ho-live" {
+		if sessionID != "sess-agent" {
 			t.Fatalf("session=%s", sessionID)
 		}
 		return nil
 	}
-	sup.mu.Lock()
-	sup.running = map[string]struct{}{"ho-live": {}}
-	sup.mu.Unlock()
 	if _, err := sup.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
