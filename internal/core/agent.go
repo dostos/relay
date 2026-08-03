@@ -198,7 +198,12 @@ func (h *HandoffService) absentAgentResponse(ho *Handoff) *AgentResponse {
 func (h *HandoffService) AgentStart(ctx context.Context, opts HandoffOpts) (*AgentResponse, error) {
 	b, ho, err := h.Launch(ctx, opts)
 	if err != nil {
-		return &AgentResponse{OK: false, V: 1, Error: err.Error(), Next: ""}, err
+		resp := &AgentResponse{OK: false, V: 1, Error: err.Error(), Next: ""}
+		if ho != nil {
+			resp.HandoffID, resp.SessionID, resp.HostID = ho.ID, ho.SessionID, ho.HostID
+			resp.Kind, resp.Status = string(ho.Kind), string(ho.Status)
+		}
+		return resp, err
 	}
 	resp := h.agentBase(ho)
 	resp.SessionID = ho.SessionID

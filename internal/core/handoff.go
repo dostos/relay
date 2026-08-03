@@ -197,6 +197,8 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 		HostID:            opts.HostID,
 		Kind:              kind,
 		Status:            StatusPending,
+		LaunchState:       EffectPending,
+		DeliveryState:     EffectNotApplicable,
 		Goal:              opts.Goal,
 		Agent:             agentName,
 		Command:           launchCmd,
@@ -214,6 +216,9 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 		SourceHostID:      opts.SourceHostID,
 		SourcePersistName: opts.SourcePersistName,
 	}
+	if kind == KindAgent {
+		ho.DeliveryState = EffectPending
+	}
 	if err := h.Reg.PutHandoff(ho); err != nil {
 		return nil, nil, err
 	}
@@ -229,10 +234,17 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 	}
 	_ = AppendLedger(startRecord)
 
-	// Start work: send launch command into the holding shell.
-	if err := h.Persist.Send(ctx, t, sess.Persist, launchCmd, true); err != nil {
-		return nil, nil, err
+	// Start work through the holding-shell launch protocol. Agent-composer
+	// delivery is a separate contract used only after readiness is established.
+	launcher, ok := h.Persist.(ports.HoldingShellLauncher)
+	if !ok {
+		err := fmt.Errorf("persistence %s cannot acknowledge holding-shell launch", h.Persist.Kind())
+		return nil, ho, h.failLaunch(ctx, ho, sess, err)
 	}
+	if err := launcher.Launch(ctx, t, sess.Persist, launchCmd); err != nil {
+		return nil, ho, h.failLaunch(ctx, ho, sess, err)
+	}
+	ho.LaunchState = EffectAcknowledged
 	ho.Status = StatusRunning
 	_ = h.Reg.PutHandoff(ho)
 
@@ -244,7 +256,10 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 	// Inject goal for agent mode after a short readiness wait.
 	if kind == KindAgent && opts.Goal != "" {
 		if err := h.injectAgentGoal(ctx, t, sess, ho, opts.Goal); err != nil {
-			return nil, nil, err
+			if ho.Status != StatusNeedsInput {
+				err = h.failDelivery(ctx, ho, sess, err)
+			}
+			return nil, ho, err
 		}
 	}
 
@@ -284,6 +299,39 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 		SourcePersistName: opts.SourcePersistName,
 	}
 	return b, ho, nil
+}
+
+func (h *HandoffService) failLaunch(ctx context.Context, ho *Handoff, sess *Session, cause error) error {
+	ho.LaunchState = EffectFailed
+	ho.LaunchError = cause.Error()
+	return h.failEffect(ctx, ho, sess, cause)
+}
+
+func (h *HandoffService) failDelivery(ctx context.Context, ho *Handoff, sess *Session, cause error) error {
+	ho.DeliveryState = EffectFailed
+	ho.DeliveryError = cause.Error()
+	return h.failEffect(ctx, ho, sess, cause)
+}
+
+func (h *HandoffService) failEffect(ctx context.Context, ho *Handoff, sess *Session, cause error) error {
+	now := time.Now().UTC()
+	ho.Status = StatusFailed
+	ho.Outcome = string(OutcomeFailed)
+	ho.EndedAt = &now
+	if err := h.Reg.PutHandoff(ho); err != nil {
+		return fmt.Errorf("%w; persist terminal handoff: %v", cause, err)
+	}
+	// Terminalize before teardown so concurrent idle events cannot create a
+	// parent ask. Session destruction is best effort; the durable failure keeps
+	// retries idempotent even if remote cleanup needs reconciliation.
+	if h.Sessions != nil && sess != nil {
+		if err := h.Sessions.Destroy(ctx, sess.ID, false); err != nil {
+			ho.CleanupError = err.Error()
+			_ = h.Reg.PutHandoff(ho)
+			return fmt.Errorf("%w; cleanup failed: %v", cause, err)
+		}
+	}
+	return cause
 }
 
 func agentGoalPrompt(goal string) string {
@@ -337,7 +385,7 @@ func waitAgentReady(ctx context.Context, p ports.Persistence, t ports.Transport,
 				last = text
 			}
 		}
-		time.Sleep(2500 * time.Millisecond)
+		time.Sleep(agentReadyPollDelay)
 	}
 	if last == "" {
 		return AgentReadiness{State: AgentAbsent, Reason: "could not read agent pane"}
@@ -345,21 +393,30 @@ func waitAgentReady(ctx context.Context, p ports.Persistence, t ports.Transport,
 	return ClassifyAgentPane(last)
 }
 
+var agentReadyPollDelay = 2500 * time.Millisecond
+
 func (h *HandoffService) injectAgentGoal(ctx context.Context, t ports.Transport, sess *Session, ho *Handoff, goal string) error {
 	readiness := waitAgentReady(ctx, h.Persist, t, sess.Persist, 20*time.Second)
 	switch readiness.State {
 	case AgentBlocked:
 		ho.Status = StatusNeedsInput
+		ho.DeliveryState = EffectBlocked
+		ho.DeliveryError = readiness.Reason
 		if err := h.Reg.PutHandoff(ho); err != nil {
 			return err
 		}
 		_, err := h.Coord.Emit(ctx, t, sess.Persist.Name, "permission_required", map[string]any{"text": readiness.Reason})
 		return err
 	case AgentAbsent:
-		_, err := h.Coord.Emit(ctx, t, sess.Persist.Name, "exit", map[string]any{"text": readiness.Reason})
-		return err
+		_, _ = h.Coord.Emit(ctx, t, sess.Persist.Name, "exit", map[string]any{"text": readiness.Reason})
+		return fmt.Errorf("agent exited before goal delivery: %s", readiness.Reason)
 	default:
-		return h.Persist.Send(ctx, t, sess.Persist, agentGoalPrompt(goal), true)
+		if err := h.Persist.Send(ctx, t, sess.Persist, agentGoalPrompt(goal), true); err != nil {
+			return err
+		}
+		ho.DeliveryState = EffectAcknowledged
+		ho.DeliveryError = ""
+		return h.Reg.PutHandoff(ho)
 	}
 }
 

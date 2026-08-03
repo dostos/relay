@@ -18,8 +18,15 @@ type sensorRecordingPersistence struct {
 
 type gatePersistence struct {
 	renamePersistence
-	capture string
-	sent    []string
+	capture   string
+	sent      []string
+	sendErr   error
+	destroyed bool
+}
+
+func (p *gatePersistence) Destroy(context.Context, ports.Transport, ports.PersistHandle) error {
+	p.destroyed = true
+	return nil
 }
 
 func (p *gatePersistence) Capture(context.Context, ports.Transport, ports.PersistHandle, int) (string, error) {
@@ -28,7 +35,7 @@ func (p *gatePersistence) Capture(context.Context, ports.Transport, ports.Persis
 
 func (p *gatePersistence) Send(_ context.Context, _ ports.Transport, _ ports.PersistHandle, text string, _ bool) error {
 	p.sent = append(p.sent, text)
-	return nil
+	return p.sendErr
 }
 
 func (p *sensorRecordingPersistence) InstallSensors(_ context.Context, _ ports.Transport, handle ports.PersistHandle, _ int, factory func(string) (string, error)) error {
@@ -115,6 +122,98 @@ func TestTrustGateEmitsPermissionWithoutInjectingGoal(t *testing.T) {
 	stored, err := reg.GetHandoff(ho.ID)
 	if err != nil || stored.Status != StatusNeedsInput {
 		t.Fatalf("gated handoff = %+v, err=%v", stored, err)
+	}
+	if stored.DeliveryState != EffectBlocked {
+		t.Fatalf("delivery state = %q, want blocked", stored.DeliveryState)
+	}
+}
+
+func TestGoalDeliveryRequiresComposerSubmissionEffect(t *testing.T) {
+	oldDelay := agentReadyPollDelay
+	agentReadyPollDelay = 0
+	t.Cleanup(func() { agentReadyPollDelay = oldDelay })
+	for _, tc := range []struct {
+		name      string
+		sendErr   error
+		wantState EffectState
+		wantErr   bool
+	}{
+		{name: "successful delivery", wantState: EffectAcknowledged},
+		{name: "composer visible but submission unacknowledged", sendErr: errors.New("composer still holds message"), wantState: EffectPending, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("RELAY_STATE_DIR", t.TempDir())
+			reg := &Registry{}
+			now := time.Now().UTC()
+			sess := &Session{ID: "sess-agent", HostID: "self", Persist: ports.PersistHandle{Kind: "tmux", Name: "agent"}, CreatedAt: now}
+			ho := &Handoff{ID: "ho-agent", SessionID: sess.ID, HostID: "self", Kind: KindAgent, Status: StatusRunning, LaunchState: EffectAcknowledged, DeliveryState: EffectPending, CreatedAt: now}
+			if err := reg.PutHandoff(ho); err != nil {
+				t.Fatal(err)
+			}
+			persist := &gatePersistence{capture: "agent ready\n❯ ", sendErr: tc.sendErr}
+			service := &HandoffService{Reg: reg, Coord: newFakeCoord(), Persist: persist}
+			err := service.injectAgentGoal(context.Background(), &fakeTransport{id: "self"}, sess, ho, "change code")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, tc.wantErr)
+			}
+			stored, getErr := reg.GetHandoff(ho.ID)
+			if getErr != nil || stored.DeliveryState != tc.wantState {
+				t.Fatalf("handoff = %+v, err=%v", stored, getErr)
+			}
+		})
+	}
+}
+
+func TestEarlyAgentExitIsNotSuccessfulDelivery(t *testing.T) {
+	oldDelay := agentReadyPollDelay
+	agentReadyPollDelay = 0
+	t.Cleanup(func() { agentReadyPollDelay = oldDelay })
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	reg := &Registry{}
+	now := time.Now().UTC()
+	sess := &Session{ID: "sess-gone", HostID: "self", Persist: ports.PersistHandle{Kind: "tmux", Name: "gone"}, CreatedAt: now}
+	ho := &Handoff{ID: "ho-gone", SessionID: sess.ID, HostID: "self", Kind: KindAgent, Status: StatusRunning, LaunchState: EffectAcknowledged, DeliveryState: EffectPending, CreatedAt: now}
+	if err := reg.PutHandoff(ho); err != nil {
+		t.Fatal(err)
+	}
+	persist := &gatePersistence{capture: ""}
+	service := &HandoffService{Reg: reg, Coord: newFakeCoord(), Persist: persist}
+	if err := service.injectAgentGoal(context.Background(), &fakeTransport{id: "self"}, sess, ho, "change code"); err == nil {
+		t.Fatal("early exit was reported as delivered")
+	}
+	if len(persist.sent) != 0 {
+		t.Fatalf("goal sent to absent agent: %v", persist.sent)
+	}
+}
+
+func TestFailedDeliveryTerminalizesBeforeCleanup(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	reg := &Registry{}
+	now := time.Now().UTC()
+	sess := &Session{ID: "sess-failed", HostID: "self", Persist: ports.PersistHandle{Kind: "tmux", Name: "failed"}, CreatedAt: now}
+	ho := &Handoff{ID: "ho-failed", SessionID: sess.ID, HostID: "self", Kind: KindAgent, Status: StatusRunning, LaunchState: EffectAcknowledged, DeliveryState: EffectPending, SourceSessionID: "sess-parent", CreatedAt: now}
+	if err := reg.PutSession(sess); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.PutHandoff(ho); err != nil {
+		t.Fatal(err)
+	}
+	persist := &gatePersistence{}
+	sessions := &SessionService{Reg: reg, Persist: persist, NewTransport: func(string) (ports.Transport, error) { return &fakeTransport{id: "self"}, nil }}
+	service := &HandoffService{Reg: reg, Sessions: sessions}
+	cause := errors.New("composer did not acknowledge delivery")
+	if err := service.failDelivery(context.Background(), ho, sess, cause); !errors.Is(err, cause) {
+		t.Fatalf("failure cause lost: %v", err)
+	}
+	stored, err := reg.GetHandoff(ho.ID)
+	if err != nil || !handoffTerminal(stored) || stored.DeliveryState != EffectFailed {
+		t.Fatalf("terminal handoff = %+v, err=%v", stored, err)
+	}
+	if !persist.destroyed {
+		t.Fatal("failed launch session was not torn down")
+	}
+	if _, err := reg.GetSession(sess.ID); err == nil {
+		t.Fatal("failed launch session remained in authority registry")
 	}
 }
 

@@ -140,6 +140,37 @@ func (p *Persist) Capture(ctx context.Context, t ports.Transport, h ports.Persis
 	return stdout, nil
 }
 
+// Launch acknowledges the holding shell, not any particular runtime. The
+// shell stamps a tmux option immediately before evaluating the command; agent
+// readiness and job exit are verified by their existing lifecycle paths.
+func (p *Persist) Launch(ctx context.Context, t ports.Transport, h ports.PersistHandle, command string) error {
+	if strings.TrimSpace(command) == "" {
+		return fmt.Errorf("launch command required")
+	}
+	token := strconv.FormatInt(time.Now().UnixNano(), 36)
+	target := shellquote.Quote(exactPane(h.Name))
+	line := fmt.Sprintf("tmux set-option -t %s @relay_launch_ack %s; %s", target, shellquote.Quote(token), command)
+	if _, stderr, err := t.Run(ctx, "", fmt.Sprintf("tmux send-keys -t %s -l -- %s", target, shellquote.Quote(line))); err != nil {
+		return fmt.Errorf("type launch: %w (%s)", err, strings.TrimSpace(stderr))
+	}
+	for attempt := 0; attempt < sendConfirmAttempts; attempt++ {
+		if _, stderr, err := t.Run(ctx, "", fmt.Sprintf("tmux send-keys -t %s Enter", target)); err != nil {
+			return fmt.Errorf("submit launch: %w (%s)", err, strings.TrimSpace(stderr))
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(sendConfirmDelay):
+		}
+		out, _, _ := t.Run(ctx, "", fmt.Sprintf("tmux show-option -t %s -v @relay_launch_ack 2>/dev/null", target))
+		if strings.TrimSpace(out) == token {
+			_, _, _ = t.Run(ctx, "", fmt.Sprintf("tmux set-option -u -t %s @relay_launch_ack", target))
+			return nil
+		}
+	}
+	return fmt.Errorf("holding shell did not acknowledge launch in %s after %d attempts", h.Name, sendConfirmAttempts)
+}
+
 func (p *Persist) Send(ctx context.Context, t ports.Transport, h ports.PersistHandle, text string, enter bool) error {
 	cmd := fmt.Sprintf("tmux send-keys -t %s -l -- %s", shellquote.Quote(exactPane(h.Name)), shellquote.Quote(text))
 	_, stderr, err := t.Run(ctx, "", cmd)

@@ -60,6 +60,13 @@ type Persistence interface {
 	InstallSensors(ctx context.Context, t Transport, h PersistHandle, silenceSec int, emitCmd func(kind string) (string, error)) error
 }
 
+// HoldingShellLauncher is the narrow capability used to leave Relay's
+// freshly-created holding shell. Its acknowledgement proves only that the
+// shell evaluated the launch line; interactive message delivery is separate.
+type HoldingShellLauncher interface {
+	Launch(ctx context.Context, t Transport, h PersistHandle, command string) error
+}
+
 // SessionChrome is an optional persistence capability for applying durable
 // visual ownership cues. SessionService invokes it on create, adopt, and
 // named-session reuse so callers below the CLI layer receive the same chrome.

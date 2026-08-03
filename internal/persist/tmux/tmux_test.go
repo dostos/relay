@@ -4,10 +4,17 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dostos/relay/internal/ports"
+	"github.com/dostos/relay/internal/shellquote"
 )
 
 type recordingTransport struct {
@@ -16,11 +23,28 @@ type recordingTransport struct {
 	outputs  []string
 	errs     []error
 	err      error
+	runHook  func(*recordingTransport, string) (string, bool)
+}
+
+type localExecTransport struct{ recordingTransport }
+
+func (t *localExecTransport) Run(ctx context.Context, cwd, command string) (string, string, error) {
+	cmd := exec.CommandContext(ctx, "bash", "-lc", command)
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
+	out, err := cmd.CombinedOutput()
+	return string(out), "", err
 }
 
 func (t *recordingTransport) ID() string { return "test" }
 func (t *recordingTransport) Run(_ context.Context, _, command string) (string, string, error) {
 	t.commands = append(t.commands, command)
+	if t.runHook != nil {
+		if out, ok := t.runHook(t, command); ok {
+			return out, "", nil
+		}
+	}
 	callErr := t.err
 	if len(t.errs) > 0 {
 		callErr = t.errs[0]
@@ -55,6 +79,91 @@ func TestSendDoesNotClaimUnknownDisappearance(t *testing.T) {
 	transport := &recordingTransport{stdout: "popup swallowed input\n"}
 	if err := New().Send(context.Background(), transport, ports.PersistHandle{Name: "agent"}, "relay marker", true); err == nil {
 		t.Fatal("missing pane-level evidence was reported as delivered")
+	}
+}
+
+func TestLaunchAcknowledgesHoldingShellWithoutComposerEvidence(t *testing.T) {
+	oldDelay := sendConfirmDelay
+	sendConfirmDelay = 0
+	t.Cleanup(func() { sendConfirmDelay = oldDelay })
+	for _, launchCommand := range []string{
+		"claude --goal x",
+		"codex --goal x",
+		"grok --goal x",
+		"make verify",
+	} {
+		t.Run(strings.Fields(launchCommand)[0], func(t *testing.T) {
+			transport := &recordingTransport{}
+			// Capture the generated token from the typed launch line and return
+			// it from show-option. This models a shell effect without a composer.
+			transport.runHook = func(tpt *recordingTransport, command string) (string, bool) {
+				if strings.Contains(command, "show-option") {
+					for _, prior := range tpt.commands {
+						if i := strings.Index(prior, "@relay_launch_ack "); i >= 0 {
+							rest := prior[i+len("@relay_launch_ack "):]
+							if token := regexp.MustCompile(`[a-z0-9]{8,}`).FindString(rest); token != "" {
+								return token, true
+							}
+						}
+					}
+				}
+				return "", false
+			}
+			if err := New().Launch(context.Background(), transport, ports.PersistHandle{Name: "worker"}, launchCommand); err != nil {
+				t.Fatalf("%v; commands=%v", err, transport.commands)
+			}
+			joined := strings.Join(transport.commands, "\n")
+			if strings.Count(joined, launchCommand) != 1 || strings.Count(joined, " Enter") != 1 {
+				t.Fatalf("launch should type once and submit once: %v", transport.commands)
+			}
+		})
+	}
+}
+
+func TestLaunchRetriesSubmissionWithoutRetyping(t *testing.T) {
+	oldDelay := sendConfirmDelay
+	sendConfirmDelay = 0
+	t.Cleanup(func() { sendConfirmDelay = oldDelay })
+	transport := &recordingTransport{}
+	err := New().Launch(context.Background(), transport, ports.PersistHandle{Name: "job"}, "make verify")
+	if err == nil {
+		t.Fatal("missing holding-shell acknowledgement reported as launched")
+	}
+	joined := strings.Join(transport.commands, "\n")
+	if strings.Count(joined, "make verify") != 1 || strings.Count(joined, " Enter") != sendConfirmAttempts {
+		t.Fatalf("retry must submit idempotently without retyping: %v", transport.commands)
+	}
+}
+
+func TestLaunchDisposableTmuxEffect(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux unavailable")
+	}
+	name := "relay-launch-canary-" + strings.ToLower(strconv.FormatInt(time.Now().UnixNano(), 36))
+	transport := &localExecTransport{}
+	handle, err := New().Create(context.Background(), transport, name, "", "bash -l")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = New().Destroy(context.Background(), transport, handle) })
+	marker := filepath.Join(t.TempDir(), "effect")
+	command := "printf launched > " + shellquote.Quote(marker) + "; exec bash -l"
+	if err := New().Launch(context.Background(), transport, handle, command); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, readErr := os.ReadFile(marker)
+		if readErr == nil && string(data) == "launched" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("launch acknowledged but command effect missing: %v", readErr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if out, _, _ := transport.Run(context.Background(), "", "tmux show-option -t "+shellquote.Quote(exactPane(name))+" -v @relay_launch_ack 2>/dev/null"); strings.TrimSpace(out) != "" {
+		t.Fatalf("launch acknowledgement leaked into later retries: %q", out)
 	}
 }
 

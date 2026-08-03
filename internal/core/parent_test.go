@@ -475,6 +475,7 @@ func TestTerminalHandoffEventsNeverReachParent(t *testing.T) {
 	for _, ho := range []*Handoff{
 		{ID: "ho-done", SessionID: "sess-done", Status: StatusDone, SourceSessionID: parent.ID},
 		{ID: "ho-outcome", SessionID: "sess-outcome", Status: StatusRunning, Outcome: "done", SourceSessionID: parent.ID},
+		{ID: "ho-launch-failed", SessionID: "sess-launch-failed", Status: StatusFailed, LaunchState: EffectFailed, SourceSessionID: parent.ID},
 	} {
 		msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 99, Kind: "idle"})
 		if err != nil || msg != nil {

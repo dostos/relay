@@ -55,6 +55,19 @@ const (
 	StatusAbandoned  HandoffStatus = "abandoned"
 )
 
+// EffectState records independently observable launch and goal-delivery
+// effects. A process can be launched while its interactive goal is not yet
+// delivered; jobs never have a separate delivery effect.
+type EffectState string
+
+const (
+	EffectPending       EffectState = "pending"
+	EffectAcknowledged  EffectState = "acknowledged"
+	EffectFailed        EffectState = "failed"
+	EffectBlocked       EffectState = "blocked"
+	EffectNotApplicable EffectState = "not_applicable"
+)
+
 // Handoff is a long-lived, goal-driven remote work unit bound to a session.
 // Its lineage and event cursors survive agent and transport lifetimes.
 type Handoff struct {
@@ -63,6 +76,11 @@ type Handoff struct {
 	HostID            string        `json:"host_id"`
 	Kind              HandoffKind   `json:"kind"`
 	Status            HandoffStatus `json:"status"`
+	LaunchState       EffectState   `json:"launch_state,omitempty"`
+	DeliveryState     EffectState   `json:"delivery_state,omitempty"`
+	LaunchError       string        `json:"launch_error,omitempty"`
+	DeliveryError     string        `json:"delivery_error,omitempty"`
+	CleanupError      string        `json:"cleanup_error,omitempty"`
 	Goal              string        `json:"goal,omitempty"`
 	Agent             string        `json:"agent,omitempty"`
 	Command           string        `json:"command,omitempty"`
