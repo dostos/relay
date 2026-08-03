@@ -263,16 +263,12 @@ type HistoryCommunication struct {
 // The append-only ledger retains full routing metadata; this projection omits
 // graph nodes and transcripts so an agent reads only new goal transitions.
 type CommunicationEntry struct {
-	Seq           int64  `json:"seq"`
-	MessageID     string `json:"message_id"`
-	CorrelationID string `json:"correlation_id,omitempty"`
-	ChildSession  string `json:"child_session_id"`
-	HandoffID     string `json:"handoff_id,omitempty"`
-	Kind          string `json:"kind"`
-	Action        string `json:"action"`
-	Summary       string `json:"summary,omitempty"`
-	PolicyID      string `json:"policy_id,omitempty"`
-	AutoHandled   bool   `json:"auto_handled,omitempty"`
+	MessageID   string `json:"message_id"`
+	Kind        string `json:"kind"`
+	Action      string `json:"action"`
+	Summary     string `json:"summary,omitempty"`
+	PolicyID    string `json:"policy_id,omitempty"`
+	AutoHandled bool   `json:"auto_handled,omitempty"`
 }
 
 type CommunicationPage struct {
@@ -449,14 +445,9 @@ func LoadCommunicationPage(parentID, handoffID string, after int64, limit int) (
 			break
 		}
 		page.Entries = append(page.Entries, CommunicationEntry{
-			Seq: entry.Seq, MessageID: entry.MessageID,
-			ChildSession: entry.ChildSessionID, HandoffID: entry.HandoffID,
-			Kind: entry.Kind, Action: entry.Action, Summary: entry.Summary,
+			MessageID: entry.MessageID, Kind: entry.Kind, Action: entry.Action, Summary: entry.Summary,
 			PolicyID: entry.PolicyID, AutoHandled: entry.AutoHandled,
 		})
-		if entry.CorrelationID != entry.MessageID {
-			page.Entries[len(page.Entries)-1].CorrelationID = entry.CorrelationID
-		}
 		page.NextAfter = entry.Seq
 	}
 	return page, nil

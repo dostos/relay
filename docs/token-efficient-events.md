@@ -79,6 +79,12 @@ cursor. A representative two-entry board shrinks from 208 to 112 bytes (about
 52 to 28 tokens). Subtree queries preserve node identity, and watches preserve
 the sequence needed for the next cursor.
 
+Manager communication pages now use their page-level `next_after` cursor and
+the durable message ID instead of repeating per-entry sequence, child-session,
+handoff, and correlation IDs. Filters still run against the full ledger before
+projection. A representative delta entry shrinks from 394 to 308 bytes (about
+99 to 77 tokens); its kind, action, bounded summary, and policy outcome remain.
+
 Adversarial coverage preserves real asks, permission gates, explicit results,
 uncovered exits, replay deduplication, disconnected-manager retry, stale gate
 failure, and durable cursor advancement. Compression happens before envelope

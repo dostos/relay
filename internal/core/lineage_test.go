@@ -73,6 +73,27 @@ func TestCommunicationPageIsCompactAndCursorBased(t *testing.T) {
 	if entry.MessageID != "pm-1" || entry.Action != "request" || entry.Summary == "" || len(entry.Summary) > 243 {
 		t.Fatalf("compact entry=%+v", entry)
 	}
+	raw, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := json.Marshal(struct {
+		Seq           int64  `json:"seq"`
+		MessageID     string `json:"message_id"`
+		CorrelationID string `json:"correlation_id,omitempty"`
+		ChildSession  string `json:"child_session_id"`
+		HandoffID     string `json:"handoff_id,omitempty"`
+		Kind          string `json:"kind"`
+		Action        string `json:"action"`
+		Summary       string `json:"summary,omitempty"`
+	}{1, entry.MessageID, "corr-1", "sess-child", "ho-1", entry.Kind, entry.Action, entry.Summary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) >= len(legacy) {
+		t.Fatalf("communication delta did not shrink: before=%d after=%d", len(legacy), len(raw))
+	}
+	t.Logf("communication_delta_bytes=%d->%d token_estimate=%d->%d", len(legacy), len(raw), (len(legacy)+3)/4, (len(raw)+3)/4)
 
 	next, err := LoadCommunicationPage("sess-parent", "ho-1", page.NextAfter, 20)
 	if err != nil || len(next.Entries) != 1 || next.Entries[0].Action != "resolve" || next.NextAfter != 3 || next.HasMore {
