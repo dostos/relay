@@ -93,6 +93,43 @@ func TestRunningAgentIsReady(t *testing.T) {
 	}
 }
 
+func TestGateWordsInProseAreNotAuthorityTransitions(t *testing.T) {
+	for _, prose := range []string{
+		`The manager said: "do not rephrase permission_required messages." Held. I won't retry.`,
+		`Confirmed: no permission is required and nothing should be approved.`,
+		`The literal gate name is permission_required; this is documentation.`,
+		`I quoted "Do you trust the contents of this directory?" but no prompt is active.`,
+		"I quoted \"Do you trust the contents of this directory?\" in a report.\n1. first finding\n2. second finding",
+		"> Do you trust the contents of this directory?\n1. first finding\n2. second finding",
+		"> Select login method:\n1. first finding\n2. second finding",
+		"> Run this command?\n1. first finding\n2. second finding",
+		"Do you trust the contents of this directory?\n1. first finding\n2. second finding",
+	} {
+		if got := ClassifyAgentPane(prose); got.State != AgentReady {
+			t.Fatalf("prose %q became an authority transition: %+v", prose, got)
+		}
+	}
+}
+
+func TestStrongStandaloneGateWithoutParsedChoicesStillBlocks(t *testing.T) {
+	for _, capture := range []string{
+		"Select login method:",
+		"Do you trust the contents of this directory? [y/N]",
+		"Enter to confirm · Esc to cancel",
+	} {
+		if got := ClassifyAgentPane(capture); got.State != AgentBlocked || got.Gate == nil {
+			t.Fatalf("unparsed live gate %q = %+v", capture, got)
+		}
+	}
+}
+
+func TestToolPermissionDecisionSurfaceIsBlocked(t *testing.T) {
+	got := ClassifyAgentPane("Run this command?\nNot in allowlist: git status\n→ Run (once) (y)\n  Add Shell(git status) to allowlist? (tab)\n  Skip & tell the agent what to do instead (esc or n)")
+	if got.State != AgentBlocked || got.Gate == nil || len(got.Gate.Choices) != 3 {
+		t.Fatalf("live tool gate = %+v", got)
+	}
+}
+
 // A gate wins over a shell prompt in the scrollback: classifying this as
 // "absent" would invite a relaunch on top of a pending security decision.
 func TestGateWinsOverShellPromptInScrollback(t *testing.T) {

@@ -331,7 +331,7 @@ func TestPaneStillActiveSuppressesOnlyNonActionableIdle(t *testing.T) {
 func TestIdlePermissionPromptIsClassifiedAndNotifiedOnce(t *testing.T) {
 	service, notifier, reg := newParentTestService(t)
 	service.Policies = &PolicyService{Path: filepath.Join(t.TempDir(), "missing-policy.yaml")}
-	service.Sessions.Persist = &capturePersistence{capture: "Run this command?\nNot in allowlist: echo, hostname, test\n"}
+	service.Sessions.Persist = &capturePersistence{capture: "Run this command?\nNot in allowlist: echo, hostname, test\n→ Run (once) (y)\n  Add Shell(echo) to allowlist? (tab)\n  Skip & tell the agent what to do instead (esc or n)\n"}
 	now := time.Now().UTC()
 	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "root"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
 	child := &Session{ID: "sess-child", HostID: "c3", Persist: ports.PersistHandle{Kind: "tmux", Name: "worker"}, CreatedAt: now}
@@ -349,6 +349,119 @@ func TestIdlePermissionPromptIsClassifiedAndNotifiedOnce(t *testing.T) {
 	}
 	if len(notifier.notices) != 1 {
 		t.Fatalf("repeated prompt notices=%d", len(notifier.notices))
+	}
+}
+
+func TestQuotedGateProseDoesNotCreatePermissionEnvelope(t *testing.T) {
+	for _, capture := range []string{
+		`The manager said "do not rephrase permission_required messages." Held. I won't retry.`,
+		`Confirmed: no permission is required; do not approve anything.`,
+		`The literal gate name permission_required is quoted documentation.`,
+		`I was instructed to quote "Do you trust the contents of this directory?" in the report.`,
+	} {
+		t.Run(capture, func(t *testing.T) {
+			service, notifier, reg := newParentTestService(t)
+			service.Sessions.Persist = &capturePersistence{capture: capture}
+			now := time.Now().UTC()
+			parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "root"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+			child := &Session{ID: "sess-child", HostID: "c3", Persist: ports.PersistHandle{Kind: "tmux", Name: "worker"}, CreatedAt: now}
+			_ = reg.PutSession(parent)
+			_ = reg.PutSession(child)
+			ho := &Handoff{ID: "ho-quoted", SessionID: child.ID, HostID: child.HostID, Kind: KindAgent, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
+			msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 213, Kind: "idle"})
+			if err != nil || msg != nil || len(notifier.notices) != 0 {
+				t.Fatalf("quoted prose routed: msg=%+v notices=%d err=%v", msg, len(notifier.notices), err)
+			}
+		})
+	}
+}
+
+func TestProseMetadataCannotPromoteAuthorityEvent(t *testing.T) {
+	for _, ev := range []coord.Event{
+		{Kind: "ask", Meta: map[string]any{"type": "permission_required", "text": "quoted token"}},
+		{Kind: "result", Meta: map[string]any{"category": "approval_required", "text": "ordinary result"}},
+		{Kind: "needs_input", Meta: map[string]any{"reason": "not_permission_required", "text": "question"}},
+	} {
+		if got := attentionKind(ev); got == "permission_required" {
+			t.Fatalf("metadata manufactured authority event: %+v", ev)
+		}
+	}
+}
+
+func TestChangedStructuredToolGateIsNotDeduplicated(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	capture := &capturePersistence{}
+	service.Sessions.Persist = capture
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "root"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c3", Persist: ports.PersistHandle{Kind: "tmux", Name: "worker"}, CreatedAt: now}
+	_ = reg.PutSession(parent)
+	_ = reg.PutSession(child)
+	ho := &Handoff{ID: "ho-tool", SessionID: child.ID, HostID: child.HostID, Kind: KindAgent, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
+	frame := func(command string) string {
+		return "Run this command?\nNot in allowlist: " + command + "\n→ Run (once) (y)\n  Add to allowlist? (tab)\n  Skip (esc or n)"
+	}
+	capture.capture = frame("git status")
+	first, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "idle"})
+	if err != nil || first == nil {
+		t.Fatalf("first gate=%+v err=%v", first, err)
+	}
+	capture.capture = frame("git push")
+	second, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 2, Kind: "idle"})
+	if err != nil || second == nil || second.ID == first.ID || len(notifier.notices) != 2 {
+		t.Fatalf("changed gate hidden: first=%+v second=%+v notices=%d err=%v", first, second, len(notifier.notices), err)
+	}
+}
+
+func TestPlainCommandChangesStructuredToolGateIdentity(t *testing.T) {
+	first := ClassifyAgentPane("Run this command?\ngit status\n→ Run once (y)\n  Skip (esc or n)")
+	second := ClassifyAgentPane("Run this command?\ngit push origin main\n→ Run once (y)\n  Skip (esc or n)")
+	if first.Gate == nil || second.Gate == nil || first.Gate.Subject == second.Gate.Subject || sameGateDecision(first.Gate, second.Gate) {
+		t.Fatalf("plain commands collapsed: first=%+v second=%+v", first, second)
+	}
+}
+
+func TestMultilineCommandChangesStructuredToolGateIdentity(t *testing.T) {
+	first := ClassifyAgentPane("Run this command?\npython <<EOF\nprint('a')\nEOF\n→ Run once (y)\n  Skip (esc or n)")
+	second := ClassifyAgentPane("Run this command?\npython <<EOF\nprint('b')\nEOF\n→ Run once (y)\n  Skip (esc or n)")
+	if first.Gate == nil || second.Gate == nil || sameGateDecision(first.Gate, second.Gate) {
+		t.Fatalf("multiline commands collapsed: first=%+v second=%+v", first, second)
+	}
+}
+
+func TestPermissionEnvelopeCannotBeAcknowledgedWithoutResolution(t *testing.T) {
+	service, _, _ := newParentTestService(t)
+	now := time.Now().UTC()
+	msg := &ParentMessage{V: 1, ID: "pm-gate", CorrelationID: "gate", ParentSessionID: "sess-parent", ChildSessionID: "sess-child", HandoffID: "ho-gate", Kind: "permission_required", State: ParentMessagePending, CreatedAt: now}
+	if err := writeParentMessage(msg, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Ack(msg.ID); err == nil || !strings.Contains(err.Error(), "explicit relay resolve") {
+		t.Fatalf("permission acknowledgement accepted: %v", err)
+	}
+	stored, err := service.FindMessage(msg.ID)
+	if err != nil || stored.State != ParentMessagePending {
+		t.Fatalf("permission state changed: %+v err=%v", stored, err)
+	}
+}
+
+func TestExplicitPermissionEventIsNotHiddenByStalePendingGate(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	service.Sessions.Persist = &capturePersistence{capture: "agent is running normally"}
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "root"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c3", Persist: ports.PersistHandle{Kind: "tmux", Name: "worker"}, CreatedAt: now}
+	_ = reg.PutSession(parent)
+	_ = reg.PutSession(child)
+	stale := &SecurityGate{Reason: "waiting for folder-trust approval", Directory: "/old", Subject: "/old"}
+	ho := &Handoff{ID: "ho-explicit", SessionID: child.ID, HostID: child.HostID, Kind: KindAgent, Status: StatusNeedsInput, PendingGate: stale, SourceSessionID: parent.ID, CreatedAt: now}
+	prior := &ParentMessage{V: 1, ID: "pm-old", CorrelationID: "old", ParentSessionID: parent.ID, ChildSessionID: child.ID, HandoffID: ho.ID, EventSeq: 1, Kind: "permission_required", Text: "old trust gate", Gate: stale, State: ParentMessagePending, CreatedAt: now}
+	if err := writeParentMessage(prior, true); err != nil {
+		t.Fatal(err)
+	}
+	msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 2, Kind: "permission_required", Meta: map[string]any{"text": "new tool approval", "structured_gate": true}})
+	if err != nil || msg == nil || msg.ID == prior.ID || msg.Gate != nil || len(notifier.notices) != 1 {
+		t.Fatalf("explicit decision hidden by stale gate: msg=%+v notices=%d err=%v", msg, len(notifier.notices), err)
 	}
 }
 
@@ -1431,8 +1544,8 @@ func TestPendingAttentionFindsAskHeldByAnAncestor(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := service.pendingAttention(manager.ID, "ho-worker")
-	if got == nil {
+	got, err := service.pendingAttention(manager.ID, "ho-worker")
+	if err != nil || got == nil {
 		t.Fatal("want the ancestor-held ask to be found from the manager")
 	}
 	if got.ID != "pm-held" {

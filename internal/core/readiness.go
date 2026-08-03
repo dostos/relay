@@ -51,10 +51,13 @@ type GateChoice struct {
 type SecurityGate struct {
 	Reason    string       `json:"reason"`
 	Directory string       `json:"directory,omitempty"`
+	Subject   string       `json:"subject,omitempty"`
 	Choices   []GateChoice `json:"choices,omitempty"`
 }
 
 var numberedGateChoice = regexp.MustCompile(`^\s*([›❯>]?)[[:space:]]*([0-9]+)\.[[:space:]]+(.+?)\s*$`)
+var selectedGateChoice = regexp.MustCompile(`^\s*([›❯→])[[:space:]]+(.+?)\s*$`)
+var shortcutGateChoice = regexp.MustCompile(`^\s*(.+?)[[:space:]]+\((?:tab|y|n|esc(?:[[:space:]]+or[[:space:]]+[a-z])?)\)\s*$`)
 
 func parseSecurityGate(lines []string, reason string) *SecurityGate {
 	gate := &SecurityGate{Reason: reason}
@@ -79,9 +82,78 @@ func parseSecurityGate(lines []string, reason string) *SecurityGate {
 				}
 			}
 			gate.Choices = append(gate.Choices, GateChoice{Index: idx, Label: strings.TrimSpace(match[3]), Selected: match[1] != ""})
+		} else if match := selectedGateChoice.FindStringSubmatch(line); len(match) == 3 {
+			gate.Choices = append(gate.Choices, GateChoice{Index: len(gate.Choices) + 1, Label: strings.TrimSpace(match[2]), Selected: true})
+		} else if match := shortcutGateChoice.FindStringSubmatch(line); len(match) == 2 {
+			gate.Choices = append(gate.Choices, GateChoice{Index: len(gate.Choices) + 1, Label: strings.TrimSpace(match[1])})
 		}
 	}
+	if reason == "waiting for tool-permission approval" {
+		var subjects []string
+		inBody := false
+		for _, line := range lines {
+			content := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), ">›❯→⚠"))
+			lower := strings.ToLower(content)
+			if strings.HasPrefix(lower, "run this command?") {
+				inBody = true
+				continue
+			}
+			if numberedGateChoice.MatchString(line) || selectedGateChoice.MatchString(line) || shortcutGateChoice.MatchString(line) {
+				if inBody {
+					break
+				}
+				continue
+			}
+			if lower == "" || strings.Trim(content, "─- ") == "" {
+				continue
+			}
+			if inBody || strings.HasPrefix(lower, "not in allowlist:") || strings.HasPrefix(content, "$") {
+				subjects = append(subjects, content)
+			}
+		}
+		gate.Subject = strings.Join(subjects, " | ")
+	}
+	if gate.Subject == "" && gate.Directory != "" {
+		gate.Subject = gate.Directory
+	}
 	return gate
+}
+
+func gateChoicesMatch(reason string, choices []GateChoice) bool {
+	if len(choices) == 0 {
+		return false
+	}
+	want := map[string][]string{
+		"waiting for account login":             {"account", "subscription", "console", "sign in", "login"},
+		"waiting for folder-trust approval":     {"trust", "yes", "no", "continue", "quit", "exit"},
+		"waiting for first-run theme selection": {"mode", "light", "dark", "theme"},
+		"waiting for tool-permission approval":  {"run", "allow", "skip", "deny"},
+	}
+	markers := want[reason]
+	if len(markers) == 0 {
+		return true
+	}
+	for _, choice := range choices {
+		label := strings.ToLower(choice.Label)
+		for _, marker := range markers {
+			if strings.Contains(label, marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func promptLine(line, marker string) bool {
+	content := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), "›❯→⚠"))
+	if match := numberedGateChoice.FindStringSubmatch(content); len(match) == 4 {
+		content = match[3]
+	}
+	lower := strings.ToLower(strings.TrimSpace(content))
+	if strings.HasPrefix(lower, marker) {
+		return true
+	}
+	return marker == "pre-approves" && strings.Contains(lower, "folder pre-approves")
 }
 
 // securityGates are prompts that grant something. They must be surfaced to the
@@ -101,6 +173,8 @@ var securityGates = []struct{ marker, reason string }{
 	{"choose the text style", "waiting for first-run theme selection"},
 	{"dark mode (colorblind-friendly)", "waiting for first-run theme selection"},
 	{"enter to confirm", "waiting at an interactive confirmation"},
+	{"run this command?", "waiting for tool-permission approval"},
+	{"not in allowlist", "waiting for tool-permission approval"},
 }
 
 // shellPrompts indicate a bare shell rather than a running agent.
@@ -120,8 +194,6 @@ func ClassifyAgentPane(capture string) AgentReadiness {
 	if len(lines) > 25 {
 		lines = lines[len(lines)-25:]
 	}
-	tail := strings.ToLower(strings.Join(lines, "\n"))
-
 	last := ""
 	for i := len(lines) - 1; i >= 0; i-- {
 		if strings.TrimSpace(lines[i]) != "" {
@@ -144,9 +216,34 @@ func ClassifyAgentPane(capture string) AgentReadiness {
 	// Otherwise a gate still wins over anything else in the tail: treating a
 	// pending security prompt as merely "absent" would invite an automation to
 	// relaunch on top of a decision the human has not made.
-	for _, gate := range securityGates {
-		if strings.Contains(tail, gate.marker) {
-			return AgentReadiness{State: AgentBlocked, Reason: gate.reason, Gate: parseSecurityGate(lines, gate.reason)}
+	for i := len(lines) - 1; i >= 0; i-- {
+		for _, gate := range securityGates {
+			if !promptLine(lines[i], gate.marker) {
+				continue
+			}
+			start := i
+			for j := i - 1; j >= 0 && j >= i-4; j-- {
+				contextLine := strings.ToLower(strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(lines[j]), ">›❯→⚠")))
+				if strings.HasPrefix(contextLine, "you are in ") || strings.HasPrefix(contextLine, "accessing workspace:") || strings.HasPrefix(contextLine, "$") {
+					start = j
+					break
+				}
+			}
+			end := i + 10
+			if end > len(lines) {
+				end = len(lines)
+			}
+			parsed := parseSecurityGate(lines[start:end], gate.reason)
+			if len(parsed.Choices) > 0 && !gateChoicesMatch(gate.reason, parsed.Choices) {
+				parsed.Choices = nil
+			}
+			if len(parsed.Choices) == 0 && i != len(lines)-1 {
+				// A strong prompt with no parseable choices is still blocked only
+				// when it owns the active tail. The same sentence followed by agent
+				// prose is a quotation, not a live decision surface.
+				continue
+			}
+			return AgentReadiness{State: AgentBlocked, Reason: gate.reason, Gate: parsed}
 		}
 	}
 	return AgentReadiness{State: AgentReady}

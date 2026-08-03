@@ -769,10 +769,6 @@ func attentionKind(ev coord.Event) string {
 	if ev.Kind == "permission_required" {
 		return "permission_required"
 	}
-	reason := strings.ToLower(eventString(ev.Meta, "reason", "type", "category"))
-	if strings.Contains(reason, "permission") || strings.Contains(reason, "approval") || strings.Contains(reason, "accept") {
-		return "permission_required"
-	}
 	switch ev.Kind {
 	case "ask", "needs_input", "idle":
 		return "ask"
@@ -797,33 +793,31 @@ func eventWakesManager(ev coord.Event) bool {
 	}
 }
 
-func (p *ParentService) classifySecurityEvent(ctx context.Context, ho *Handoff, ev coord.Event) (coord.Event, bool) {
+func (p *ParentService) classifySecurityEvent(ctx context.Context, ho *Handoff, ev coord.Event) (coord.Event, bool, bool) {
 	// Event kind and metadata are child-controlled. Inspect every event that
 	// could trigger a policy reply; an agent must not bypass a visible trust,
 	// login, or tool-permission gate by labeling it as an ordinary ask.
 	switch ev.Kind {
 	case "idle", "ask", "needs_input", "permission_required":
 	default:
-		return ev, ev.Kind != "idle"
+		return ev, ev.Kind != "idle", false
 	}
 	if p.Sessions == nil {
-		return ev, ev.Kind != "idle"
+		return ev, ev.Kind != "idle", false
 	}
 	capture, err := p.Sessions.Capture(ctx, ho.SessionID, 40)
 	if err != nil {
-		return ev, ev.Kind != "idle"
+		return ev, ev.Kind != "idle", false
 	}
 	readiness := ClassifyAgentPane(capture)
 	if readiness.State != AgentBlocked || readiness.Gate == nil {
-		if panePermissionPrompt(capture) {
-			ev.Kind = "permission_required"
-			ev.Meta = map[string]any{"text": decisionExcerpt(capture)}
-			return ev, true
-		}
-		return ev, ev.Kind != "idle"
+		return ev, ev.Kind != "idle", false
 	}
-	if child, getErr := p.Reg.GetSession(ho.SessionID); getErr == nil && child.RemoteCWD != "" {
+	if child, getErr := p.Reg.GetSession(ho.SessionID); getErr == nil && readiness.Gate.Directory == "" && child.RemoteCWD != "" {
 		readiness.Gate.Directory = child.RemoteCWD
+		if readiness.Gate.Subject == "" {
+			readiness.Gate.Subject = child.RemoteCWD
+		}
 	}
 	ho.Status, ho.PendingGate = StatusNeedsInput, readiness.Gate
 	if ho.DeliveryState == EffectPending {
@@ -836,7 +830,7 @@ func (p *ParentService) classifySecurityEvent(ctx context.Context, ho *Handoff, 
 	}
 	ev.Meta["gate"] = readiness.Gate
 	ev.Meta["text"] = formatSecurityGate(readiness.Gate)
-	return ev, true
+	return ev, true, true
 }
 
 func (p *ParentService) childEventText(ctx context.Context, ho *Handoff, ev coord.Event, kind string) (string, string, bool) {
@@ -853,9 +847,6 @@ func (p *ParentService) childEventText(ctx context.Context, ho *Handoff, ev coor
 			}
 			excerpt := decisionExcerpt(capture)
 			if excerpt != "" {
-				if panePermissionPrompt(capture) {
-					kind = "permission_required"
-				}
 				return "child idle on " + ho.HostID + " (use the handoff, not local paths); decide: " + excerpt, kind, true
 			}
 		}
@@ -867,12 +858,24 @@ func attentionMessage(kind string) bool {
 	return kind == "ask" || kind == "permission_required"
 }
 
+func sameGateDecision(a, b *SecurityGate) bool {
+	if a == nil || b == nil || a.Reason != b.Reason || a.Directory != b.Directory || a.Subject != b.Subject || len(a.Choices) != len(b.Choices) {
+		return false
+	}
+	for i := range a.Choices {
+		if a.Choices[i].Index != b.Choices[i].Index || a.Choices[i].Label != b.Choices[i].Label {
+			return false
+		}
+	}
+	return true
+}
+
 // pendingAttention finds an existing unresolved ask for this handoff. It scans
 // the given parent AND its ancestors, because an escalation raised while this
 // parent was disconnected is held by whichever ancestor received it. Without
 // the chain scan a reconnecting parent would raise a second ask for one
 // question, breaking the one-unresolved-ask-per-handoff invariant.
-func (p *ParentService) pendingAttention(parentID, handoffID string) *ParentMessage {
+func (p *ParentService) pendingAttention(parentID, handoffID string) (*ParentMessage, error) {
 	holders := []string{parentID}
 	for _, ancestor := range AncestorChain(p.Reg, parentID) {
 		holders = append(holders, ancestor.ID)
@@ -880,15 +883,15 @@ func (p *ParentService) pendingAttention(parentID, handoffID string) *ParentMess
 	for _, holder := range holders {
 		messages, err := p.ListMessages(holder, true)
 		if err != nil {
-			continue
+			return nil, err
 		}
 		for _, msg := range messages {
 			if msg.HandoffID == handoffID && attentionMessage(msg.Kind) {
-				return msg
+				return msg, nil
 			}
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 func (p *ParentService) deliverMessage(ctx context.Context, parent *Session, ho *Handoff, msg *ParentMessage) error {
@@ -1049,16 +1052,6 @@ func (p *ParentService) UncertainDeliveries() ([]*ParentMessage, error) {
 		}
 	}
 	return out, nil
-}
-
-func panePermissionPrompt(capture string) bool {
-	tail := strings.ToLower(capture)
-	for _, prompt := range []string{"run this command?", "not in allowlist", "permission", "approve", "confirm or esc"} {
-		if strings.Contains(tail, prompt) {
-			return true
-		}
-	}
-	return false
 }
 
 // paneSettleDelay is how long to wait between the two samples that decide
@@ -1325,8 +1318,8 @@ func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coo
 	if ho == nil || ho.SourceSessionID == "" || handoffTerminal(ho) {
 		return nil, nil
 	}
-	var keep bool
-	ev, keep = p.classifySecurityEvent(ctx, ho, ev)
+	var keep, freshStructuredGate bool
+	ev, keep, freshStructuredGate = p.classifySecurityEvent(ctx, ho, ev)
 	if !keep || !eventWakesManager(ev) {
 		return nil, nil
 	}
@@ -1341,7 +1334,7 @@ func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coo
 	parent := candidates[0]
 	correlationID := eventString(ev.Meta, "correlation_id", "request_id")
 	id := parentMessageID(ho.ID, kind, ev.Seq)
-	if correlationID != "" {
+	if correlationID != "" && kind != "permission_required" {
 		// A producer retry may receive a new relayd sequence. Its explicit
 		// correlation ID is the semantic idempotency key; deriving the envelope
 		// ID from it makes replay an exclusive-create lookup rather than another
@@ -1367,11 +1360,22 @@ func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coo
 	// independent of event sequence. If delivery failed, retry that envelope
 	// instead of allocating and injecting another one.
 	if attentionMessage(kind) {
-		if pending := p.pendingAttention(parent.ID, ho.ID); pending != nil && (ev.Kind == "idle" || pending.Kind == kind) {
-			// Event replay is not a delivery scheduler. The supervisor owns
-			// pending-envelope retries, so repeated child frames cannot turn into
-			// repeated pane injections or manager wake attempts.
-			return pending, nil
+		pending, pendingErr := p.pendingAttention(parent.ID, ho.ID)
+		if pendingErr != nil {
+			return nil, fmt.Errorf("inspect existing attention for %s: %w", ho.ID, pendingErr)
+		}
+		if pending != nil && (ev.Kind == "idle" || pending.Kind == kind) {
+			samePermission := (freshStructuredGate && sameGateDecision(pending.Gate, ho.PendingGate)) || (!freshStructuredGate && pending.Gate == nil && pending.Text == text)
+			if kind == "permission_required" && !samePermission {
+				// A changed structured decision is not a replay even when the
+				// previous decision is still pending. Preserve both audit records
+				// and surface the new authority boundary.
+			} else {
+				// Event replay is not a delivery scheduler. The supervisor owns
+				// pending-envelope retries, so repeated child frames cannot turn into
+				// repeated pane injections or manager wake attempts.
+				return pending, nil
+			}
 		}
 	}
 	msg := &ParentMessage{
@@ -1380,7 +1384,7 @@ func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coo
 		EventSeq: ev.Seq, Kind: kind, Text: text,
 		State: ParentMessagePending, CreatedAt: time.Now().UTC(),
 	}
-	if kind == "permission_required" && ho.DeliveryState == EffectBlocked {
+	if kind == "permission_required" && freshStructuredGate {
 		msg.Gate = ho.PendingGate
 	}
 	if err := writeParentMessage(msg, true); err != nil {
@@ -1747,6 +1751,9 @@ func (p *ParentService) Ack(messageID string) (*ParentMessage, error) {
 	}
 	if msg.State == ParentMessageAcked || msg.State == ParentMessageReplied {
 		return msg, nil
+	}
+	if msg.Kind == "permission_required" {
+		return nil, fmt.Errorf("permission decision %s requires explicit relay resolve", msg.ID)
 	}
 	now := time.Now().UTC()
 	msg.State, msg.AckedAt = ParentMessageAcked, &now
