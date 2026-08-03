@@ -77,7 +77,9 @@ func TestSendDoesNotClaimUnknownDisappearance(t *testing.T) {
 	sendConfirmDelay = 0
 	t.Cleanup(func() { sendConfirmDelay = oldDelay })
 	transport := &recordingTransport{stdout: "popup swallowed input\n"}
-	if err := New().Send(context.Background(), transport, ports.PersistHandle{Name: "agent"}, "relay marker", true); err == nil {
+	err := New().Send(context.Background(), transport, ports.PersistHandle{Name: "agent"}, "relay marker", true)
+	var uncertain *ports.DeliveryUncertainError
+	if err == nil || !errors.As(err, &uncertain) {
 		t.Fatal("missing pane-level evidence was reported as delivered")
 	}
 }

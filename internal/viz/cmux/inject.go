@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/dostos/relay/internal/core"
 )
 
 // Injecting a message into an agent pane is two steps — type the text, then
@@ -39,8 +41,8 @@ var composerPrefixes = []string{"›", ">", "❯"}
 // line is always the last one.
 //
 // It is best-effort by design: if the screen cannot be parsed, or the UI has no
-// recognisable composer, it reports "not held". An unfamiliar agent UI must
-// degrade to the old optimistic behaviour rather than have delivery blocked.
+// recognisable composer, it reports "not held". Callers must keep that state
+// unknown; absence alone is not delivery evidence.
 func composerHolds(screen, marker string) bool {
 	if marker == "" {
 		return false
@@ -75,6 +77,13 @@ func injectionSubmitted(screen, marker string) bool {
 	return marker != "" && strings.Contains(screen, marker) && !composerHolds(screen, marker)
 }
 
+func enterRetryBlocked(screen, marker string) bool {
+	if !composerHolds(screen, marker) {
+		return false
+	}
+	return core.ClassifyAgentPane(screen).State == core.AgentBlocked
+}
+
 // submitInjected presses ENTER and confirms the message left the composer,
 // retrying a bounded number of times.
 //
@@ -98,6 +107,9 @@ func (v *Viz) submitInjected(ctx context.Context, sessionID string, b binding, m
 		}
 		if injectionSubmitted(screen, marker) {
 			return nil
+		}
+		if enterRetryBlocked(screen, marker) {
+			return fmt.Errorf("stop ENTER retry: parent pane became blocked")
 		}
 	}
 	return fmt.Errorf("injected message %s is still unsent in %s's composer after %d attempts",

@@ -22,6 +22,9 @@ type fakeParentNotifier struct {
 	sent         []string
 	sendAttempts int
 	notifyFail   bool
+	uncertain    bool
+	started      chan struct{}
+	release      chan struct{}
 }
 
 type fakeRetirementViz struct {
@@ -96,6 +99,16 @@ func (f *fakeParentNotifier) CaptureScreen(context.Context, string, int) (string
 }
 func (f *fakeParentNotifier) SendScreen(_ context.Context, _ string, text string, _ bool) error {
 	f.sendAttempts++
+	if f.started != nil {
+		select {
+		case f.started <- struct{}{}:
+		default:
+		}
+		<-f.release
+	}
+	if f.uncertain {
+		return &ports.DeliveryUncertainError{Err: errors.New("submission acknowledgement unavailable")}
+	}
 	if f.notifyFail {
 		return errors.New("parent disconnected")
 	}
@@ -379,13 +392,181 @@ func TestDisconnectedParentReplayDoesNotRetryDurableAttentionEnvelope(t *testing
 	t.Logf("five_child_frames_delivery_attempts=5->2")
 }
 
+func TestUncertainSubmissionIsNotRetypedAcrossSupervisorRetries(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	service.Policies = &PolicyService{Path: filepath.Join(t.TempDir(), "missing-policy.yaml")}
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "apex"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c1", Persist: ports.PersistHandle{Kind: "tmux", Name: "worker"}, SourceSessionID: parent.ID, CreatedAt: now}
+	_ = reg.PutSession(parent)
+	_ = reg.PutSession(child)
+	ho := &Handoff{ID: "ho-child", SessionID: child.ID, HostID: child.HostID, Kind: KindAgent, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
+	_ = reg.PutHandoff(ho)
+	notifier.uncertain = true
+
+	msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 7, Kind: "result", Meta: map[string]any{"text": "identical terminal result"}})
+	if err == nil || msg == nil || msg.DeliveredAt != nil || msg.DeliveryMethod != "session_send_uncertain" || notifier.sendAttempts != 1 {
+		t.Fatalf("first msg=%+v attempts=%d err=%v", msg, notifier.sendAttempts, err)
+	}
+	// Model an old bridge/new supervisor restart boundary: the durable inbox is
+	// reloaded and DeliverPending runs repeatedly. The uncertain attempted
+	// effect remains visible, but the manager composer is never mutated again.
+	for i := 0; i < 3; i++ {
+		if delivered, retryErr := service.DeliverPending(context.Background(), parent.ID); retryErr != nil || delivered != 0 {
+			t.Fatalf("retry %d delivered=%d err=%v", i, delivered, retryErr)
+		}
+	}
+	if retryErr := service.deliverMessage(context.Background(), parent, ho, msg); retryErr == nil {
+		t.Fatal("uncertain delivery returned nil and could be mistaken for confirmed failover")
+	}
+	if notifier.sendAttempts != 1 {
+		t.Fatalf("uncertain terminal result was typed %d times", notifier.sendAttempts)
+	}
+	stored, err := service.ListMessages(parent.ID, false)
+	if err != nil || len(stored) != 1 || stored[0].State != ParentMessagePending || stored[0].DeliveryError == "" {
+		t.Fatalf("uncertain effect lost from audit: %+v err=%v", stored, err)
+	}
+	item := CompactParentMessage(stored[0], false)
+	if item.Delivery != deliveryUncertain || item.DeliveryError == "" || item.Next != "redeliver" {
+		t.Fatalf("uncertain effect hidden from manager projection: %+v", item)
+	}
+	ho.Status = StatusDone
+	_ = reg.PutHandoff(ho)
+	if swept, _, sweepErr := service.SweepTerminal(parent.ID); sweepErr != nil || swept != 0 {
+		t.Fatalf("terminal sweep erased uncertainty: swept=%d err=%v", swept, sweepErr)
+	}
+}
+
+func TestUncertainAttentionDoesNotFailOverPastItsManager(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	service.Policies = &PolicyService{Path: filepath.Join(t.TempDir(), "missing-policy.yaml")}
+	now := time.Now().UTC()
+	root := &Session{ID: "sess-root", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "root"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	manager := &Session{ID: "sess-manager", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "manager"}, Labels: map[string]string{"role": ParentRole}, SourceSessionID: root.ID, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c1", Persist: ports.PersistHandle{Kind: "tmux", Name: "worker"}, SourceSessionID: manager.ID, CreatedAt: now}
+	for _, sess := range []*Session{root, manager, child} {
+		_ = reg.PutSession(sess)
+	}
+	ho := &Handoff{ID: "ho-child", SessionID: child.ID, HostID: child.HostID, Kind: KindAgent, Status: StatusRunning, SourceSessionID: manager.ID, CreatedAt: now}
+	_ = reg.PutHandoff(ho)
+	notifier.uncertain = true
+
+	msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "ask", Meta: map[string]any{"text": "choose A or B"}})
+	if err == nil || msg == nil || msg.ParentSessionID != manager.ID || msg.DeliveryMethod != deliveryUncertain {
+		t.Fatalf("msg=%+v err=%v", msg, err)
+	}
+	if notifier.sendAttempts != 1 {
+		t.Fatalf("uncertain attention crossed hierarchy with %d attempts", notifier.sendAttempts)
+	}
+}
+
+func TestConcurrentDeliveryClaimsMutateComposerOnce(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "apex"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c1", Persist: ports.PersistHandle{Kind: "tmux", Name: "worker"}, CreatedAt: now}
+	_ = reg.PutSession(parent)
+	_ = reg.PutSession(child)
+	ho := &Handoff{ID: "ho-child", SessionID: child.ID, HostID: child.HostID, Kind: KindAgent, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
+	_ = reg.PutHandoff(ho)
+	msg := &ParentMessage{V: 1, ID: "pm-concurrent", ParentSessionID: parent.ID, ChildSessionID: child.ID, HandoffID: ho.ID, EventSeq: 1, Kind: "result", Text: "done", State: ParentMessagePending, CreatedAt: now}
+	if err := writeParentMessage(msg, true); err != nil {
+		t.Fatal(err)
+	}
+	notifier.started, notifier.release = make(chan struct{}, 1), make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- service.deliverMessage(context.Background(), parent, ho, msg) }()
+	<-notifier.started
+	secondCopy := *msg
+	if err := service.deliverMessage(context.Background(), parent, ho, &secondCopy); err == nil {
+		t.Fatal("losing concurrent claimant reported confirmed delivery")
+	}
+	stored, err := service.FindMessage(msg.ID)
+	if err != nil || stored.DeliveryMethod != deliveryAttempting {
+		t.Fatalf("loser cleared active claim: %+v err=%v", stored, err)
+	}
+	thirdCopy := *msg
+	if err := service.deliverMessage(context.Background(), parent, ho, &thirdCopy); err == nil {
+		t.Fatal("third claimant entered while first claim was active")
+	}
+	if notifier.sendAttempts != 1 {
+		t.Fatalf("active claim allowed %d composer mutations", notifier.sendAttempts)
+	}
+	close(notifier.release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if notifier.sendAttempts != 1 {
+		t.Fatalf("concurrent delivery mutated composer %d times", notifier.sendAttempts)
+	}
+}
+
+func TestDeliveryFinalizationPreservesConcurrentManagerReply(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "apex"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c1", Persist: ports.PersistHandle{Kind: "tmux", Name: "worker"}, CreatedAt: now}
+	_ = reg.PutSession(parent)
+	_ = reg.PutSession(child)
+	ho := &Handoff{ID: "ho-child", SessionID: child.ID, HostID: child.HostID, Kind: KindAgent, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
+	_ = reg.PutHandoff(ho)
+	msg := &ParentMessage{V: 1, ID: "pm-reply-race", ParentSessionID: parent.ID, ChildSessionID: child.ID, HandoffID: ho.ID, EventSeq: 1, Kind: "ask", Text: "A or B?", State: ParentMessagePending, CreatedAt: now}
+	if err := writeParentMessage(msg, true); err != nil {
+		t.Fatal(err)
+	}
+	notifier.started, notifier.release = make(chan struct{}, 1), make(chan struct{})
+	done := make(chan error, 1)
+	go func() { done <- service.deliverMessage(context.Background(), parent, ho, msg) }()
+	<-notifier.started
+	if _, err := service.Reply(context.Background(), msg.ID, "A"); err != nil {
+		t.Fatal(err)
+	}
+	close(notifier.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	stored, err := service.FindMessage(msg.ID)
+	if err != nil || stored.State != ParentMessageReplied || stored.Reply != "A" || stored.DeliveredAt == nil || stored.DeliveryMethod != "session_send_confirmed" {
+		t.Fatalf("delivery finalization erased reply: %+v err=%v", stored, err)
+	}
+}
+
+func TestDeliveryFinalizationStopsAfterAuthorityRetirement(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "apex"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c1", Persist: ports.PersistHandle{Kind: "tmux", Name: "worker"}, CreatedAt: now}
+	_ = reg.PutSession(parent)
+	_ = reg.PutSession(child)
+	ho := &Handoff{ID: "ho-child", SessionID: child.ID, HostID: child.HostID, Kind: KindAgent, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
+	msg := &ParentMessage{V: 1, ID: "pm-retired", ParentSessionID: parent.ID, ChildSessionID: child.ID, HandoffID: ho.ID, EventSeq: 1, Kind: "result", Text: "done", State: ParentMessagePending, CreatedAt: now}
+	if err := writeParentMessage(msg, true); err != nil {
+		t.Fatal(err)
+	}
+	notifier.started, notifier.release = make(chan struct{}, 1), make(chan struct{})
+	done := make(chan error, 1)
+	go func() { done <- service.deliverMessage(context.Background(), parent, ho, msg) }()
+	<-notifier.started
+	if err := os.WriteFile(ProjectionOnlyMarkerPath(), []byte("authority retired"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	close(notifier.release)
+	if err := <-done; err == nil {
+		t.Fatal("retired authority finalized a delivery")
+	}
+	stored, err := readParentMessage(parentMessagePath(parent.ID, msg.ID))
+	if err != nil || stored.DeliveryMethod != deliveryAttempting || stored.DeliveredAt != nil {
+		t.Fatalf("retired authority mutated claim: %+v err=%v", stored, err)
+	}
+}
+
 func TestFormatParentNoticeQualifiesRemoteHandoff(t *testing.T) {
 	got := FormatParentNotice(ParentNotice{MessageID: "pm-1", Kind: "ask", Child: "worker@cancun", Text: "inspect remote", Action: "reply"})
 	if !strings.Contains(got, "[relay ask worker@cancun]") || !strings.Contains(got, "relay resolve pm-1 --") || strings.Count(got, "pm-1") != 1 || strings.Contains(got, "ho-1") {
 		t.Fatalf("notice lacks remote routing context: %q", got)
 	}
 	receipt := FormatParentNotice(ParentNotice{MessageID: "pm-2", Kind: "result", Child: "worker@cancun", Text: "done"})
-	if strings.Contains(receipt, "resolve") || strings.Contains(receipt, "pm-2") || receipt != "[relay result worker@cancun] done" {
+	if strings.Contains(receipt, "resolve") || strings.Count(receipt, "pm-2") != 1 || receipt != "[relay result worker@cancun pm-2] done" {
 		t.Fatalf("receipt created a handshake: %q", receipt)
 	}
 }
@@ -1092,7 +1273,7 @@ func TestRedeliverReceiptRequiresConfirmedSessionSend(t *testing.T) {
 	_ = reg.PutSession(child)
 	ho := &Handoff{ID: "ho-result", SessionID: child.ID, HostID: "c1", Kind: KindAgent, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
 	_ = reg.PutHandoff(ho)
-	msg := &ParentMessage{V: 1, ID: "pm-result", ParentSessionID: parent.ID, ChildSessionID: child.ID, HandoffID: ho.ID, EventSeq: 9, Kind: "result", Text: "complete", State: ParentMessageAcked, DeliveredAt: &now, AckedAt: &now, CreatedAt: now}
+	msg := &ParentMessage{V: 1, ID: "pm-result", ParentSessionID: parent.ID, ChildSessionID: child.ID, HandoffID: ho.ID, EventSeq: 9, Kind: "result", Text: "complete", State: ParentMessageAcked, DeliveredAt: &now, AckedAt: &now, DeliveryMethod: deliveryUncertain, DeliveryError: "old ambiguous effect", CreatedAt: now}
 	if err := writeParentMessage(msg, true); err != nil {
 		t.Fatal(err)
 	}
@@ -1100,7 +1281,7 @@ func TestRedeliverReceiptRequiresConfirmedSessionSend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != ParentMessageAcked || got.DeliveryMethod != "session_send_confirmed" || got.DeliveryBuild == "" {
+	if got.State != ParentMessageAcked || got.DeliveryMethod != "session_send_confirmed" || got.DeliveryBuild == "" || got.DeliveryError != "" {
 		t.Fatalf("redelivery=%+v", got)
 	}
 }

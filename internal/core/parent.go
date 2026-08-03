@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -74,23 +75,35 @@ type ParentMessage struct {
 	PolicyError     string             `json:"policy_error,omitempty"`
 	DeliveryMethod  string             `json:"delivery_method,omitempty"`
 	DeliveryBuild   string             `json:"delivery_build,omitempty"`
+	DeliveryError   string             `json:"delivery_error,omitempty"`
+}
+
+const (
+	deliveryAttempting = "session_send_attempting"
+	deliveryUncertain  = "session_send_uncertain"
+)
+
+func deliveryInDoubt(msg *ParentMessage) bool {
+	return msg != nil && (msg.DeliveryMethod == deliveryAttempting || msg.DeliveryMethod == deliveryUncertain)
 }
 
 // ParentInboxItem is the turn-level projection of a durable parent message.
 // Full timestamps, routing identity, and event cursors remain on disk and in
 // history; an orchestrator receives only what it needs for one decision.
 type ParentInboxItem struct {
-	ID          string             `json:"id"`
-	Kind        string             `json:"kind"`
-	Text        string             `json:"text,omitempty"`
-	Gate        *SecurityGate      `json:"gate,omitempty"`
-	State       ParentMessageState `json:"state,omitempty"`
-	Reply       string             `json:"reply,omitempty"`
-	PolicyID    string             `json:"policy_id,omitempty"`
-	AutoHandled bool               `json:"auto_handled,omitempty"`
-	PolicyError string             `json:"policy_error,omitempty"`
-	Next        string             `json:"next"`
-	Argv        []string           `json:"argv"`
+	ID            string             `json:"id"`
+	Kind          string             `json:"kind"`
+	Text          string             `json:"text,omitempty"`
+	Gate          *SecurityGate      `json:"gate,omitempty"`
+	State         ParentMessageState `json:"state,omitempty"`
+	Reply         string             `json:"reply,omitempty"`
+	PolicyID      string             `json:"policy_id,omitempty"`
+	AutoHandled   bool               `json:"auto_handled,omitempty"`
+	PolicyError   string             `json:"policy_error,omitempty"`
+	Delivery      string             `json:"delivery,omitempty"`
+	DeliveryError string             `json:"delivery_error,omitempty"`
+	Next          string             `json:"next"`
+	Argv          []string           `json:"argv"`
 }
 
 func CompactParentMessage(msg *ParentMessage, includeState bool) ParentInboxItem {
@@ -99,6 +112,9 @@ func CompactParentMessage(msg *ParentMessage, includeState bool) ParentInboxItem
 	if msg.Kind == "ask" || msg.Kind == "permission_required" {
 		next = "resolve"
 		argv = []string{"relay", "resolve", msg.ID, "--", "<decision>"}
+	} else if deliveryInDoubt(msg) {
+		next = "redeliver"
+		argv = []string{"relay", "parent", "redeliver", msg.ID}
 	}
 	text := msg.Text
 	if msg.Gate != nil {
@@ -112,12 +128,18 @@ func CompactParentMessage(msg *ParentMessage, includeState bool) ParentInboxItem
 		ID: msg.ID, Kind: msg.Kind, Text: text, Gate: msg.Gate,
 		Next: next, Argv: argv,
 	}
+	if deliveryInDoubt(msg) {
+		item.Delivery = msg.DeliveryMethod
+		item.DeliveryError = msg.DeliveryError
+	}
 	if includeState {
 		item.State = msg.State
 		item.Reply = msg.Reply
 		item.PolicyID = msg.PolicyID
 		item.AutoHandled = msg.AutoHandled
 		item.PolicyError = msg.PolicyError
+		item.Delivery = msg.DeliveryMethod
+		item.DeliveryError = msg.DeliveryError
 	}
 	return item
 }
@@ -491,6 +513,9 @@ func (p *ParentService) SweepTerminal(parentID string) (int, map[string]int, err
 		if getErr != nil || !handoffTerminal(ho) {
 			continue
 		}
+		if deliveryInDoubt(msg) {
+			continue
+		}
 		if _, err := p.Ack(msg.ID); err != nil {
 			return acked, byHandoff, err
 		}
@@ -590,6 +615,67 @@ func writeParentMessageLocked(msg *ParentMessage, exclusive bool) error {
 	return os.Rename(tmp, path)
 }
 
+func claimParentDelivery(msg *ParentMessage) (bool, error) {
+	if err := EnsureAuthorityWritable(); err != nil {
+		return false, err
+	}
+	unlock, err := lockAuthorityWrite()
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+	stored, err := readParentMessage(parentMessagePath(msg.ParentSessionID, msg.ID))
+	if err != nil {
+		return false, err
+	}
+	*msg = *stored
+	if msg.State != ParentMessagePending || msg.DeliveredAt != nil {
+		return false, nil
+	}
+	if deliveryInDoubt(msg) {
+		return false, fmt.Errorf("delivery %s for %s requires reconciliation: %s", msg.DeliveryMethod, msg.ID, msg.DeliveryError)
+	}
+	msg.DeliveryMethod, msg.DeliveryBuild, msg.DeliveryError = deliveryAttempting, coord.Build, ""
+	if err := writeParentMessageLocked(msg, false); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func finalizeParentDelivery(msg *ParentMessage, method, deliveryErr string, confirmed bool) error {
+	if err := EnsureAuthorityWritable(); err != nil {
+		return err
+	}
+	unlock, err := lockAuthorityWrite()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	stored, err := readParentMessage(parentMessagePath(msg.ParentSessionID, msg.ID))
+	if err != nil {
+		return err
+	}
+	if stored.DeliveryMethod != deliveryAttempting {
+		return fmt.Errorf("delivery claim for %s changed to %q before finalization", msg.ID, stored.DeliveryMethod)
+	}
+	stored.DeliveryMethod, stored.DeliveryBuild, stored.DeliveryError = method, coord.Build, compactText(deliveryErr)
+	if method == "" {
+		stored.DeliveryBuild = ""
+	}
+	if confirmed {
+		now := time.Now().UTC()
+		stored.DeliveredAt = &now
+		if !attentionMessage(stored.Kind) && stored.State == ParentMessagePending {
+			stored.State, stored.AckedAt = ParentMessageAcked, &now
+		}
+	}
+	if err := writeParentMessageLocked(stored, false); err != nil {
+		return err
+	}
+	*msg = *stored
+	return nil
+}
+
 func readParentMessage(path string) (*ParentMessage, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -623,7 +709,10 @@ func (p *ParentService) ListMessages(parentID string, pendingOnly bool) ([]*Pare
 			continue
 		}
 		msg, err := readParentMessage(filepath.Join(dir, entry.Name()))
-		if err != nil || pendingOnly && msg.State != ParentMessagePending {
+		if err != nil {
+			return nil, fmt.Errorf("read parent message %s/%s: %w", parentID, entry.Name(), err)
+		}
+		if pendingOnly && msg.State != ParentMessagePending {
 			continue
 		}
 		out = append(out, msg)
@@ -806,6 +895,9 @@ func (p *ParentService) deliverMessage(ctx context.Context, parent *Session, ho 
 	if msg == nil || msg.State != ParentMessagePending || msg.DeliveredAt != nil {
 		return nil
 	}
+	if deliveryInDoubt(msg) {
+		return fmt.Errorf("delivery %s for %s requires reconciliation: %s", msg.DeliveryMethod, msg.ID, msg.DeliveryError)
+	}
 	childName := ho.HostID
 	if child, err := p.Reg.GetSession(ho.SessionID); err == nil {
 		childName = child.Persist.Name + "@" + ho.HostID
@@ -816,6 +908,7 @@ func (p *ParentService) deliverMessage(ctx context.Context, parent *Session, ho 
 	}
 	notice := ParentNotice{MessageID: msg.ID, Kind: msg.Kind, Child: childName, Text: msg.Text, Action: action}
 	var err error
+	claimed := false
 	if p.Sessions != nil {
 		attemptCtx, cancel := context.WithTimeout(ctx, deliveryAttemptTimeout)
 		capture, captureErr := p.Sessions.Capture(attemptCtx, parent.ID, 40)
@@ -824,13 +917,33 @@ func (p *ParentService) deliverMessage(ctx context.Context, parent *Session, ho 
 		} else if readiness := ClassifyAgentPane(capture); readiness.State != AgentReady {
 			err = fmt.Errorf("parent is %s: %s", readiness.State, readiness.Reason)
 		} else {
-			err = p.Sessions.Send(attemptCtx, parent.ID, FormatParentNotice(notice), true)
+			// Reserve the side effect before any adapter mutates the composer.
+			// A crash from here onward is uncertain, never a safe automatic retry.
+			var writeErr error
+			claimed, writeErr = claimParentDelivery(msg)
+			if writeErr != nil {
+				err = fmt.Errorf("reserve parent delivery: %w", writeErr)
+			} else if !claimed {
+				return nil
+			} else {
+				err = p.Sessions.Send(attemptCtx, parent.ID, FormatParentNotice(notice), true)
+			}
 		}
 		cancel()
 	} else {
 		err = fmt.Errorf("no delivery path for parent %s", parent.ID)
 	}
 	if err != nil {
+		var uncertain *ports.DeliveryUncertainError
+		if claimed && errors.As(err, &uncertain) {
+			if writeErr := finalizeParentDelivery(msg, deliveryUncertain, err.Error(), false); writeErr != nil {
+				return fmt.Errorf("%v; persist uncertain delivery: %w", err, writeErr)
+			}
+		} else if claimed {
+			if writeErr := finalizeParentDelivery(msg, "", "", false); writeErr != nil {
+				return fmt.Errorf("%v; clear unused delivery reservation: %w", err, writeErr)
+			}
+		}
 		return err
 	}
 	// Desktop presentation is supplementary. It can flash a bound surface, but
@@ -844,18 +957,9 @@ func (p *ParentService) deliverMessage(ctx context.Context, parent *Session, ho 
 		_ = p.Notifier.NotifyParent(notifyCtx, parent.ID, notice)
 		cancel()
 	}
-	now := time.Now().UTC()
-	msg.DeliveredAt = &now
-	msg.DeliveryMethod = "session_send_confirmed"
-	msg.DeliveryBuild = coord.Build
-	// Results and exits are receipts, not questions. Successful injection is
-	// their delivery acknowledgement; making the manager run a second command
-	// adds no information and doubles the orchestration traffic.
-	if !attentionMessage(msg.Kind) {
-		msg.State = ParentMessageAcked
-		msg.AckedAt = &now
-	}
-	return writeParentMessage(msg, false)
+	// Finalization reloads under the authority lock so a manager reply that
+	// races pane acknowledgement cannot be overwritten by this stale copy.
+	return finalizeParentDelivery(msg, "session_send_confirmed", "", true)
 }
 
 // RedeliverReceipt repairs an informational envelope whose historical
@@ -877,7 +981,7 @@ func (p *ParentService) RedeliverReceipt(ctx context.Context, messageID string) 
 		return nil, err
 	}
 	msg.State, msg.DeliveredAt, msg.AckedAt = ParentMessagePending, nil, nil
-	msg.DeliveryMethod, msg.DeliveryBuild = "", ""
+	msg.DeliveryMethod, msg.DeliveryBuild, msg.DeliveryError = "", "", ""
 	if err := writeParentMessage(msg, false); err != nil {
 		return nil, err
 	}
@@ -901,7 +1005,7 @@ func (p *ParentService) DeliverPending(ctx context.Context, parentID string) (in
 	}
 	delivered := 0
 	for _, msg := range messages {
-		if msg.DeliveredAt != nil {
+		if msg.DeliveredAt != nil || deliveryInDoubt(msg) {
 			continue
 		}
 		ho, getErr := p.Reg.GetHandoff(msg.HandoffID)
@@ -914,6 +1018,37 @@ func (p *ParentService) DeliverPending(ctx context.Context, parentID string) (in
 		delivered++
 	}
 	return delivered, nil
+}
+
+// UncertainDeliveries returns post-reservation effects that cannot be retried
+// safely without an explicit reconciliation decision.
+func (p *ParentService) UncertainDeliveries() ([]*ParentMessage, error) {
+	if err := EnsureAuthorityReadable(); err != nil {
+		return nil, err
+	}
+	owners, err := os.ReadDir(ParentInboxDir())
+	if os.IsNotExist(err) {
+		return []*ParentMessage{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []*ParentMessage
+	for _, owner := range owners {
+		if !owner.IsDir() {
+			continue
+		}
+		messages, listErr := p.ListMessages(owner.Name(), true)
+		if listErr != nil {
+			return nil, fmt.Errorf("inspect delivery effects for %s: %w", owner.Name(), listErr)
+		}
+		for _, msg := range messages {
+			if msg.State == ParentMessagePending && deliveryInDoubt(msg) {
+				out = append(out, msg)
+			}
+		}
+	}
+	return out, nil
 }
 
 func panePermissionPrompt(capture string) bool {
@@ -1166,6 +1301,9 @@ func (p *ParentService) deliverEscalation(ctx context.Context, candidates []*Ses
 		// manager from, so the envelope simply stays pending for DeliverPending.
 		return err
 	}
+	if deliveryInDoubt(msg) {
+		return err
+	}
 	// Give the intended manager a second chance before anyone is skipped, so a
 	// transient hiccup cannot bypass a manager that is actually live.
 	if retryErr := p.deliverMessage(ctx, immediate, ho, msg); retryErr == nil {
@@ -1327,7 +1465,10 @@ func FormatParentNotice(n ParentNotice) string {
 		// could not already perform with this one key.
 		return fmt.Sprintf("[relay %s %s] %s; relay resolve %s -- <decision>", n.Kind, n.Child, text, n.MessageID)
 	}
-	return fmt.Sprintf("[relay %s %s] %s", n.Kind, n.Child, text)
+	// Receipts need their durable ID too. It is the idempotency key used by
+	// interactive delivery across supervisor and bridge restarts; omitting it
+	// makes two identical terminal results indistinguishable on the pane.
+	return fmt.Sprintf("[relay %s %s %s] %s", n.Kind, n.Child, n.MessageID, text)
 }
 
 func (p *ParentService) Watch(ctx context.Context, handoffID string) error {
@@ -1349,6 +1490,9 @@ func (p *ParentService) Watch(ctx context.Context, handoffID string) error {
 	sess, err := p.Reg.GetSession(ho.SessionID)
 	if err != nil {
 		return err
+	}
+	if p.NewTransport == nil {
+		return fmt.Errorf("watch handoff %s: transport adapter unavailable", handoffID)
 	}
 	t, err := p.NewTransport(ho.HostID)
 	if err != nil {

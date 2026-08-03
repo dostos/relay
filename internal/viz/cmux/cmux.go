@@ -501,16 +501,33 @@ func (v *Viz) SendScreen(ctx context.Context, sessionID, text string, enter bool
 		return err
 	}
 	if _, err := v.run(ctx, surfaceCommand("send", b.Surface, b.Workspace, "--", text)...); err != nil {
-		return err
+		return &ports.DeliveryUncertainError{Err: err}
 	}
 	if !enter {
 		return nil
 	}
-	marker := text
-	if len(marker) > 48 {
-		marker = marker[:48]
+	if err := v.submitInjected(ctx, sessionID, b, injectionMarker(text)); err != nil {
+		return &ports.DeliveryUncertainError{Err: err}
 	}
-	return v.submitInjected(ctx, sessionID, b, marker)
+	return nil
+}
+
+var (
+	resolveMessageIDRE = regexp.MustCompile(`(; relay resolve pm-[a-zA-Z0-9]+ -- <decision>)$`)
+	receiptMessageIDRE = regexp.MustCompile(`^(\[relay [^ ]+ [^ ]+ pm-[a-zA-Z0-9]+\])`)
+)
+
+func injectionMarker(text string) string {
+	if match := resolveMessageIDRE.FindStringSubmatch(text); len(match) == 2 {
+		return match[1]
+	}
+	if match := receiptMessageIDRE.FindStringSubmatch(text); len(match) == 2 {
+		return match[1]
+	}
+	if len(text) > 48 {
+		return text[:48]
+	}
+	return text
 }
 
 // surfaceCommand keeps multi-step input directed at the same pane even when

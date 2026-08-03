@@ -161,7 +161,7 @@ func (p *Persist) Launch(ctx context.Context, t ports.Transport, h ports.Persist
 	for attempt := 0; attempt < sendConfirmAttempts; attempt++ {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return &ports.DeliveryUncertainError{Err: ctx.Err()}
 		case <-time.After(sendConfirmDelay):
 		}
 		out, _, _ := t.Run(ctx, "", fmt.Sprintf("tmux show-option -t %s -v @relay_launch_ack 2>/dev/null", target))
@@ -194,7 +194,7 @@ func (p *Persist) Send(ctx context.Context, t ports.Transport, h ports.PersistHa
 	cmd := fmt.Sprintf("tmux send-keys -t %s -l -- %s", shellquote.Quote(exactPane(h.Name)), shellquote.Quote(text))
 	_, stderr, err := t.Run(ctx, "", cmd)
 	if err != nil {
-		return fmt.Errorf("send: %w (%s)", err, strings.TrimSpace(stderr))
+		return &ports.DeliveryUncertainError{Err: fmt.Errorf("send: %w (%s)", err, strings.TrimSpace(stderr))}
 	}
 	if !enter {
 		return nil
@@ -206,7 +206,7 @@ func (p *Persist) Send(ctx context.Context, t ports.Transport, h ports.PersistHa
 	for attempt := 0; attempt < sendConfirmAttempts; attempt++ {
 		_, stderr, err = t.Run(ctx, "", fmt.Sprintf("tmux send-keys -t %s Enter", shellquote.Quote(exactPane(h.Name))))
 		if err != nil {
-			return fmt.Errorf("submit: %w (%s)", err, strings.TrimSpace(stderr))
+			return &ports.DeliveryUncertainError{Err: fmt.Errorf("submit: %w (%s)", err, strings.TrimSpace(stderr))}
 		}
 		select {
 		case <-ctx.Done():
@@ -215,13 +215,13 @@ func (p *Persist) Send(ctx context.Context, t ports.Transport, h ports.PersistHa
 		}
 		screen, captureErr := p.Capture(ctx, t, h, sendConfirmLines)
 		if captureErr != nil {
-			return fmt.Errorf("confirm send: %w", captureErr)
+			return &ports.DeliveryUncertainError{Err: fmt.Errorf("confirm send: %w", captureErr)}
 		}
 		if messageSubmitted(screen, marker) {
 			return nil
 		}
 	}
-	return fmt.Errorf("message is still unsent in %s's composer after %d attempts", h.Name, sendConfirmAttempts)
+	return &ports.DeliveryUncertainError{Err: fmt.Errorf("message is still unsent in %s's composer after %d attempts", h.Name, sendConfirmAttempts)}
 }
 
 func messageSubmitted(screen, marker string) bool {

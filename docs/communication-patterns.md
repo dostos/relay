@@ -44,3 +44,9 @@ milestone, or an uncovered failure. Durable IDs and cursors carry context;
 screen excerpts are limited to the exact decision. Never compress away a
 failed write, stale cursor, duplicate delivery, terminal exit, or security
 gate.
+
+Interactive delivery distinguishes confirmed, definitely failed before input,
+and uncertain after input/submission was attempted. Only a definite pre-input
+failure is an automatic retry. An uncertain effect stays pending and auditable;
+watchers must not retype it, and reconciliation or an explicit operator action
+owns any later attempt.

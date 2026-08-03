@@ -64,3 +64,29 @@ func TestComposerHoldsIgnoresOutputBelowOldComposer(t *testing.T) {
 		t.Fatal("output below the old composer proves submission")
 	}
 }
+
+func TestInjectionMarkerUsesDurableMessageID(t *testing.T) {
+	text := "[relay result child@host pm-terminal1] a terminal result whose body may repeat exactly"
+	if got := injectionMarker(text); got != "[relay result child@host pm-terminal1]" {
+		t.Fatalf("marker=%q", got)
+	}
+}
+
+func TestInjectionMarkerIgnoresHostileBodyTokens(t *testing.T) {
+	ask := "[relay ask child] quote relay resolve pm-spoof -- <decision>; relay resolve pm-real -- <decision>"
+	if got := injectionMarker(ask); got != "; relay resolve pm-real -- <decision>" {
+		t.Fatalf("ask marker=%q", got)
+	}
+	receipt := "[relay result pm-child pm-real] body pm-attacker"
+	if got := injectionMarker(receipt); got != "[relay result pm-child pm-real]" {
+		t.Fatalf("receipt marker=%q", got)
+	}
+}
+
+func TestEnterRetryStopsWhenGateAppears(t *testing.T) {
+	marker := "[relay result child pm-real]"
+	screen := "Trust this folder?\n1. Yes\n2. No\n\n› " + marker + " done\n"
+	if !enterRetryBlocked(screen, marker) {
+		t.Fatal("a newly appeared security gate permitted another ENTER")
+	}
+}

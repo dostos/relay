@@ -3759,6 +3759,16 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 				string(ready.State) + " " + ready.Reason})
 		}
 		if a.Parents != nil {
+			if uncertain, err := a.Parents.UncertainDeliveries(); err == nil {
+				if len(uncertain) == 0 {
+					checks = append(checks, check{"delivery_effects", true, "none uncertain"})
+				} else {
+					checks = append(checks, check{"delivery_effects", false,
+						fmt.Sprintf("%d require reconciliation, oldest %s", len(uncertain), uncertain[0].ID)})
+				}
+			} else {
+				checks = append(checks, check{"delivery_effects", false, "inspection failed: " + err.Error()})
+			}
 			if stale, err := a.Parents.FindStaleEscalations(core.EscalationMaxHold(), time.Now().UTC()); err == nil {
 				if len(stale) == 0 {
 					checks = append(checks, check{"pending_decisions", true, "none stalled"})

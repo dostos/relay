@@ -60,6 +60,14 @@ type Persistence interface {
 	InstallSensors(ctx context.Context, t Transport, h PersistHandle, silenceSec int, emitCmd func(kind string) (string, error)) error
 }
 
+// DeliveryUncertainError marks an adapter error after a mutating input command
+// was attempted. Callers must preserve the envelope and must not retry it
+// automatically because the target may already have received the message.
+type DeliveryUncertainError struct{ Err error }
+
+func (e *DeliveryUncertainError) Error() string { return e.Err.Error() }
+func (e *DeliveryUncertainError) Unwrap() error { return e.Err }
+
 // HoldingShellLauncher is the narrow capability used to leave Relay's
 // freshly-created holding shell. Its acknowledgement proves only that the
 // shell evaluated the launch line; interactive message delivery is separate.
