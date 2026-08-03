@@ -2387,6 +2387,19 @@ func (a *App) cmdRoot(ctx context.Context, args []string) int {
 		}
 	}
 	sub, rest := args[0], args[1:]
+	if sub == "control-plane" {
+		if strings.TrimSpace(os.Getenv(bridge.SourceSessionEnv)) != "" {
+			return a.fail(fmt.Errorf("control-plane availability is a human policy declaration"))
+		}
+		if len(rest) != 1 || (rest[0] != "--always-on" && rest[0] != "--sleepable") {
+			return a.fail(fmt.Errorf("usage: relay root control-plane --always-on|--sleepable"))
+		}
+		cp, err := core.SetLocalControlPlaneAlwaysOn(rest[0] == "--always-on")
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "control_plane": cp}))
+	}
 	if sub == "replace" {
 		if strings.TrimSpace(os.Getenv(bridge.SourceSessionEnv)) != "" {
 			return a.fail(fmt.Errorf("apex replacement requires direct human control-plane authority"))

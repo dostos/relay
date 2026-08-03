@@ -153,8 +153,10 @@ work — so if that machine sleeps, the router sleeps with it and an escalation
 raised meanwhile is not routed until it wakes. `relay root enroll` and `relay
 root status` report this rather than let an enroll imply autonomy the
 deployment cannot deliver. For genuinely unattended operation, start governed
-work from a session on an always-on host and declare
-`RELAY_CONTROL_PLANE_ALWAYS_ON=1` there. See
+work from a session on an always-on host and declare that durable machine
+policy once with `relay root control-plane --always-on`. Use `--sleepable` if
+the machine's availability changes. Relay deliberately does not infer this
+policy from a running process or socket. See
 [`docs/superpowers/specs/2026-08-01-relay-autonomous-D-control-plane-locality.md`](docs/superpowers/specs/2026-08-01-relay-autonomous-D-control-plane-locality.md).
 
 ### Keeping watchers alive

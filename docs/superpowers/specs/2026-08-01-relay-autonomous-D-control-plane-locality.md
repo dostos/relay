@@ -48,7 +48,7 @@ Option 4 is worth doing regardless of which of 1–3 is chosen, because today no
 
 ## Status: option 4 implemented
 
-`DescribeControlPlane` (`internal/core/root.go`) reports the host governance actually runs on, and `relay root enroll` / `relay root status` surface it. Relay never claims always-on on its own — it cannot detect whether a machine sleeps — so the caveat is stated unless `RELAY_CONTROL_PLANE_ALWAYS_ON=1` is declared explicitly on a host that does not sleep.
+`DescribeControlPlane` (`internal/core/root.go`) reports the host governance actually runs on, and `relay root enroll` / `relay root status` surface it. Relay never claims always-on on its own — it cannot detect whether a machine sleeps. A human declares the durable host policy with `relay root control-plane --always-on` (or reverses it with `--sleepable`); the host-identity-bound declaration lives in `~/.config/relay/control-plane.json`, so interactive shells, relayd, the supervisor, and restarts agree without rewriting `host.yaml`. The environment variable remains a compatibility override.
 
 This does not deliver away-from-desk autonomy. It removes the false impression of it, which was the more dangerous of the two problems.
 

@@ -238,6 +238,34 @@ func TestParentSendRefusesSilentZeroEventChannel(t *testing.T) {
 	}
 }
 
+func TestControlPlaneDeclarationRequiresHumanAndPersists(t *testing.T) {
+	state, config := t.TempDir(), t.TempDir()
+	t.Setenv("RELAY_STATE_DIR", state)
+	t.Setenv("RELAY_CONFIG_DIR", config)
+	t.Setenv("RELAY_CONTROL_PLANE_ALWAYS_ON", "")
+	if err := os.WriteFile(filepath.Join(config, "host.yaml"), []byte("version: 1\nhost_id: home-relay\nagents: []\npath_map: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := New()
+	now := time.Now().UTC()
+	apex := &core.Session{ID: "sess-apex", HostID: "home-relay", Persist: ports.PersistHandle{Kind: "tmux", Name: "apex"}, Labels: map[string]string{"apex": "true"}, CreatedAt: now}
+	if err := a.Reg.PutSession(apex); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(bridge.SourceSessionEnv, apex.ID)
+	if code := a.Run([]string{"root", "control-plane", "--always-on"}); code == 0 {
+		t.Fatal("agent was allowed to declare machine availability")
+	}
+	t.Setenv(bridge.SourceSessionEnv, "")
+	if code := a.Run([]string{"root", "control-plane", "--always-on"}); code != 0 {
+		t.Fatalf("human declaration exit=%d", code)
+	}
+	cp := core.DescribeControlPlane()
+	if !cp.AlwaysOn || cp.DeclaredBy != "host_config" {
+		t.Fatalf("control plane=%+v", cp)
+	}
+}
+
 func TestUnknownFlagRejected(t *testing.T) {
 	a := New()
 	if code := a.Run([]string{"session", "create", "--bogus", "x"}); code == 0 {
