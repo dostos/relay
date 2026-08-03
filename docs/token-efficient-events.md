@@ -53,7 +53,18 @@ The same rule applies to the default inbox projection. A representative
 permission item shrinks from 226 to 146 serialized bytes (about 57 to 37 tokens)
 by leaving handoff, child-session, and correlation IDs in the authoritative
 envelope and history. `--all` still exposes audit state, while the default item
-retains the exact text, structured gate, message ID, and executable next action.
+retains the decision content (text or structured gate), message ID, and
+executable next action.
+For a recognized gate, the default projection carries the structured reason,
+directory, and choices without repeating their formatted text; the measured
+item shrinks from 327 to 256 bytes (about 82 to 64 tokens). Unparsed permission
+events retain text, and the authoritative envelope always retains both forms.
+
+Managed agent parents use `wake_mode=inject`. Their confirmed composer delivery
+is now the sole wake effect instead of also generating a desktop notification
+and surface flash. Explicit `notify` parents and legacy registrations retain
+desktop presentation. This reduces presentation paths per agent-manager event
+from two to one without changing envelope durability or delivery acknowledgement.
 
 Adversarial coverage preserves real asks, permission gates, explicit results,
 uncovered exits, replay deduplication, disconnected-manager retry, stale gate

@@ -235,6 +235,20 @@ func TestRouteChildEventDeduplicatesAndKeepsMessageCompact(t *testing.T) {
 	}
 }
 
+func TestInjectWakeModeDoesNotDuplicateDesktopInterruption(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "agent-manager"}, Labels: map[string]string{"role": ParentRole, "wake_mode": "inject"}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c1", Persist: ports.PersistHandle{Kind: "tmux", Name: "child"}, CreatedAt: now}
+	_ = reg.PutSession(parent)
+	_ = reg.PutSession(child)
+	ho := &Handoff{ID: "ho-child", SessionID: child.ID, HostID: child.HostID, Kind: KindAgent, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
+	msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "ask", Meta: map[string]any{"text": "choose A or B"}})
+	if err != nil || msg == nil || msg.DeliveredAt == nil || len(notifier.sent) != 1 || len(notifier.notices) != 0 {
+		t.Fatalf("inject wake duplicated presentation: msg=%+v sends=%d notices=%d err=%v", msg, len(notifier.sent), len(notifier.notices), err)
+	}
+}
+
 func TestRemoteManagerReceivesChildEventWithoutHumanNotification(t *testing.T) {
 	service, notifier, reg := newParentTestService(t)
 	recorder := &recordingPersistence{}
@@ -953,6 +967,34 @@ func TestCompactParentMessageOmitsDurableRoutingMetadata(t *testing.T) {
 		t.Fatalf("compact inbox did not shrink: before=%d after=%d", len(legacy), len(raw))
 	}
 	t.Logf("serialized_inbox_bytes=%d->%d token_estimate=%d->%d", len(legacy), len(raw), (len(legacy)+3)/4, (len(raw)+3)/4)
+}
+
+func TestCompactParentMessageDoesNotRepeatStructuredGateText(t *testing.T) {
+	gate := &SecurityGate{Reason: "folder trust required", Directory: "/repo", Choices: []GateChoice{{Index: 1, Label: "Trust"}, {Index: 2, Label: "Exit"}}}
+	msg := &ParentMessage{ID: "pm-gate", Kind: "permission_required", Text: formatSecurityGate(gate), Gate: gate}
+	item := CompactParentMessage(msg, false)
+	if item.Text != "" || item.Gate == nil || len(item.Gate.Choices) != 2 {
+		t.Fatalf("structured gate projection = %+v", item)
+	}
+	raw, err := json.Marshal(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withDuplicate := item
+	withDuplicate.Text = msg.Text
+	legacy, err := json.Marshal(withDuplicate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) >= len(legacy) {
+		t.Fatalf("structured gate projection did not shrink: before=%d after=%d", len(legacy), len(raw))
+	}
+	t.Logf("structured_gate_bytes=%d->%d token_estimate=%d->%d", len(legacy), len(raw), (len(legacy)+3)/4, (len(raw)+3)/4)
+
+	unparsed := CompactParentMessage(&ParentMessage{ID: "pm-raw", Kind: "permission_required", Text: "approval required"}, false)
+	if unparsed.Text != "approval required" || unparsed.Gate != nil {
+		t.Fatalf("unparsed permission lost failure text: %+v", unparsed)
+	}
 }
 
 func TestParentMessageCarriesFailoverAttribution(t *testing.T) {

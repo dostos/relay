@@ -100,8 +100,16 @@ func CompactParentMessage(msg *ParentMessage, includeState bool) ParentInboxItem
 		next = "resolve"
 		argv = []string{"relay", "resolve", msg.ID, "--", "<decision>"}
 	}
+	text := msg.Text
+	if msg.Gate != nil {
+		// Recognized gates already carry the exact reason, directory, and
+		// choices structurally. Their formatted Text is retained on the durable
+		// envelope and composer notice, but repeating it in the inbox projection
+		// makes the decision surface appear twice to the manager.
+		text = ""
+	}
 	item := ParentInboxItem{
-		ID: msg.ID, Kind: msg.Kind, Text: msg.Text, Gate: msg.Gate,
+		ID: msg.ID, Kind: msg.Kind, Text: text, Gate: msg.Gate,
 		Next: next, Argv: argv,
 	}
 	if includeState {
@@ -822,7 +830,11 @@ func (p *ParentService) deliverMessage(ctx context.Context, parent *Session, ho 
 	}
 	// Desktop presentation is supplementary. It can flash a bound surface, but
 	// it never owns or acknowledges the parent communication.
-	if isLocalParent(parent) && p.Notifier != nil {
+	// Agent managers registered by managed launch use composer injection as
+	// their wake effect. Flashing the same surface as well is a second
+	// interruption carrying no state. Explicit notify parents (and legacy
+	// registrations without a mode) retain desktop presentation.
+	if isLocalParent(parent) && parent.Labels["wake_mode"] != "inject" && p.Notifier != nil {
 		notifyCtx, cancel := context.WithTimeout(ctx, deliveryAttemptTimeout)
 		_ = p.Notifier.NotifyParent(notifyCtx, parent.ID, notice)
 		cancel()
