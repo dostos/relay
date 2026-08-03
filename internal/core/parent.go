@@ -525,6 +525,11 @@ func parentMessageID(handoffID, kind string, seq int64) string {
 	return "pm-" + hex.EncodeToString(sum[:8])
 }
 
+func correlatedParentMessageID(handoffID, kind, correlationID string) string {
+	sum := sha256.Sum256([]byte(handoffID + "\x00" + kind + "\x00correlation\x00" + correlationID))
+	return "pm-" + hex.EncodeToString(sum[:8])
+}
+
 func parentMessageDir(parentID string) string {
 	return filepath.Join(ParentInboxDir(), sanitizeID(parentID))
 }
@@ -1196,14 +1201,21 @@ func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coo
 		return nil, fmt.Errorf("handoff %s has no reachable parent lineage", ho.ID)
 	}
 	parent := candidates[0]
+	correlationID := eventString(ev.Meta, "correlation_id", "request_id")
 	id := parentMessageID(ho.ID, kind, ev.Seq)
+	if correlationID != "" {
+		// A producer retry may receive a new relayd sequence. Its explicit
+		// correlation ID is the semantic idempotency key; deriving the envelope
+		// ID from it makes replay an exclusive-create lookup rather than another
+		// manager wake. Handoff and kind remain in the hash boundary.
+		id = correlatedParentMessageID(ho.ID, kind, correlationID)
+	}
 	// Replay guard. The envelope may live in any ancestor's inbox after a
 	// failover, and FindMessage scans them all, so this catches a re-routed
 	// event that the per-directory exclusive create would now miss.
 	if existing, findErr := p.FindMessage(id); findErr == nil && existing != nil {
 		return existing, nil
 	}
-	correlationID := eventString(ev.Meta, "correlation_id", "request_id")
 	if correlationID == "" {
 		correlationID = id
 	}

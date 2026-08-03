@@ -91,6 +91,11 @@ not an implicit delivery scheduler. In the failure/recovery regression, five
 repeated frames fall from five pane-delivery attempts to two: the initial
 attempt and one supervisor-owned recovery attempt.
 
+An explicit `correlation_id` is also an idempotency key within one handoff and
+event kind. Producer retries with a new relayd sequence reuse the original
+envelope and wake; hostile changed text cannot overwrite the first durable
+effect. The two-event regression reduces envelopes and wakeups from two to one.
+
 Adversarial coverage preserves real asks, permission gates, explicit results,
 uncovered exits, replay deduplication, disconnected-manager retry, stale gate
 failure, and durable cursor advancement. Compression happens before envelope

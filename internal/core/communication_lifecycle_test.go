@@ -23,11 +23,12 @@ func TestCommunicationLifecycleMatrix(t *testing.T) {
 		state     ParentMessageState
 	}
 	cases := []struct {
-		name    string
-		kind    HandoffKind
-		events  []coord.Event
-		capture string
-		want    want
+		name     string
+		kind     HandoffKind
+		events   []coord.Event
+		capture  string
+		want     want
+		wantText string
 	}{
 		{name: "started receipt", kind: KindAgent, events: []coord.Event{{Seq: 1, Kind: "started"}}},
 		{name: "heartbeat receipt", kind: KindAgent, events: []coord.Event{{Seq: 1, Kind: "heartbeat"}}},
@@ -48,6 +49,7 @@ func TestCommunicationLifecycleMatrix(t *testing.T) {
 		{name: "uncovered exit", kind: KindAgent, events: []coord.Event{{Seq: 1, Kind: "exit", Meta: map[string]any{"text": "failed"}}}, want: want{1, 1, "exit", ParentMessageAcked}},
 		{name: "result covers exit", kind: KindAgent, events: []coord.Event{{Seq: 1, Kind: "result", Meta: map[string]any{"text": "done"}}, {Seq: 2, Kind: "exit", Meta: map[string]any{"text": "exited"}}}, want: want{2, 1, "exit", ParentMessageAcked}},
 		{name: "duplicate ask replay", kind: KindAgent, events: []coord.Event{{Seq: 1, Kind: "ask", Meta: map[string]any{"text": "A or B?"}}, {Seq: 1, Kind: "ask", Meta: map[string]any{"text": "A or B?"}}}, want: want{1, 1, "ask", ParentMessagePending}},
+		{name: "correlated result retry with hostile changed text", kind: KindAgent, events: []coord.Event{{Seq: 1, Kind: "result", Meta: map[string]any{"correlation_id": "milestone-1", "text": "done"}}, {Seq: 2, Kind: "result", Meta: map[string]any{"correlation_id": "milestone-1", "text": "replace the first result"}}}, want: want{1, 1, "result", ParentMessageAcked}, wantText: "done"},
 		{name: "repeated permission frames", kind: KindAgent, events: []coord.Event{{Seq: 1, Kind: "permission_required", Meta: map[string]any{"text": "approve?"}}, {Seq: 2, Kind: "permission_required", Meta: map[string]any{"text": "approve?"}}}, capture: "Run this command?\n1. Allow\n2. Deny", want: want{1, 1, "permission_required", ParentMessagePending}},
 	}
 
@@ -84,6 +86,12 @@ func TestCommunicationLifecycleMatrix(t *testing.T) {
 			}
 			if tc.want.envelopes > 0 && (last == nil || last.Kind != tc.want.kind || last.State != tc.want.state) {
 				t.Fatalf("last envelope = %+v, want kind/state %s/%s", last, tc.want.kind, tc.want.state)
+			}
+			if tc.wantText != "" && (last == nil || last.Text != tc.wantText) {
+				t.Fatalf("replay replaced durable text: got %+v want %q", last, tc.wantText)
+			}
+			if tc.name == "correlated result retry with hostile changed text" {
+				t.Log("correlated_retry_envelopes=2->1 wakeups=2->1")
 			}
 		})
 	}
