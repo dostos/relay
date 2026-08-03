@@ -17,8 +17,12 @@ func newSupervisorFixture(t *testing.T) (*SupervisorService, *Registry) {
 func putSupervisedHandoff(t *testing.T, reg *Registry, id, status string, source string) {
 	t.Helper()
 	now := time.Now().UTC()
+	sessionID := "sess-child-" + id
+	if err := reg.PutSession(&Session{ID: sessionID, HostID: "c3", SourceSessionID: source, Persist: ports.PersistHandle{Kind: "tmux", Name: id}, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
 	ho := &Handoff{
-		ID: id, SessionID: "sess-child-" + id, HostID: "c3", Kind: KindAgent,
+		ID: id, SessionID: sessionID, HostID: "c3", Kind: KindAgent,
 		Status: HandoffStatus(status), SourceSessionID: source, CreatedAt: now,
 	}
 	if err := reg.PutHandoff(ho); err != nil {
@@ -52,6 +56,9 @@ func TestNeedsWatchSelectsOnlyLiveHandoffsWithAParent(t *testing.T) {
 func TestBlockedDeliveryRemainsWatchableAfterRegistryReload(t *testing.T) {
 	sup, reg := newSupervisorFixture(t)
 	now := time.Now().UTC()
+	if err := reg.PutSession(&Session{ID: "sess-blocked", HostID: "c3", SourceSessionID: "sess-manager", Persist: ports.PersistHandle{Kind: "tmux", Name: "blocked"}, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
 	ho := &Handoff{ID: "ho-blocked", SessionID: "sess-blocked", HostID: "c3", Kind: KindAgent, Status: StatusNeedsInput, LaunchState: EffectAcknowledged, DeliveryState: EffectBlocked, PendingGate: &SecurityGate{Reason: "trust", Directory: "/repo", Choices: []GateChoice{{Index: 1, Label: "Yes"}, {Index: 2, Label: "No"}}}, SourceSessionID: "sess-manager", CreatedAt: now}
 	if err := reg.PutHandoff(ho); err != nil {
 		t.Fatal(err)
@@ -97,7 +104,7 @@ func TestReconcileRedeliversPendingEnvelopeWithoutNewChildEvent(t *testing.T) {
 	service, notifier, reg := newParentTestService(t)
 	now := time.Now().UTC()
 	parent := &Session{ID: "sess-manager", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "manager"}, Labels: map[string]string{"role": ParentRole, "wake_mode": "inject"}, CreatedAt: now}
-	child := &Session{ID: "sess-child", HostID: "c1", Persist: ports.PersistHandle{Kind: "tmux", Name: "child"}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c1", SourceSessionID: parent.ID, Persist: ports.PersistHandle{Kind: "tmux", Name: "child"}, CreatedAt: now}
 	_ = reg.PutSession(parent)
 	_ = reg.PutSession(child)
 	ho := &Handoff{ID: "ho-child", SessionID: child.ID, HostID: child.HostID, Kind: KindAgent, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}

@@ -121,10 +121,14 @@ func (s *SupervisorService) NeedsWatch() ([]*Handoff, error) {
 	}
 	var out []*Handoff
 	for _, ho := range all {
-		if ho == nil || ho.SourceSessionID == "" || handoffTerminal(ho) {
+		if ho == nil || handoffTerminal(ho) {
 			continue
 		}
-		out = append(out, ho)
+		effective, err := effectiveLiveHandoff(s.Reg, ho)
+		if err != nil || effective.SourceSessionID == "" {
+			continue
+		}
+		out = append(out, effective)
 	}
 	return out, nil
 }

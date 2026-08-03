@@ -818,6 +818,12 @@ func (h *HandoffService) Finalize(ctx context.Context, handoffID string, outcome
 	}
 	ho.ExitCode = &code
 	ho.Outcome = string(outcome)
+	// Current hierarchy lives on the session. Snapshot it into the handoff only
+	// as the handoff becomes history, so manager replacement never requires a
+	// fragile two-file lineage transaction during active work.
+	ho.SourceSessionID = sess.SourceSessionID
+	ho.SourceHostID = sess.SourceHostID
+	ho.SourcePersistName = sess.SourcePersistName
 	switch outcome {
 	case OutcomeFailed:
 		ho.Status = StatusFailed

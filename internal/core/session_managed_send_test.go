@@ -36,7 +36,7 @@ func TestManagedChildSendRequiresImmediateEdgeAndObservableEvents(t *testing.T) 
 	if err == nil || receipt == nil || receipt.EventStream != "absent" || persist.text != "" {
 		t.Fatalf("submitted-with-zero-events was not stopped: receipt=%+v text=%q err=%v", receipt, persist.text, err)
 	}
-	if err := reg.PutHandoff(&Handoff{ID: "ho-child", SessionID: child.ID, HostID: child.HostID, Kind: KindAgent, Status: StatusRunning, SourceSessionID: "sess-manager", CreatedAt: now}); err != nil {
+	if err := reg.PutHandoff(&Handoff{ID: "ho-child", SessionID: child.ID, HostID: child.HostID, Kind: KindAgent, Status: StatusRunning, CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	receipt, err = svc.SendManagedChild(context.Background(), "sess-manager", child.ID, "review", false)

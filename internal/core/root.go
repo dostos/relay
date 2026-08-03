@@ -196,6 +196,30 @@ func (r *RootService) Enroll(sessionID string) (*Session, error) {
 	if sess.SourceSessionID != "" && sess.SourceSessionID != apex.ID {
 		return nil, fmt.Errorf("session %s already reports to %s", sess.ID, sess.SourceSessionID)
 	}
+	// A parent edge without a live handoff is only a drawable line. Handoffs
+	// own the event stream, sensors and watcher cursor; marking a bare pane as
+	// governed would let composer delivery report success with no response
+	// path. Direct human panes remain usable through explicit delivery-only
+	// sends, but cannot advertise autonomous governance.
+	handoffs, err := r.Reg.ListHandoffs()
+	if err != nil {
+		return nil, err
+	}
+	var channel *Handoff
+	for _, ho := range handoffs {
+		if ho.SessionID == sess.ID && !handoffTerminal(ho) {
+			if channel != nil {
+				return nil, fmt.Errorf("session %s has multiple live handoff event channels", sess.ID)
+			}
+			channel = ho
+		}
+	}
+	if channel == nil {
+		return nil, fmt.Errorf("session %s has no live handoff event channel; relaunch it as a managed handoff before enrollment", sess.ID)
+	}
+	if channel.SourceSessionID != "" && channel.SourceSessionID != apex.ID {
+		return nil, fmt.Errorf("handoff %s already reports to %s", channel.ID, channel.SourceSessionID)
+	}
 	// Guard the one cycle this command could create.
 	for _, ancestor := range AncestorChain(r.Reg, apex.ID) {
 		if ancestor.ID == sess.ID {

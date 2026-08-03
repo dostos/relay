@@ -52,6 +52,11 @@ func newRootTestService(t *testing.T) (*RootService, *Registry) {
 		if err := reg.PutSession(sess); err != nil {
 			t.Fatal(err)
 		}
+		if id != "sess-apex" {
+			if err := reg.PutHandoff(&Handoff{ID: "ho-" + id, SessionID: id, HostID: "home", Kind: KindAgent, Status: StatusRunning, EventsPath: id + ".jsonl", CreatedAt: now}); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	return &RootService{Reg: reg}, reg
 }
@@ -74,10 +79,39 @@ func TestEnrollPlacesARootUnderTheApex(t *testing.T) {
 	if got.Labels[GovernedLabel] != "true" {
 		t.Fatalf("want the root marked governed, labels=%v", got.Labels)
 	}
+	ho, err := reg.GetHandoff("ho-sess-proj-a")
+	if err != nil || ho.SourceSessionID != "" {
+		t.Fatalf("historical handoff lineage was rewritten instead of deriving the live edge: %+v err=%v", ho, err)
+	}
+	effective, err := effectiveLiveHandoff(reg, ho)
+	if err != nil || effective.SourceSessionID != "sess-apex" {
+		t.Fatalf("live event routing did not derive the authoritative session edge: %+v err=%v", effective, err)
+	}
 	// Escalation from the enrolled root now has the apex as a live ancestor.
 	chain := AncestorChain(reg, "sess-proj-a")
 	if len(chain) != 1 || chain[0].ID != "sess-apex" {
 		t.Fatalf("apex must be the escalation ancestor, got %+v", chain)
+	}
+}
+
+func TestEnrollRefusesBarePaneWithoutResponseChannel(t *testing.T) {
+	root, reg := newRootTestService(t)
+	if _, err := root.Adopt("sess-apex"); err != nil {
+		t.Fatal(err)
+	}
+	bare, err := reg.GetSession("sess-proj-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.PutHandoff(&Handoff{ID: "ho-sess-proj-a", SessionID: bare.ID, HostID: bare.HostID, Kind: KindAgent, Status: StatusDone, CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := root.Enroll(bare.ID); err == nil || !strings.Contains(err.Error(), "no live handoff event channel") {
+		t.Fatalf("bare pane enrollment err=%v", err)
+	}
+	got, _ := reg.GetSession(bare.ID)
+	if got.SourceSessionID != "" || got.Labels[GovernedLabel] != "" {
+		t.Fatalf("failed enrollment partially mutated authority: %+v", got)
 	}
 }
 
@@ -330,8 +364,8 @@ func TestReplaceApexMovesDirectChildrenAndHandoffs(t *testing.T) {
 		}
 	}
 	gotHandoff, _ := reg.GetHandoff("ho-worker")
-	if gotHandoff.SourceSessionID != "sess-proj-b" {
-		t.Fatalf("handoff parent=%s", gotHandoff.SourceSessionID)
+	if gotHandoff.SourceSessionID != "sess-apex" {
+		t.Fatalf("historical launch lineage was rewritten: parent=%s", gotHandoff.SourceSessionID)
 	}
 	old, _ := reg.GetSession("sess-apex")
 	next, _ := reg.GetSession("sess-proj-b")
@@ -353,7 +387,7 @@ func TestReplaceApexRejectsSameSession(t *testing.T) {
 	}
 }
 
-func TestRecoverReplacementConvergesSessionAndHandoffIndependently(t *testing.T) {
+func TestRecoverReplacementUsesSessionAsLiveLineageAuthority(t *testing.T) {
 	root, reg := newRootTestService(t)
 	if _, err := root.Adopt("sess-apex"); err != nil {
 		t.Fatal(err)
@@ -376,8 +410,8 @@ func TestRecoverReplacementConvergesSessionAndHandoffIndependently(t *testing.T)
 		t.Fatal(err)
 	}
 	got, _ := reg.GetHandoff(handoff.ID)
-	if got.SourceSessionID != "sess-proj-b" {
-		t.Fatalf("handoff parent=%s", got.SourceSessionID)
+	if got.SourceSessionID != "sess-apex" {
+		t.Fatalf("historical launch lineage was rewritten: parent=%s", got.SourceSessionID)
 	}
 }
 

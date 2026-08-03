@@ -1499,6 +1499,10 @@ func (p *ParentService) Watch(ctx context.Context, handoffID string) error {
 	if err != nil {
 		return err
 	}
+	ho, err = effectiveLiveHandoff(p.Reg, ho)
+	if err != nil {
+		return err
+	}
 	if ho.SourceSessionID == "" {
 		return fmt.Errorf("handoff %s has no parent session", handoffID)
 	}
@@ -1527,7 +1531,9 @@ func (p *ParentService) Watch(ctx context.Context, handoffID string) error {
 			subErr = streamEvents(ctx, p.Coord, t, sess.Persist.Name, from, true, func(ev coord.Event) bool {
 				latest, getErr := p.Reg.GetHandoff(handoffID)
 				if getErr == nil {
-					ho = latest
+					if effective, effectiveErr := effectiveLiveHandoff(p.Reg, latest); effectiveErr == nil {
+						ho = effective
+					}
 				}
 				if handoffTerminal(ho) {
 					ended = true

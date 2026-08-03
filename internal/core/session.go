@@ -463,6 +463,28 @@ type ManagedSendReceipt struct {
 	HandoffID   string `json:"handoff_id,omitempty"`
 }
 
+// effectiveLiveHandoff derives routing from the live session edge. The
+// session registry is the authority for current hierarchy; handoff lineage is
+// retained as a historical launch snapshot and must not become a second live
+// source of truth after enrollment or manager replacement.
+func effectiveLiveHandoff(reg *Registry, ho *Handoff) (*Handoff, error) {
+	if ho == nil {
+		return nil, fmt.Errorf("handoff required")
+	}
+	copy := *ho
+	sess, err := reg.GetSession(ho.SessionID)
+	if err != nil {
+		if handoffTerminal(ho) {
+			return &copy, nil
+		}
+		return nil, err
+	}
+	copy.SourceSessionID = sess.SourceSessionID
+	copy.SourceHostID = sess.SourceHostID
+	copy.SourcePersistName = sess.SourcePersistName
+	return &copy, nil
+}
+
 // UnobservableGovernedChildren finds topology edges advertised as governed but
 // lacking a live handoff, which is the owner of sensors, event cursors, and the
 // watcher. A live tmux pane alone is not an event channel.
@@ -512,7 +534,7 @@ func (s *SessionService) SendManagedChild(ctx context.Context, managerID, childI
 		return nil, err
 	}
 	for _, ho := range handoffs {
-		if ho.SessionID == childID && ho.SourceSessionID == managerID && !handoffTerminal(ho) {
+		if ho.SessionID == childID && !handoffTerminal(ho) {
 			receipt.EventStream, receipt.HandoffID = "active", ho.ID
 			break
 		}

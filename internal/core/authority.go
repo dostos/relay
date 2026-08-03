@@ -171,13 +171,6 @@ func (r *RootService) applyReplacement(ctx context.Context, parents *ParentServi
 		if err != nil {
 			return nil, err
 		}
-		handoffs, _ := r.Reg.ListHandoffs()
-		bySession := map[string]*Handoff{}
-		for _, ho := range handoffs {
-			if !handoffTerminal(ho) {
-				bySession[ho.SessionID] = ho
-			}
-		}
 		for _, childID := range intent.Children {
 			child, childErr := r.Reg.GetSession(childID)
 			if childErr != nil {
@@ -190,17 +183,6 @@ func (r *RootService) applyReplacement(ctx context.Context, parents *ParentServi
 				child.SourceSessionID, child.SourceHostID, child.SourcePersistName = next.ID, next.HostID, next.Persist.Name
 				if err := r.Reg.putSessionLocked(child); err != nil {
 					return nil, err
-				}
-			}
-			if ho := bySession[child.ID]; ho != nil {
-				if ho.SourceSessionID != old.ID && ho.SourceSessionID != next.ID {
-					return nil, fmt.Errorf("handoff %s changed managers during replacement", ho.ID)
-				}
-				if ho.SourceSessionID != next.ID {
-					ho.SourceSessionID, ho.SourceHostID, ho.SourcePersistName = next.ID, next.HostID, next.Persist.Name
-					if err := r.Reg.putHandoffLocked(ho); err != nil {
-						return nil, err
-					}
 				}
 			}
 			result.Reparented = append(result.Reparented, child.ID)

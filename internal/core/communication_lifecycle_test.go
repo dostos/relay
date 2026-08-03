@@ -109,7 +109,7 @@ func TestUnparsedPermissionEventCannotBePolicyResolved(t *testing.T) {
 	service.Sessions.Persist = &capturePersistence{}
 	now := time.Now().UTC()
 	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "parent"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
-	child := &Session{ID: "sess-child", HostID: "c1", Persist: ports.PersistHandle{Kind: "tmux", Name: "child"}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c1", SourceSessionID: parent.ID, Persist: ports.PersistHandle{Kind: "tmux", Name: "child"}, CreatedAt: now}
 	_ = reg.PutSession(parent)
 	_ = reg.PutSession(child)
 	ho := &Handoff{ID: "ho-child", SessionID: child.ID, HostID: child.HostID, Kind: KindAgent, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
@@ -153,7 +153,7 @@ func TestWatcherCursorCommitsOnlyAfterDurableRoute(t *testing.T) {
 	service.NewTransport = func(string) (ports.Transport, error) { return &fakeTransport{id: "c1"}, nil }
 	now := time.Now().UTC()
 	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "parent"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
-	child := &Session{ID: "sess-child", HostID: "c1", Persist: ports.PersistHandle{Kind: "tmux", Name: "child"}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c1", SourceSessionID: parent.ID, Persist: ports.PersistHandle{Kind: "tmux", Name: "child"}, CreatedAt: now}
 	_ = reg.PutSession(parent)
 	_ = reg.PutSession(child)
 	ho := &Handoff{ID: "ho-child", SessionID: child.ID, HostID: child.HostID, Kind: KindAgent, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
