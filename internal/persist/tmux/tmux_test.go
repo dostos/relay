@@ -104,6 +104,13 @@ func TestComposerHoldsIgnoresSubmittedScrollback(t *testing.T) {
 		t.Fatal("output below the old composer proves submission")
 	}
 }
+
+func TestComposerHoldsOpaquePastedContent(t *testing.T) {
+	screen := "⚠ MCP startup incomplete\n\n› [Pasted Content 2048 chars]\n\n  gpt-5.6-sol default"
+	if !composerHolds(screen, "a long goal whose marker is hidden by the TUI") {
+		t.Fatal("opaque pasted content was mistaken for a delivered message")
+	}
+}
 func (t *recordingTransport) RunStream(context.Context, string, string, io.Writer) error {
 	return nil
 }

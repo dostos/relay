@@ -187,7 +187,11 @@ func composerHolds(screen, marker string) bool {
 			composerLine = i
 		}
 	}
-	if !strings.Contains(composer, marker) {
+	// Codex replaces large bracketed pastes with an opaque placeholder. The
+	// original marker is then absent even though the composer still owns the
+	// message; treating that as delivered recreates the stuck-without-Enter bug.
+	pastedContent := strings.Contains(composer, "[Pasted Content ")
+	if !pastedContent && !strings.Contains(composer, marker) {
 		return false
 	}
 	for _, line := range lines[composerLine+1:] {
