@@ -61,6 +61,7 @@ type ParentMessage struct {
 	EventSeq        int64              `json:"event_seq"`
 	Kind            string             `json:"kind"`
 	Text            string             `json:"text,omitempty"`
+	Gate            *SecurityGate      `json:"gate,omitempty"`
 	State           ParentMessageState `json:"state"`
 	CreatedAt       time.Time          `json:"created_at"`
 	DeliveredAt     *time.Time         `json:"delivered_at,omitempty"`
@@ -85,6 +86,7 @@ type ParentInboxItem struct {
 	CorrelationID  string             `json:"correlation_id,omitempty"`
 	Kind           string             `json:"kind"`
 	Text           string             `json:"text,omitempty"`
+	Gate           *SecurityGate      `json:"gate,omitempty"`
 	State          ParentMessageState `json:"state,omitempty"`
 	Reply          string             `json:"reply,omitempty"`
 	PolicyID       string             `json:"policy_id,omitempty"`
@@ -103,7 +105,7 @@ func CompactParentMessage(msg *ParentMessage, includeState bool) ParentInboxItem
 	}
 	item := ParentInboxItem{
 		ID: msg.ID, HandoffID: msg.HandoffID, ChildSessionID: msg.ChildSessionID,
-		CorrelationID: msg.CorrelationID, Kind: msg.Kind, Text: msg.Text,
+		CorrelationID: msg.CorrelationID, Kind: msg.Kind, Text: msg.Text, Gate: msg.Gate,
 		Next: next, Argv: argv,
 	}
 	if includeState {
@@ -1142,12 +1144,12 @@ func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coo
 		return nil, nil
 	}
 	kind = detectedKind
-	// An idle sensor samples the same blocked pane repeatedly. Preserve one
-	// durable attention envelope until it is replied/acked, independent of the
-	// event sequence. If its earlier delivery failed, this sample retries that
-	// same message instead of allocating and injecting another one.
-	if ev.Kind == "idle" && attentionMessage(kind) {
-		if pending := p.pendingAttention(parent.ID, ho.ID); pending != nil {
+	// Sensors and runtime hooks can report the same blocked pane repeatedly.
+	// Preserve one durable attention envelope until it is replied/acked,
+	// independent of event sequence. If delivery failed, retry that envelope
+	// instead of allocating and injecting another one.
+	if attentionMessage(kind) {
+		if pending := p.pendingAttention(parent.ID, ho.ID); pending != nil && (ev.Kind == "idle" || pending.Kind == kind) {
 			if pending.DeliveredAt == nil {
 				// Retry against whoever actually holds the envelope. After a
 				// failover that is an ancestor, not the intended manager.
@@ -1165,6 +1167,9 @@ func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coo
 		ParentSessionID: parent.ID, ChildSessionID: ho.SessionID, HandoffID: ho.ID,
 		EventSeq: ev.Seq, Kind: kind, Text: text,
 		State: ParentMessagePending, CreatedAt: time.Now().UTC(),
+	}
+	if kind == "permission_required" && ho.DeliveryState == EffectBlocked {
+		msg.Gate = ho.PendingGate
 	}
 	if err := writeParentMessage(msg, true); err != nil {
 		if os.IsExist(err) {
@@ -1214,6 +1219,12 @@ func (p *ParentService) applyPolicy(ctx context.Context, ho *Handoff, ev coord.E
 		return msg, false
 	}
 	if !decision.Matched {
+		return msg, false
+	}
+	// A launch-time security gate is never policy-resolvable. Policy may
+	// coalesce duplicate notices, but only an explicit relay resolve made by the
+	// human holding the envelope may select one of the persisted choices.
+	if msg.Kind == "permission_required" && ho.DeliveryState == EffectBlocked {
 		return msg, false
 	}
 	msg.PolicyID, msg.PolicyAction = decision.RuleID, decision.Action
@@ -1367,7 +1378,35 @@ func (p *ParentService) Reply(ctx context.Context, messageID, text string) (*Par
 	if ho.Kind == KindJob {
 		return nil, fmt.Errorf("cannot inject a reply into job handoff %s", ho.ID)
 	}
-	if err := p.Sessions.Send(ctx, msg.ChildSessionID, text, true); err != nil {
+	if msg.Kind == "permission_required" && ho.DeliveryState == EffectBlocked {
+		if ho.PendingGate == nil {
+			return nil, fmt.Errorf("blocked security gate has no durable decision surface; sent no keys")
+		}
+		choice, approved, err := resolveGateDecision(ho.PendingGate, text)
+		if err != nil {
+			return nil, err
+		}
+		if err := p.Sessions.ResolveGateChoice(ctx, msg.ChildSessionID, ho.PendingGate, choice); err != nil {
+			return nil, err
+		}
+		if !approved {
+			now := time.Now().UTC()
+			ho.DeliveryState, ho.Status, ho.Outcome, ho.EndedAt = EffectDenied, StatusAbandoned, string(OutcomeAbandoned), &now
+			ho.PendingGate = nil
+			if err := p.Reg.PutHandoff(ho); err != nil {
+				return nil, err
+			}
+			if err := p.Sessions.Destroy(ctx, msg.ChildSessionID, false); err != nil {
+				ho.CleanupError = err.Error()
+				_ = p.Reg.PutHandoff(ho)
+				return nil, fmt.Errorf("gate denial recorded; cleanup failed: %w", err)
+			}
+		} else {
+			if err := p.deliverPendingGoalAfterGate(ctx, ho, msg.ChildSessionID); err != nil {
+				return nil, err
+			}
+		}
+	} else if err := p.Sessions.Send(ctx, msg.ChildSessionID, text, true); err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
@@ -1378,7 +1417,9 @@ func (p *ParentService) Reply(ctx context.Context, messageID, text string) (*Par
 	if err := writeParentMessage(msg, false); err != nil {
 		return nil, err
 	}
-	ho.Status = StatusRunning
+	if !handoffTerminal(ho) {
+		ho.Status = StatusRunning
+	}
 	ho.UpdatedAt = now
 	_ = p.Reg.PutHandoff(ho)
 	_ = AppendCommunication(msg, "resolve", text)
@@ -1390,6 +1431,69 @@ func (p *ParentService) Reply(ctx context.Context, messageID, text string) (*Par
 		}
 	}
 	return msg, nil
+}
+
+func resolveGateDecision(gate *SecurityGate, decision string) (choice int, approved bool, err error) {
+	decision = strings.TrimSpace(strings.ToLower(decision))
+	wantPositive, semantic := false, false
+	switch decision {
+	case "approve", "approved", "allow", "yes", "trust", "continue":
+		wantPositive, semantic = true, true
+	case "deny", "denied", "reject", "no", "quit", "exit", "cancel":
+		semantic = true
+	}
+	if index, parseErr := strconv.Atoi(decision); parseErr == nil {
+		for _, candidate := range gate.Choices {
+			if candidate.Index == index {
+				label := strings.ToLower(candidate.Label)
+				return index, !strings.Contains(label, "no") && !strings.Contains(label, "deny") && !strings.Contains(label, "quit") && !strings.Contains(label, "exit") && !strings.Contains(label, "cancel"), nil
+			}
+		}
+	}
+	if semantic {
+		matches := []GateChoice{}
+		for _, candidate := range gate.Choices {
+			label := strings.ToLower(candidate.Label)
+			negative := strings.Contains(label, "no") || strings.Contains(label, "deny") || strings.Contains(label, "reject") || strings.Contains(label, "quit") || strings.Contains(label, "exit") || strings.Contains(label, "cancel")
+			positive := strings.Contains(label, "yes") || strings.Contains(label, "allow") || strings.Contains(label, "approve") || strings.Contains(label, "trust") || strings.Contains(label, "continue")
+			if (wantPositive && positive && !negative) || (!wantPositive && negative) {
+				matches = append(matches, candidate)
+			}
+		}
+		if len(matches) == 1 {
+			return matches[0].Index, wantPositive, nil
+		}
+	}
+	return 0, false, fmt.Errorf("decision must select exactly one displayed gate choice by number or unambiguous approve/deny")
+}
+
+func (p *ParentService) deliverPendingGoalAfterGate(ctx context.Context, ho *Handoff, sessionID string) error {
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		capture, err := p.Sessions.Capture(ctx, sessionID, 40)
+		if err != nil {
+			return err
+		}
+		readiness := ClassifyAgentPane(capture)
+		switch readiness.State {
+		case AgentBlocked:
+			return fmt.Errorf("security gate remains blocked after explicit decision; sent no goal")
+		case AgentAbsent:
+			return fmt.Errorf("agent exited after security-gate decision; sent no goal")
+		case AgentReady:
+			if err := p.Sessions.Send(ctx, sessionID, agentGoalPrompt(ho.Goal), true); err != nil {
+				return err
+			}
+			ho.DeliveryState, ho.DeliveryError, ho.PendingGate = EffectAcknowledged, "", nil
+			return p.Reg.PutHandoff(ho)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("agent readiness was not observable after explicit gate decision; sent no goal")
 }
 
 func (p *ParentService) Ack(messageID string) (*ParentMessage, error) {

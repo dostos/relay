@@ -509,6 +509,116 @@ func TestPendingPermissionAbsorbsIdleWithoutSecondNotification(t *testing.T) {
 	}
 }
 
+func TestRepeatedPermissionFramesUseOneEnvelope(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "root"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c3", Persist: ports.PersistHandle{Kind: "tmux", Name: "worker"}, CreatedAt: now}
+	_ = reg.PutSession(parent)
+	_ = reg.PutSession(child)
+	ho := &Handoff{ID: "ho-gate", SessionID: child.ID, Kind: KindAgent, Status: StatusNeedsInput, DeliveryState: EffectBlocked, SourceSessionID: parent.ID, CreatedAt: now}
+	first, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "permission_required", Meta: map[string]any{"text": "directory: /repo | 1. Yes | 2. No"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 2, Kind: "permission_required", Meta: map[string]any{"text": "directory: /repo | 1. Yes | 2. No"}})
+	if err != nil || second.ID != first.ID || len(notifier.notices) != 1 {
+		t.Fatalf("duplicate gate envelope: first=%+v second=%+v notices=%d err=%v", first, second, len(notifier.notices), err)
+	}
+}
+
+func TestBlockedSecurityGateIgnoresAutoReplyPolicy(t *testing.T) {
+	service, _, reg := newParentTestService(t)
+	policy := &PolicyService{Path: filepath.Join(t.TempDir(), "policy.yaml")}
+	if err := policy.Add(PolicyRule{ID: "must-not-trust", Kind: "permission_required", Contains: []string{"directory"}, Action: "reply", Reply: "approve"}); err != nil {
+		t.Fatal(err)
+	}
+	service.Policies = policy
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "root"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c3", Persist: ports.PersistHandle{Kind: "tmux", Name: "worker"}, CreatedAt: now}
+	_ = reg.PutSession(parent)
+	_ = reg.PutSession(child)
+	ho := &Handoff{ID: "ho-gate", SessionID: child.ID, Kind: KindAgent, Status: StatusNeedsInput, DeliveryState: EffectBlocked, PendingGate: &SecurityGate{Reason: "trust"}, SourceSessionID: parent.ID, CreatedAt: now}
+	msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "permission_required", Meta: map[string]any{"text": "directory: /repo"}})
+	if err != nil || msg.State != ParentMessagePending || msg.AutoHandled {
+		t.Fatalf("security gate policy-selected: msg=%+v err=%v", msg, err)
+	}
+}
+
+func TestResolveGateDecisionRequiresExplicitUnambiguousChoice(t *testing.T) {
+	gate := &SecurityGate{Choices: []GateChoice{{Index: 1, Label: "Yes, continue"}, {Index: 2, Label: "No, quit"}}}
+	for _, tc := range []struct {
+		decision string
+		choice   int
+		approve  bool
+	}{
+		{"approve", 1, true}, {"deny", 2, false}, {"1", 1, true}, {"2", 2, false},
+	} {
+		choice, approve, err := resolveGateDecision(gate, tc.decision)
+		if err != nil || choice != tc.choice || approve != tc.approve {
+			t.Fatalf("decision %q = %d/%v/%v", tc.decision, choice, approve, err)
+		}
+	}
+	if _, _, err := resolveGateDecision(gate, "whatever"); err == nil {
+		t.Fatal("ambiguous gate decision accepted")
+	}
+}
+
+func TestExplicitGateApproveDeliversPendingGoalAndDenyCleansUp(t *testing.T) {
+	for _, tc := range []struct {
+		name, decision string
+		wantChoice     int
+		wantState      EffectState
+		wantTerminal   bool
+	}{
+		{name: "approve", decision: "approve", wantChoice: 0, wantState: EffectAcknowledged},
+		{name: "deny", decision: "deny", wantChoice: 1, wantState: EffectDenied, wantTerminal: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("RELAY_STATE_DIR", t.TempDir())
+			reg := &Registry{}
+			now := time.Now().UTC()
+			parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "root"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+			child := &Session{ID: "sess-child", HostID: "self", Persist: ports.PersistHandle{Kind: "tmux", Name: "worker"}, SourceSessionID: parent.ID, CreatedAt: now}
+			gate := &SecurityGate{Reason: "waiting for folder-trust approval", Directory: "/repo", Choices: []GateChoice{{Index: 1, Label: "Yes, continue", Selected: true}, {Index: 2, Label: "No, quit"}}}
+			ho := &Handoff{ID: "ho-gate", SessionID: child.ID, HostID: child.HostID, Kind: KindAgent, Status: StatusNeedsInput, Goal: "finish the task", LaunchState: EffectAcknowledged, DeliveryState: EffectBlocked, PendingGate: gate, SourceSessionID: parent.ID, CreatedAt: now}
+			for _, sess := range []*Session{parent, child} {
+				if err := reg.PutSession(sess); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := reg.PutHandoff(ho); err != nil {
+				t.Fatal(err)
+			}
+			msg := &ParentMessage{V: 1, ID: "pm-gate", CorrelationID: "gate", ParentSessionID: parent.ID, ChildSessionID: child.ID, HandoffID: ho.ID, Kind: "permission_required", State: ParentMessagePending, CreatedAt: now}
+			if err := writeParentMessage(msg, true); err != nil {
+				t.Fatal(err)
+			}
+			persist := &gatePersistence{capture: "You are in /repo\nDo you trust the contents of this directory?\n› 1. Yes, continue\n  2. No, quit\nPress enter to continue", afterChoice: "Codex ready\n› "}
+			sessions := &SessionService{Reg: reg, Persist: persist, NewTransport: func(string) (ports.Transport, error) { return &fakeTransport{id: "self"}, nil }}
+			service := &ParentService{Reg: reg, Sessions: sessions}
+			if _, err := service.Reply(context.Background(), msg.ID, tc.decision); err != nil {
+				t.Fatal(err)
+			}
+			stored, err := reg.GetHandoff(ho.ID)
+			if err != nil || stored.DeliveryState != tc.wantState || handoffTerminal(stored) != tc.wantTerminal {
+				t.Fatalf("resolved handoff = %+v err=%v", stored, err)
+			}
+			if len(persist.choices) != 1 || persist.choices[0] != tc.wantChoice {
+				t.Fatalf("choice offsets = %v", persist.choices)
+			}
+			if tc.wantTerminal {
+				if !persist.destroyed {
+					t.Fatal("denied gate session not destroyed")
+				}
+			} else if len(persist.sent) != 1 || !strings.Contains(persist.sent[0], "finish the task") {
+				t.Fatalf("pending goal was not delivered once: %v", persist.sent)
+			}
+		})
+	}
+}
+
 func TestPolicyAutoReplyIsAuditedAndSkipsManagerPing(t *testing.T) {
 	service, notifier, reg := newParentTestService(t)
 	recorder := &recordingPersistence{}

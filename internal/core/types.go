@@ -65,6 +65,7 @@ const (
 	EffectAcknowledged  EffectState = "acknowledged"
 	EffectFailed        EffectState = "failed"
 	EffectBlocked       EffectState = "blocked"
+	EffectDenied        EffectState = "denied"
 	EffectNotApplicable EffectState = "not_applicable"
 )
 
@@ -81,6 +82,7 @@ type Handoff struct {
 	LaunchError       string        `json:"launch_error,omitempty"`
 	DeliveryError     string        `json:"delivery_error,omitempty"`
 	CleanupError      string        `json:"cleanup_error,omitempty"`
+	PendingGate       *SecurityGate `json:"pending_gate,omitempty"`
 	Goal              string        `json:"goal,omitempty"`
 	Agent             string        `json:"agent,omitempty"`
 	Command           string        `json:"command,omitempty"`

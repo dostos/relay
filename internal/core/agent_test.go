@@ -175,6 +175,27 @@ func TestAbsentAgentCannotAdvertiseOrAcceptSend(t *testing.T) {
 	}
 }
 
+func TestSecurityGateCannotAcceptAgentSend(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	reg := &Registry{}
+	now := time.Now().UTC()
+	sess := &Session{ID: "sess-gate", HostID: "self", Persist: ports.PersistHandle{Kind: "tmux", Name: "gate"}, CreatedAt: now}
+	ho := &Handoff{ID: "ho-gate", SessionID: sess.ID, HostID: "self", Kind: KindAgent, Status: StatusNeedsInput, DeliveryState: EffectBlocked, CreatedAt: now}
+	_ = reg.PutSession(sess)
+	_ = reg.PutHandoff(ho)
+	persist := &agentPanePersistence{capture: "You are in /repo\nDo you trust the contents of this directory?\n› 1. Yes, continue\n  2. No, quit\nPress enter to continue"}
+	sessions := &SessionService{Reg: reg, Persist: persist, NewTransport: func(string) (ports.Transport, error) { return &fakeTransport{id: "self"}, nil }}
+	service := &HandoffService{Reg: reg, Sessions: sessions}
+	captured, err := service.AgentCapture(context.Background(), ho.ID, 40)
+	if err != nil || captured.Next != "" || len(captured.Argv) != 0 {
+		t.Fatalf("blocked capture advertised injection: %+v err=%v", captured, err)
+	}
+	sent, err := service.AgentSend(context.Background(), ho.ID, "approve")
+	if err == nil || sent.Next != "" || len(persist.sent) != 0 {
+		t.Fatalf("blocked gate accepted AgentSend: %+v err=%v sent=%v", sent, err, persist.sent)
+	}
+}
+
 func TestMissingAgentSessionReturnsDoneContinuation(t *testing.T) {
 	t.Setenv("RELAY_STATE_DIR", t.TempDir())
 	reg := &Registry{}

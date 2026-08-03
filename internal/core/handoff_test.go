@@ -18,10 +18,20 @@ type sensorRecordingPersistence struct {
 
 type gatePersistence struct {
 	renamePersistence
-	capture   string
-	sent      []string
-	sendErr   error
-	destroyed bool
+	capture     string
+	sent        []string
+	sendErr     error
+	destroyed   bool
+	choices     []int
+	afterChoice string
+}
+
+func (p *gatePersistence) ResolveGateChoice(_ context.Context, _ ports.Transport, _ ports.PersistHandle, offset int) error {
+	p.choices = append(p.choices, offset)
+	if p.afterChoice != "" {
+		p.capture = p.afterChoice
+	}
+	return nil
 }
 
 func (p *gatePersistence) Destroy(context.Context, ports.Transport, ports.PersistHandle) error {
@@ -214,6 +224,32 @@ func TestFailedDeliveryTerminalizesBeforeCleanup(t *testing.T) {
 	}
 	if _, err := reg.GetSession(sess.ID); err == nil {
 		t.Fatal("failed launch session remained in authority registry")
+	}
+}
+
+func TestGateResolutionSendsNoKeysUnlessExactGateIsStillVisible(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	reg := &Registry{}
+	now := time.Now().UTC()
+	sess := &Session{ID: "sess-gate", HostID: "self", Persist: ports.PersistHandle{Kind: "tmux", Name: "gate"}, CreatedAt: now}
+	if err := reg.PutSession(sess); err != nil {
+		t.Fatal(err)
+	}
+	persist := &gatePersistence{capture: "agent ready\n› "}
+	service := &SessionService{Reg: reg, Persist: persist, NewTransport: func(string) (ports.Transport, error) { return &fakeTransport{id: "self"}, nil }}
+	expected := &SecurityGate{Reason: "waiting for folder-trust approval", Directory: "/repo", Choices: []GateChoice{{Index: 1, Label: "Yes, continue", Selected: true}, {Index: 2, Label: "No, quit"}}}
+	if err := service.ResolveGateChoice(context.Background(), sess.ID, expected, 1); err == nil {
+		t.Fatal("stale gate state accepted")
+	}
+	if len(persist.choices) != 0 {
+		t.Fatalf("keys sent after gate disappeared: %v", persist.choices)
+	}
+	persist.capture = "You are in /repo\nDo you trust the contents of this directory?\n› 1. Yes, continue\n  2. No, quit\nPress enter to continue"
+	if err := service.ResolveGateChoice(context.Background(), sess.ID, expected, 2); err != nil {
+		t.Fatal(err)
+	}
+	if len(persist.choices) != 1 || persist.choices[0] != 1 {
+		t.Fatalf("explicit second choice offset = %v", persist.choices)
 	}
 }
 

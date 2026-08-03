@@ -399,13 +399,22 @@ func (h *HandoffService) injectAgentGoal(ctx context.Context, t ports.Transport,
 	readiness := waitAgentReady(ctx, h.Persist, t, sess.Persist, 20*time.Second)
 	switch readiness.State {
 	case AgentBlocked:
+		if readiness.Gate != nil && sess.RemoteCWD != "" {
+			readiness.Gate.Directory = sess.RemoteCWD
+		}
 		ho.Status = StatusNeedsInput
 		ho.DeliveryState = EffectBlocked
 		ho.DeliveryError = readiness.Reason
+		ho.PendingGate = readiness.Gate
 		if err := h.Reg.PutHandoff(ho); err != nil {
 			return err
 		}
-		_, err := h.Coord.Emit(ctx, t, sess.Persist.Name, "permission_required", map[string]any{"text": readiness.Reason})
+		meta := map[string]any{"text": readiness.Reason}
+		if readiness.Gate != nil {
+			meta["gate"] = readiness.Gate
+			meta["text"] = formatSecurityGate(readiness.Gate)
+		}
+		_, err := h.Coord.Emit(ctx, t, sess.Persist.Name, "permission_required", meta)
 		return err
 	case AgentAbsent:
 		_, _ = h.Coord.Emit(ctx, t, sess.Persist.Name, "exit", map[string]any{"text": readiness.Reason})
@@ -418,6 +427,20 @@ func (h *HandoffService) injectAgentGoal(ctx context.Context, t ports.Transport,
 		ho.DeliveryError = ""
 		return h.Reg.PutHandoff(ho)
 	}
+}
+
+func formatSecurityGate(gate *SecurityGate) string {
+	if gate == nil {
+		return "security decision required"
+	}
+	parts := []string{gate.Reason}
+	if gate.Directory != "" {
+		parts = append(parts, "directory: "+gate.Directory)
+	}
+	for _, choice := range gate.Choices {
+		parts = append(parts, fmt.Sprintf("%d. %s", choice.Index, choice.Label))
+	}
+	return strings.Join(parts, " | ")
 }
 
 // TailEvents streams events via Coord (relayd). follow mode uses one SSH stream;

@@ -67,6 +67,12 @@ type HoldingShellLauncher interface {
 	Launch(ctx context.Context, t Transport, h PersistHandle, command string) error
 }
 
+// GateChoiceResolver applies one explicit human-selected menu index to the
+// currently visible interactive gate. It must never choose an index itself.
+type GateChoiceResolver interface {
+	ResolveGateChoice(ctx context.Context, t Transport, h PersistHandle, selectedOffset int) error
+}
+
 // SessionChrome is an optional persistence capability for applying durable
 // visual ownership cues. SessionService invokes it on create, adopt, and
 // named-session reuse so callers below the CLI layer receive the same chrome.

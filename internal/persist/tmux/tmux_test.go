@@ -120,7 +120,7 @@ func TestLaunchAcknowledgesHoldingShellWithoutComposerEvidence(t *testing.T) {
 	}
 }
 
-func TestLaunchRetriesSubmissionWithoutRetyping(t *testing.T) {
+func TestLaunchPollsWithoutResubmitting(t *testing.T) {
 	oldDelay := sendConfirmDelay
 	sendConfirmDelay = 0
 	t.Cleanup(func() { sendConfirmDelay = oldDelay })
@@ -130,8 +130,8 @@ func TestLaunchRetriesSubmissionWithoutRetyping(t *testing.T) {
 		t.Fatal("missing holding-shell acknowledgement reported as launched")
 	}
 	joined := strings.Join(transport.commands, "\n")
-	if strings.Count(joined, "make verify") != 1 || strings.Count(joined, " Enter") != sendConfirmAttempts {
-		t.Fatalf("retry must submit idempotently without retyping: %v", transport.commands)
+	if strings.Count(joined, "make verify") != 1 || strings.Count(joined, " Enter") != 1 || strings.Count(joined, "show-option") != sendConfirmAttempts {
+		t.Fatalf("launch must submit once and retry only effect reads: %v", transport.commands)
 	}
 }
 
@@ -164,6 +164,31 @@ func TestLaunchDisposableTmuxEffect(t *testing.T) {
 	}
 	if out, _, _ := transport.Run(context.Background(), "", "tmux show-option -t "+shellquote.Quote(exactPane(name))+" -v @relay_launch_ack 2>/dev/null"); strings.TrimSpace(out) != "" {
 		t.Fatalf("launch acknowledgement leaked into later retries: %q", out)
+	}
+}
+
+func TestLaunchDoesNotLeakRetryEnterIntoInteractiveRuntime(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux unavailable")
+	}
+	name := "relay-gate-canary-" + strings.ToLower(strconv.FormatInt(time.Now().UnixNano(), 36))
+	transport := &localExecTransport{}
+	handle, err := New().Create(context.Background(), transport, name, "", "bash -l")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = New().Destroy(context.Background(), transport, handle) })
+	leaked := filepath.Join(t.TempDir(), "unexpected-key")
+	runtime := "if read -r -t 1 -n 1 key; then printf %s \"$key\" > " + shellquote.Quote(leaked) + "; fi; exec bash -l"
+	command := "bash -c " + shellquote.Quote(runtime)
+	if err := New().Launch(context.Background(), transport, handle, command); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if data, err := os.ReadFile(leaked); err == nil {
+		t.Fatalf("launch polling injected a key into the runtime: %q", data)
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
 	}
 }
 

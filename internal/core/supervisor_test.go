@@ -49,6 +49,23 @@ func TestNeedsWatchSelectsOnlyLiveHandoffsWithAParent(t *testing.T) {
 	}
 }
 
+func TestBlockedDeliveryRemainsWatchableAfterRegistryReload(t *testing.T) {
+	sup, reg := newSupervisorFixture(t)
+	now := time.Now().UTC()
+	ho := &Handoff{ID: "ho-blocked", SessionID: "sess-blocked", HostID: "c3", Kind: KindAgent, Status: StatusNeedsInput, LaunchState: EffectAcknowledged, DeliveryState: EffectBlocked, PendingGate: &SecurityGate{Reason: "trust", Directory: "/repo", Choices: []GateChoice{{Index: 1, Label: "Yes"}, {Index: 2, Label: "No"}}}, SourceSessionID: "sess-manager", CreatedAt: now}
+	if err := reg.PutHandoff(ho); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := reg.GetHandoff(ho.ID)
+	if err != nil || reloaded.DeliveryState != EffectBlocked || reloaded.PendingGate == nil {
+		t.Fatalf("blocked state did not survive reload: %+v err=%v", reloaded, err)
+	}
+	got, err := sup.NeedsWatch()
+	if err != nil || len(got) != 1 || got[0].ID != ho.ID {
+		t.Fatalf("blocked handoff not supervised after reload: %+v err=%v", got, err)
+	}
+}
+
 // The whole point: a live handoff with no watcher gets adopted rather than
 // sitting silently unrouted until someone reinstalls relay.
 func TestReconcileAdoptsAnUnwatchedLiveHandoff(t *testing.T) {

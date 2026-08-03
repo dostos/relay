@@ -569,6 +569,46 @@ func (s *SessionService) Destroy(ctx context.Context, id string, keepRemote bool
 	return deleteSessionsProjected(ctx, s.Reg, s.Viz, []*Session{sess}, false, nil, nil, false)
 }
 
+func (s *SessionService) ResolveGateChoice(ctx context.Context, id string, expected *SecurityGate, choiceIndex int) error {
+	sess, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	t, err := s.transportFor(sess)
+	if err != nil {
+		return err
+	}
+	capture, err := s.Persist.Capture(ctx, t, sess.Persist, 40)
+	if err != nil {
+		return err
+	}
+	readiness := ClassifyAgentPane(capture)
+	if readiness.State != AgentBlocked || readiness.Gate == nil {
+		return fmt.Errorf("security gate is no longer visibly blocked; sent no keys")
+	}
+	if sess.RemoteCWD != "" {
+		readiness.Gate.Directory = sess.RemoteCWD
+	}
+	if expected == nil || formatSecurityGate(readiness.Gate) != formatSecurityGate(expected) {
+		return fmt.Errorf("security gate changed since escalation; sent no keys")
+	}
+	offset := -1
+	for i, choice := range readiness.Gate.Choices {
+		if choice.Index == choiceIndex {
+			offset = i
+			break
+		}
+	}
+	if offset < 0 {
+		return fmt.Errorf("gate choice %d is not present; sent no keys", choiceIndex)
+	}
+	resolver, ok := s.Persist.(ports.GateChoiceResolver)
+	if !ok {
+		return fmt.Errorf("persistence %s cannot resolve interactive gates", s.Persist.Kind())
+	}
+	return resolver.ResolveGateChoice(ctx, t, sess.Persist, offset)
+}
+
 // CleanupFailedChild lets an authenticated manager retire only its own failed
 // direct handoff child. Authorization and deletion reservation share the same
 // authority transaction, preventing lineage races.

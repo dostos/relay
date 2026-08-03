@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"regexp"
 	"strings"
 )
 
@@ -34,8 +35,53 @@ const (
 
 // AgentReadiness reports an agent pane's state and why.
 type AgentReadiness struct {
-	State  AgentState `json:"state"`
-	Reason string     `json:"reason,omitempty"`
+	State  AgentState    `json:"state"`
+	Reason string        `json:"reason,omitempty"`
+	Gate   *SecurityGate `json:"gate,omitempty"`
+}
+
+type GateChoice struct {
+	Index    int    `json:"index"`
+	Label    string `json:"label"`
+	Selected bool   `json:"selected,omitempty"`
+}
+
+// SecurityGate is the exact decision surface observed in the pane. It records
+// facts, not policy: Relay never chooses one of these options itself.
+type SecurityGate struct {
+	Reason    string       `json:"reason"`
+	Directory string       `json:"directory,omitempty"`
+	Choices   []GateChoice `json:"choices,omitempty"`
+}
+
+var numberedGateChoice = regexp.MustCompile(`^\s*([›❯>]?)[[:space:]]*([0-9]+)\.[[:space:]]+(.+?)\s*$`)
+
+func parseSecurityGate(lines []string, reason string) *SecurityGate {
+	gate := &SecurityGate{Reason: reason}
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		content := strings.TrimSpace(strings.TrimLeft(trimmed, ">›❯"))
+		lower := strings.ToLower(content)
+		if strings.HasPrefix(lower, "you are in ") {
+			gate.Directory = strings.TrimSpace(content[len("You are in "):])
+		} else if strings.HasPrefix(lower, "accessing workspace:") && i+1 < len(lines) {
+			gate.Directory = strings.TrimSpace(lines[i+1])
+		}
+		if match := numberedGateChoice.FindStringSubmatch(line); len(match) == 4 {
+			idx := 0
+			for _, r := range match[2] {
+				idx = idx*10 + int(r-'0')
+			}
+			for _, existing := range gate.Choices {
+				if existing.Index == idx {
+					gate.Choices = nil // a repeated frame; retain only the newest one
+					break
+				}
+			}
+			gate.Choices = append(gate.Choices, GateChoice{Index: idx, Label: strings.TrimSpace(match[3]), Selected: match[1] != ""})
+		}
+	}
+	return gate
 }
 
 // securityGates are prompts that grant something. They must be surfaced to the
@@ -100,7 +146,7 @@ func ClassifyAgentPane(capture string) AgentReadiness {
 	// relaunch on top of a decision the human has not made.
 	for _, gate := range securityGates {
 		if strings.Contains(tail, gate.marker) {
-			return AgentReadiness{State: AgentBlocked, Reason: gate.reason}
+			return AgentReadiness{State: AgentBlocked, Reason: gate.reason, Gate: parseSecurityGate(lines, gate.reason)}
 		}
 	}
 	return AgentReadiness{State: AgentReady}

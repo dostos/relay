@@ -39,6 +39,26 @@ func TestFolderTrustGateIsBlocked(t *testing.T) {
 	}
 }
 
+func TestRepeatedCodexTrustFramePreservesExactDecision(t *testing.T) {
+	frame := `
+  Welcome to Codex, OpenAI's command-line coding agent
+> You are in /home/user/src/project
+  Do you trust the contents of this directory?
+› 1. Yes, continue
+  2. No, quit
+  Press enter to continue`
+	got := ClassifyAgentPane(frame + frame)
+	if got.State != AgentBlocked || got.Gate == nil {
+		t.Fatalf("repeated gate = %+v", got)
+	}
+	if got.Gate.Directory != "/home/user/src/project" || len(got.Gate.Choices) != 2 {
+		t.Fatalf("gate facts lost: %+v", got.Gate)
+	}
+	if got.Gate.Choices[0].Index != 1 || got.Gate.Choices[0].Label != "Yes, continue" || !got.Gate.Choices[0].Selected || got.Gate.Choices[1].Label != "No, quit" {
+		t.Fatalf("gate choices changed: %+v", got.Gate.Choices)
+	}
+}
+
 func TestThemePickerIsBlocked(t *testing.T) {
 	got := ClassifyAgentPane(`
      3. Light mode

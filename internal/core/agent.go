@@ -421,10 +421,16 @@ func (h *HandoffService) AgentSend(ctx context.Context, handoffID, text string) 
 	if err != nil {
 		return &AgentResponse{OK: false, V: 1, Error: "refuse unverified send: " + err.Error(), HandoffID: ho.ID}, err
 	}
-	if readiness := ClassifyAgentPane(pane); readiness.State == AgentAbsent {
+	if readiness := ClassifyAgentPane(pane); readiness.State != AgentReady {
 		resp := h.absentAgentResponse(ho)
 		resp.OK = false
-		resp.Error = "refuse send: " + readiness.Reason
+		if readiness.State == AgentBlocked {
+			resp.Next = ""
+			resp.Argv = nil
+			resp.Error = "refuse send to security gate; use the pending relay resolve decision"
+		} else {
+			resp.Error = "refuse send: " + readiness.Reason
+		}
 		return resp, fmt.Errorf("%s", resp.Error)
 	}
 	if err := h.Sessions.Send(ctx, ho.SessionID, text, true); err != nil {
@@ -459,6 +465,9 @@ func (h *HandoffService) AgentCapture(ctx context.Context, handoffID string, lin
 		resp.Next = "null"
 	} else if readiness.State == AgentAbsent {
 		return h.absentAgentResponse(ho), nil
+	} else if readiness.State == AgentBlocked {
+		resp.Next = ""
+		resp.Argv = nil
 	} else if ho.Kind == KindAgent && (ho.Status == StatusNeedsInput || ho.Status == StatusRunning) {
 		resp.Next = "send"
 		resp.Argv = argvFor("send", ho.ID)

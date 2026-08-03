@@ -153,10 +153,12 @@ func (p *Persist) Launch(ctx context.Context, t ports.Transport, h ports.Persist
 	if _, stderr, err := t.Run(ctx, "", fmt.Sprintf("tmux send-keys -t %s -l -- %s", target, shellquote.Quote(line))); err != nil {
 		return fmt.Errorf("type launch: %w (%s)", err, strings.TrimSpace(stderr))
 	}
+	// Submit exactly once. Retrying Enter is not idempotent: after the shell
+	// execs an interactive runtime, a later Enter can approve its security gate.
+	if _, stderr, err := t.Run(ctx, "", fmt.Sprintf("tmux send-keys -t %s Enter", target)); err != nil {
+		return fmt.Errorf("submit launch: %w (%s)", err, strings.TrimSpace(stderr))
+	}
 	for attempt := 0; attempt < sendConfirmAttempts; attempt++ {
-		if _, stderr, err := t.Run(ctx, "", fmt.Sprintf("tmux send-keys -t %s Enter", target)); err != nil {
-			return fmt.Errorf("submit launch: %w (%s)", err, strings.TrimSpace(stderr))
-		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -168,7 +170,24 @@ func (p *Persist) Launch(ctx context.Context, t ports.Transport, h ports.Persist
 			return nil
 		}
 	}
-	return fmt.Errorf("holding shell did not acknowledge launch in %s after %d attempts", h.Name, sendConfirmAttempts)
+	return fmt.Errorf("holding shell did not acknowledge launch in %s after %d polls", h.Name, sendConfirmAttempts)
+}
+
+func (p *Persist) ResolveGateChoice(ctx context.Context, t ports.Transport, h ports.PersistHandle, selectedOffset int) error {
+	if selectedOffset < 0 {
+		return fmt.Errorf("gate choice offset must be non-negative")
+	}
+	target := shellquote.Quote(exactPane(h.Name))
+	keys := []string{"Home"}
+	for i := 0; i < selectedOffset; i++ {
+		keys = append(keys, "Down")
+	}
+	keys = append(keys, "Enter")
+	_, stderr, err := t.Run(ctx, "", fmt.Sprintf("tmux send-keys -t %s %s", target, strings.Join(keys, " ")))
+	if err != nil {
+		return fmt.Errorf("submit explicit gate choice: %w (%s)", err, strings.TrimSpace(stderr))
+	}
+	return nil
 }
 
 func (p *Persist) Send(ctx context.Context, t ports.Transport, h ports.PersistHandle, text string, enter bool) error {
