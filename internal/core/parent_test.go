@@ -327,12 +327,12 @@ func TestDisconnectedParentRetriesOneDurableAttentionEnvelope(t *testing.T) {
 	_ = reg.PutHandoff(ho)
 
 	notifier.notifyFail = true
-	first, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "idle"})
+	first, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "ask", Meta: map[string]any{"text": "continue?"}})
 	if err == nil || first.DeliveredAt != nil {
 		t.Fatalf("disconnected first=%+v err=%v", first, err)
 	}
 	notifier.notifyFail = false
-	second, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 2, Kind: "idle"})
+	second, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 2, Kind: "ask", Meta: map[string]any{"text": "continue?"}})
 	if err != nil || second.ID != first.ID || second.DeliveredAt == nil {
 		t.Fatalf("reconnect second=%+v err=%v", second, err)
 	}
@@ -501,8 +501,8 @@ func TestPendingPermissionAbsorbsIdleWithoutSecondNotification(t *testing.T) {
 		t.Fatalf("permission=%+v err=%v notices=%d", first, err, len(notifier.notices))
 	}
 	second, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 2, Kind: "idle"})
-	if err != nil || second.ID != first.ID || second.State != ParentMessagePending {
-		t.Fatalf("idle=%+v err=%v", second, err)
+	if err != nil || second != nil {
+		t.Fatalf("idle telemetry should not allocate an envelope: %+v err=%v", second, err)
 	}
 	if len(notifier.notices) != 1 {
 		t.Fatalf("redundant idle notified root: %d", len(notifier.notices))
@@ -1284,7 +1284,7 @@ func TestReceiptsDoNotFailOverToTheHuman(t *testing.T) {
 	}
 }
 
-func TestNoteAndProgressReachOnlyTheirImmediateManagerWithoutReply(t *testing.T) {
+func TestNoteAndProgressAdvanceWithoutManagerWake(t *testing.T) {
 	service, notifier, reg := newParentTestService(t)
 	_, manager, _, ho := failoverTree(t, reg)
 	persist := &selectivePersistence{}
@@ -1296,27 +1296,66 @@ func TestNoteAndProgressReachOnlyTheirImmediateManagerWithoutReply(t *testing.T)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if msg == nil || msg.Kind != kind || msg.ParentSessionID != manager.ID {
-			t.Fatalf("%s envelope = %+v", kind, msg)
-		}
-		if msg.State != ParentMessageAcked || msg.AckedAt == nil {
-			t.Fatalf("%s must acknowledge on delivery: %+v", kind, msg)
+		if msg != nil {
+			t.Fatalf("%s allocated a manager envelope: %+v", kind, msg)
 		}
 	}
-	if len(persist.sent) != 2 {
+	if len(persist.sent) != 0 {
 		t.Fatalf("manager deliveries = %v", persist.sent)
-	}
-	for _, sent := range persist.sent {
-		if strings.Contains(sent, "relay resolve") {
-			t.Fatalf("informational update requested a reply: %q", sent)
-		}
 	}
 	if len(notifier.notices) != 0 {
 		t.Fatalf("informational updates reached the human root: %d", len(notifier.notices))
 	}
+	_ = manager
 }
 
-func TestAbsentManagerCannotAcknowledgeInjectedEnvelope(t *testing.T) {
+func TestLifecycleCommunicationMeasurement(t *testing.T) {
+	service, _, reg := newParentTestService(t)
+	service.Policies = &PolicyService{Path: filepath.Join(t.TempDir(), "missing-policy.yaml")}
+	_, manager, _, ho := failoverTree(t, reg)
+	persist := &selectivePersistence{}
+	service.Sessions.Persist = persist
+	events := []coord.Event{
+		{Seq: 1, Kind: "progress", Meta: map[string]any{"text": "taxonomy frozen"}},
+		{Seq: 2, Kind: "note", Meta: map[string]any{"text": "receipt stored"}},
+		{Seq: 3, Kind: "result", Meta: map[string]any{"source": "hook", "text": "stopped at composer"}},
+		{Seq: 4, Kind: "result", Meta: map[string]any{"source": "hook", "text": "stopped at composer"}},
+		{Seq: 5, Kind: "result", Meta: map[string]any{"source": "hook", "text": "stopped at composer"}},
+		{Seq: 6, Kind: "ask", Meta: map[string]any{"text": "choose dataset A or B"}},
+		{Seq: 7, Kind: "result", Meta: map[string]any{"text": "paired canary complete"}},
+		{Seq: 8, Kind: "exit", Meta: map[string]any{"text": "agent exited"}},
+	}
+	legacyBytes, legacyWakeups := 0, 0
+	for _, ev := range events {
+		kind := attentionKind(ev)
+		if kind != "" && ev.Kind != "exit" { // legacy already coalesced result+exit
+			text := eventText(&ev)
+			legacy := FormatParentNotice(ParentNotice{MessageID: "pm-legacy", HandoffID: ho.ID, Kind: kind, Child: "worker@c1", Text: text, Action: map[bool]string{true: "reply"}[attentionMessage(kind)]})
+			legacyBytes += len(legacy)
+			legacyWakeups++
+		}
+		if _, err := service.RouteChildEvent(context.Background(), ho, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	currentBytes := 0
+	for _, sent := range persist.sent {
+		currentBytes += len(strings.SplitN(sent, "|", 2)[1])
+	}
+	messages, err := service.ListMessages(manager.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyWakeups != 7 || len(persist.sent) != 2 || len(messages) != 3 {
+		t.Fatalf("lifecycle counts: legacy_wakes=%d current_wakes=%d envelopes=%d", legacyWakeups, len(persist.sent), len(messages))
+	}
+	if currentBytes >= legacyBytes {
+		t.Fatalf("manager bytes did not shrink: before=%d after=%d", legacyBytes, currentBytes)
+	}
+	t.Logf("events=8 envelopes=8->3 wakeups=7->2 manager_bytes=%d->%d token_estimate=%d->%d retry_opportunities=7->2", legacyBytes, currentBytes, (legacyBytes+3)/4, (currentBytes+3)/4)
+}
+
+func TestTelemetryDoesNotProbeOrInjectIntoAbsentManager(t *testing.T) {
 	service, _, reg := newParentTestService(t)
 	parent := &Session{ID: "sess-manager", HostID: "self", Persist: ports.PersistHandle{Kind: "tmux", Name: "manager"}, CreatedAt: time.Now().UTC()}
 	child := &Session{ID: "sess-child", HostID: "self", Persist: ports.PersistHandle{Kind: "tmux", Name: "child"}, SourceSessionID: parent.ID, CreatedAt: time.Now().UTC()}
@@ -1334,11 +1373,8 @@ func TestAbsentManagerCannotAcknowledgeInjectedEnvelope(t *testing.T) {
 
 	msg, err := service.RouteChildEvent(context.Background(), ho,
 		coord.Event{Seq: 1, Kind: "note", Meta: map[string]any{"text": "must not execute in shell"}})
-	if err == nil {
-		t.Fatal("absent manager delivery reported success")
-	}
-	if msg == nil || msg.State != ParentMessagePending || msg.DeliveredAt != nil || msg.AckedAt != nil {
-		t.Fatalf("absent manager acknowledged envelope: %+v", msg)
+	if err != nil || msg != nil {
+		t.Fatalf("telemetry allocated a manager delivery: msg=%+v err=%v", msg, err)
 	}
 }
 
@@ -1429,14 +1465,15 @@ func TestIdleOnAChangingPaneRaisesNoAsk(t *testing.T) {
 	if len(notifier.notices) != 0 {
 		t.Fatalf("nobody should have been interrupted, got %d notices", len(notifier.notices))
 	}
-	if changing.calls < 2 {
-		t.Fatalf("want two samples to compare, got %d", changing.calls)
+	if changing.calls != 1 {
+		t.Fatalf("idle safety classification should use one read, got %d", changing.calls)
 	}
 	_ = manager
 }
 
-// A pane that has stopped changing is genuinely waiting, so the ask goes up.
-func TestIdleOnASettledPaneRaisesAnAsk(t *testing.T) {
+// A settled composer is ambiguous. The child must declare a real question with
+// relay ask; an idle sample alone only advances the durable cursor.
+func TestIdleOnASettledPaneDoesNotInventAnAsk(t *testing.T) {
 	service, _, reg := newParentTestService(t)
 	service.Sessions.Persist = &steadyPersistence{}
 	_, manager, _, ho := failoverTree(t, reg)
@@ -1445,10 +1482,8 @@ func TestIdleOnASettledPaneRaisesAnAsk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if msg == nil {
-		t.Fatal("a settled waiting pane must raise an ask")
+	if msg != nil {
+		t.Fatalf("idle invented an ask: %+v", msg)
 	}
-	if msg.ParentSessionID != manager.ID {
-		t.Fatalf("ask went to %s, want the manager", msg.ParentSessionID)
-	}
+	_ = manager
 }

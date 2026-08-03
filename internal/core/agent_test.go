@@ -85,6 +85,25 @@ func TestDecideNextMatrix(t *testing.T) {
 	}
 }
 
+func TestAgentWaitSkipsTelemetryUntilRealAsk(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	reg := &Registry{}
+	now := time.Now().UTC()
+	sess := &Session{ID: "sess-child", HostID: "self", Persist: ports.PersistHandle{Kind: "tmux", Name: "child"}, CreatedAt: now}
+	ho := &Handoff{ID: "ho-child", SessionID: sess.ID, HostID: "self", Kind: KindAgent, Status: StatusRunning, CreatedAt: now}
+	_ = reg.PutSession(sess)
+	_ = reg.PutHandoff(ho)
+	coord := newFakeCoord()
+	_, _ = coord.Emit(context.Background(), nil, sess.Persist.Name, "progress", map[string]any{"text": "halfway"})
+	_, _ = coord.Emit(context.Background(), nil, sess.Persist.Name, "result", map[string]any{"source": "hook", "text": "composer stopped"})
+	_, _ = coord.Emit(context.Background(), nil, sess.Persist.Name, "ask", map[string]any{"text": "choose A or B"})
+	service := &HandoffService{Reg: reg, Sessions: &SessionService{Reg: reg}, Coord: coord, NewTransport: func(string) (ports.Transport, error) { return &fakeTransport{id: "self"}, nil }}
+	resp, err := service.AgentWait(context.Background(), ho.ID, 0, time.Second)
+	if err != nil || resp.Event == nil || resp.Event.Kind != "ask" || resp.Event.Seq != 3 || resp.LastSeq != 3 {
+		t.Fatalf("wait spent a turn on telemetry: resp=%+v err=%v", resp, err)
+	}
+}
+
 func TestAgentResponseDoesNotRepeatGoal(t *testing.T) {
 	ho := &Handoff{ID: "ho-1", SessionID: "sess-1", HostID: "c3", Kind: KindAgent, Status: StatusRunning, Goal: strings.Repeat("expensive goal ", 1000), LastSeq: 42}
 	resp := (&HandoffService{}).agentBase(ho)

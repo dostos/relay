@@ -686,6 +686,54 @@ func attentionKind(ev coord.Event) string {
 	}
 }
 
+// eventWakesManager is the semantic boundary between durable child telemetry
+// and an interruption. Hooks, idle samples, notes, and progress already live
+// in relayd; copying them into a manager composer adds a turn, not state.
+func eventWakesManager(ev coord.Event) bool {
+	switch ev.Kind {
+	case "ask", "needs_input", "permission_required", "exit":
+		return true
+	case "result":
+		return eventString(ev.Meta, "source") != "hook"
+	default:
+		return false
+	}
+}
+
+func (p *ParentService) classifySecurityEvent(ctx context.Context, ho *Handoff, ev coord.Event) (coord.Event, bool) {
+	if ev.Kind != "idle" && ev.Kind != "permission_required" || p.Sessions == nil {
+		return ev, ev.Kind != "idle"
+	}
+	capture, err := p.Sessions.Capture(ctx, ho.SessionID, 40)
+	if err != nil {
+		return ev, ev.Kind != "idle"
+	}
+	readiness := ClassifyAgentPane(capture)
+	if readiness.State != AgentBlocked || readiness.Gate == nil {
+		if ev.Kind == "idle" && panePermissionPrompt(capture) {
+			ev.Kind = "permission_required"
+			ev.Meta = map[string]any{"text": decisionExcerpt(capture)}
+			return ev, true
+		}
+		return ev, ev.Kind != "idle"
+	}
+	if child, getErr := p.Reg.GetSession(ho.SessionID); getErr == nil && child.RemoteCWD != "" {
+		readiness.Gate.Directory = child.RemoteCWD
+	}
+	ho.Status, ho.PendingGate = StatusNeedsInput, readiness.Gate
+	if ho.DeliveryState == EffectPending {
+		ho.DeliveryState = EffectBlocked
+	}
+	_ = p.Reg.PutHandoff(ho)
+	ev.Kind = "permission_required"
+	if ev.Meta == nil {
+		ev.Meta = map[string]any{}
+	}
+	ev.Meta["gate"] = readiness.Gate
+	ev.Meta["text"] = formatSecurityGate(readiness.Gate)
+	return ev, true
+}
+
 func (p *ParentService) childEventText(ctx context.Context, ho *Handoff, ev coord.Event, kind string) (string, string, bool) {
 	if text := eventString(ev.Meta, "text", "q", "question", "msg", "note"); text != "" {
 		return compactText(text), kind, true
@@ -1119,6 +1167,11 @@ func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coo
 	if ho == nil || ho.SourceSessionID == "" || handoffTerminal(ho) {
 		return nil, nil
 	}
+	var keep bool
+	ev, keep = p.classifySecurityEvent(ctx, ho, ev)
+	if !keep || !eventWakesManager(ev) {
+		return nil, nil
+	}
 	kind := attentionKind(ev)
 	if kind == "" {
 		return nil, nil
@@ -1224,7 +1277,7 @@ func (p *ParentService) applyPolicy(ctx context.Context, ho *Handoff, ev coord.E
 	// A launch-time security gate is never policy-resolvable. Policy may
 	// coalesce duplicate notices, but only an explicit relay resolve made by the
 	// human holding the envelope may select one of the persisted choices.
-	if msg.Kind == "permission_required" && ho.DeliveryState == EffectBlocked {
+	if msg.Kind == "permission_required" && ho.PendingGate != nil {
 		return msg, false
 	}
 	msg.PolicyID, msg.PolicyAction = decision.RuleID, decision.Action
@@ -1401,8 +1454,13 @@ func (p *ParentService) Reply(ctx context.Context, messageID, text string) (*Par
 				_ = p.Reg.PutHandoff(ho)
 				return nil, fmt.Errorf("gate denial recorded; cleanup failed: %w", err)
 			}
-		} else {
+		} else if ho.DeliveryState == EffectBlocked {
 			if err := p.deliverPendingGoalAfterGate(ctx, ho, msg.ChildSessionID); err != nil {
+				return nil, err
+			}
+		} else {
+			ho.PendingGate, ho.Status = nil, StatusRunning
+			if err := p.Reg.PutHandoff(ho); err != nil {
 				return nil, err
 			}
 		}

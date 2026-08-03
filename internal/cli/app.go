@@ -2749,6 +2749,7 @@ func (a *App) cmdSignal(ctx context.Context, mode string, args []string) int {
 	}
 	meta := map[string]any{}
 	if mode == "hook" {
+		meta["source"] = "hook"
 		if stat, err := os.Stdin.Stat(); err == nil && stat.Mode()&os.ModeCharDevice == 0 {
 			raw, _ := io.ReadAll(io.LimitReader(os.Stdin, 64<<10))
 			var payload map[string]any
@@ -2924,11 +2925,11 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 			"log":     []string{"relay", "log", "CURSOR"},
 			"board":   []string{"relay", "board", "query", "-c", "CATEGORY"},
 			"rules": []string{
-				"managed start has no follow-up; hooks wake manager",
+				"managed start: no follow-up; hooks are receipts",
 				"run argv only when returned; wait timeout means stop",
 				"dead parent->ancestor; root->human",
 				"blocked: relay ask QUESTION; security gates stop",
-				"log is optional cursor delta; no transcripts/polling",
+				"ask/result wake; note/progress/idle only advance cursors",
 				"board=peer state; post -k KEY -- TEXT; query folds latest",
 			},
 		}))

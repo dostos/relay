@@ -349,11 +349,9 @@ func (h *HandoffService) AgentWait(ctx context.Context, handoffID string, fromSe
 		applyHandoffEventStatus(ho, ev.Kind)
 		_ = h.Reg.PutHandoff(ho)
 
-		// Explicit-signaling kinds are actionable regardless of handoff kind:
-		// the agent declared its state instead of us inferring it from silence.
-		actionable := ev.Kind == "exit" || ev.Kind == "needs_input" || ev.Kind == "permission_required" ||
-			ev.Kind == "ask" || ev.Kind == "note" || ev.Kind == "progress" || ev.Kind == "result" ||
-			(ev.Kind == "idle" && ho.Kind == KindAgent)
+		// Durable telemetry advances the cursor without spending a manager turn.
+		// Only events crossing the manager-wake boundary end this zero-token wait.
+		actionable := eventWakesManager(ev)
 		if !actionable {
 			return true // keep waiting
 		}
