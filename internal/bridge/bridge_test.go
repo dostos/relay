@@ -64,7 +64,7 @@ func TestRejectInteractiveForward(t *testing.T) {
 
 func TestBridgeAllowlist(t *testing.T) {
 	for _, argv := range [][]string{
-		{"c1", "named"}, {"agent", "start", "c1", "codex", "--", "x"}, {"resolve", "pm-1", "yes"}, {"log", "0"}, {"--json", "history"},
+		{"c1", "named"}, {"agent", "start", "c1", "codex", "--", "x"}, {"resolve", "pm-1", "yes"}, {"log", "0"}, {"--json", "history"}, {"session", "list"}, {"session", "list", "--json"},
 		{"resume", "list", "--probe"}, {"--json", "resume", "list", "--probe"}, {"parent", "send", "sess-child", "--", "review"}, {"doctor"}, {"doctor", "-H", "c1"},
 	} {
 		if err := validateArgv(argv); err != nil {
@@ -112,8 +112,9 @@ func TestSerializeInvocationDoesNotBlockWaits(t *testing.T) {
 	}
 }
 
-func TestBridgeAllowsOnlyScopedSessionDestroyShape(t *testing.T) {
+func TestBridgeAllowsOnlySessionDiscoveryAndScopedCleanup(t *testing.T) {
 	for _, argv := range [][]string{
+		{"session", "list"}, {"--json", "session", "list"}, {"session", "list", "--json"},
 		{"session", "cleanup", "sess-child"},
 	} {
 		if err := validateArgv(argv); err != nil {
@@ -121,7 +122,7 @@ func TestBridgeAllowsOnlyScopedSessionDestroyShape(t *testing.T) {
 		}
 	}
 	for _, argv := range [][]string{
-		{"session", "list"}, {"session", "get", "sess-child"},
+		{"session", "get", "sess-child"}, {"session", "list", "extra"},
 		{"session", "destroy", "sess-child"}, {"session", "cleanup", "sess-child", "--unknown"},
 	} {
 		if err := validateArgv(argv); err == nil {

@@ -323,10 +323,17 @@ func validateArgv(argv []string) error {
 	}
 	switch filtered[0] {
 	case "session":
-		if len(filtered) != 3 || filtered[1] != "cleanup" || strings.HasPrefix(filtered[2], "-") {
-			return fmt.Errorf("only relay session cleanup ID is allowed through the desktop bridge")
+		// Active-session discovery is the authoritative source used by agents
+		// for hierarchy and resume decisions. It is read-only and already less
+		// revealing than the allowed handoff list; refusing it forced callers
+		// back to stale pane-local caches.
+		if len(filtered) == 2 && filtered[1] == "list" {
+			return nil
 		}
-		return nil
+		if len(filtered) == 3 && filtered[1] == "cleanup" && !strings.HasPrefix(filtered[2], "-") {
+			return nil
+		}
+		return fmt.Errorf("only relay session list or session cleanup ID is allowed through the desktop bridge")
 	case "resume":
 		// Session discovery must use the host probe, not the optimistic local
 		// registry. Keep interactive resume and registry mutation desktop-only.
