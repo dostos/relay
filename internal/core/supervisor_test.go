@@ -92,6 +92,31 @@ func TestReconcileDoesNotDoubleStartTheSameHandoff(t *testing.T) {
 	}
 }
 
+func TestReconcileRepairsSensorsOncePerSession(t *testing.T) {
+	sup, reg := newSupervisorFixture(t)
+	putSupervisedHandoff(t, reg, "ho-live", "running", "sess-manager")
+	calls := 0
+	sup.RepairSensors = func(_ context.Context, sessionID string) error {
+		calls++
+		if sessionID != "sess-child-ho-live" {
+			t.Fatalf("session=%s", sessionID)
+		}
+		return nil
+	}
+	sup.mu.Lock()
+	sup.running = map[string]struct{}{"ho-live": {}}
+	sup.mu.Unlock()
+	if _, err := sup.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sup.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("sensor repairs=%d, want 1", calls)
+	}
+}
+
 func TestReconcileIgnoresTerminalHandoffs(t *testing.T) {
 	sup, reg := newSupervisorFixture(t)
 	for _, s := range []string{"done", "failed", "abandoned"} {

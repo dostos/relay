@@ -271,6 +271,11 @@ func (p *Persist) InstallSensors(ctx context.Context, t ports.Transport, h ports
 	if err != nil {
 		return err
 	}
+	// tmux turns a non-zero run-shell hook into a visible "returned 1"
+	// message. Sensor emission is retryable telemetry: relayd restarts must not
+	// overwrite an agent pane/status history with one failure per session.
+	exitCmd = "{ " + exitCmd + "; } || :"
+	idleCmd = "{ " + idleCmd + "; } || :"
 	hooks := fmt.Sprintf(`
 SESS=%s
 tmux set-option -t "$SESS" monitor-silence %d

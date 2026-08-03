@@ -42,3 +42,33 @@ func TestSecondServerCannotUnlinkLiveSocket(t *testing.T) {
 	}
 	_ = conn.Close()
 }
+
+func TestCloseIsSafeWhileServerIsAccepting(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "relayd.sock")
+	store, err := NewStore(filepath.Join(dir, "events"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{SockPath: sock, Store: store}
+	done := make(chan error, 1)
+	go func() { done <- server.Serve() }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		conn, dialErr := net.DialTimeout("unix", sock, 20*time.Millisecond)
+		if dialErr == nil {
+			_ = conn.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("server did not listen")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := server.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := <-done; err == nil {
+		t.Fatal("Serve returned nil after listener close")
+	}
+}

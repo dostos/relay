@@ -31,11 +31,16 @@ type SupervisorService struct {
 
 	// OnEvent reports lifecycle transitions; nil is fine.
 	OnEvent func(event, handoffID string, err error)
+	// RepairSensors refreshes tmux hooks once per live session whenever the
+	// supervisor process starts, so binary upgrades cannot leave old hook
+	// semantics installed indefinitely.
+	RepairSensors func(context.Context, string) error
 
 	mu      sync.Mutex
 	running map[string]struct{}
 	backoff map[string]time.Time
 	started map[string]time.Time
+	sensors map[string]struct{}
 }
 
 // watcherFlapWindow is how quickly a watcher must exit to count as flapping.
@@ -143,6 +148,24 @@ func (s *SupervisorService) Reconcile(ctx context.Context) (int, error) {
 
 	started := 0
 	for _, ho := range pending {
+		if s.RepairSensors != nil {
+			s.mu.Lock()
+			_, repaired := s.sensors[ho.SessionID]
+			s.mu.Unlock()
+			if !repaired {
+				if err := s.RepairSensors(ctx, ho.SessionID); err != nil {
+					s.emit("sensor_repair_error", ho.ID, err)
+				} else {
+					s.mu.Lock()
+					if s.sensors == nil {
+						s.sensors = map[string]struct{}{}
+					}
+					s.sensors[ho.SessionID] = struct{}{}
+					s.mu.Unlock()
+					s.emit("sensors_repaired", ho.ID, nil)
+				}
+			}
+		}
 		s.mu.Lock()
 		if s.running == nil {
 			s.running = map[string]struct{}{}

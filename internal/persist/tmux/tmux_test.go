@@ -96,6 +96,9 @@ func TestInstallSensorsUsesSessionColonTarget(t *testing.T) {
 	if strings.Contains(got, `SESS='=phyzfuzz-feas-alt'`) && !strings.Contains(got, `SESS='=phyzfuzz-feas-alt:'`) {
 		t.Fatalf("bare '=name' breaks set-option on tmux 3.2a: %q", got)
 	}
+	if strings.Count(got, "|| :") != 2 {
+		t.Fatalf("sensor failures must not leak into tmux messages: %q", got)
+	}
 }
 
 func TestApplyChromeUsesSessionColonTarget(t *testing.T) {

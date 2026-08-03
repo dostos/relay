@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/dostos/relay/internal/bridge"
@@ -433,17 +434,36 @@ func cmdServe() int {
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sig
-		_ = srv.Close()
-		os.Exit(0)
-	}()
-
-	if err := srv.Serve(); err != nil {
+	defer signal.Stop(sig)
+	if err := serveUntilSignal(srv, sig); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 	return 0
+}
+
+type closeableServer interface {
+	Serve() error
+	Close() error
+}
+
+func serveUntilSignal(srv closeableServer, sig <-chan os.Signal) error {
+	var stopping atomic.Bool
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-sig:
+			stopping.Store(true)
+			_ = srv.Close()
+		case <-done:
+		}
+	}()
+	err := srv.Serve()
+	close(done)
+	if stopping.Load() {
+		return nil
+	}
+	return err
 }
 
 func cmdPing() int {

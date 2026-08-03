@@ -2,8 +2,36 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"os"
 	"testing"
 )
+
+type blockingServer struct {
+	closed chan struct{}
+	err    error
+}
+
+func (s *blockingServer) Serve() error { <-s.closed; return s.err }
+func (s *blockingServer) Close() error { close(s.closed); return nil }
+
+func TestServeUntilSignalTreatsListenerCloseAsCleanShutdown(t *testing.T) {
+	srv := &blockingServer{closed: make(chan struct{}), err: errors.New("listener closed")}
+	sig := make(chan os.Signal, 1)
+	sig <- os.Interrupt
+	if err := serveUntilSignal(srv, sig); err != nil {
+		t.Fatalf("signal shutdown: %v", err)
+	}
+}
+
+func TestServeUntilSignalPreservesUnpromptedFailure(t *testing.T) {
+	want := errors.New("listen failed")
+	srv := &blockingServer{closed: make(chan struct{}), err: want}
+	close(srv.closed)
+	if err := serveUntilSignal(srv, make(chan os.Signal)); !errors.Is(err, want) {
+		t.Fatalf("got %v, want %v", err, want)
+	}
+}
 
 func TestVizBrokerRefusesCommandsOutsideProjectionProtocol(t *testing.T) {
 	t.Setenv("SSH_ORIGINAL_COMMAND", "relayd status")

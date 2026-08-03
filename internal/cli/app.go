@@ -2634,6 +2634,9 @@ func (a *App) cmdSupervise(ctx context.Context, args []string) int {
 	sup := &core.SupervisorService{
 		Reg:     a.Reg,
 		Parents: a.Parents,
+		RepairSensors: func(ctx context.Context, sessionID string) error {
+			return a.Handoffs.ReinstallSensors(ctx, sessionID, 0)
+		},
 		OnEvent: func(event, handoffID string, err error) {
 			payload := map[string]any{"event": event}
 			if handoffID != "" {

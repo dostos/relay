@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -17,9 +18,9 @@ import (
 type Server struct {
 	SockPath string
 	Store    *Store
+	mu       sync.Mutex
 	started  time.Time
 	ln       net.Listener
-	lock     *os.File
 }
 
 // DefaultPaths returns socket and events dir under $HOME.
@@ -49,11 +50,9 @@ func (s *Server) Serve() error {
 		_ = lock.Close()
 		return fmt.Errorf("relayd already owns %s", s.SockPath)
 	}
-	s.lock = lock
 	defer func() {
 		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 		_ = lock.Close()
-		s.lock = nil
 	}()
 	if conn, dialErr := net.DialTimeout("unix", s.SockPath, 300*time.Millisecond); dialErr == nil {
 		_ = conn.Close()
@@ -70,8 +69,16 @@ func (s *Server) Serve() error {
 		_ = ln.Close()
 		return err
 	}
-	s.ln = ln
-	s.started = time.Now()
+	s.mu.Lock()
+	s.ln, s.started = ln, time.Now()
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		if s.ln == ln {
+			s.ln = nil
+		}
+		s.mu.Unlock()
+	}()
 	for {
 		c, err := ln.Accept()
 		if err != nil {
@@ -82,9 +89,12 @@ func (s *Server) Serve() error {
 }
 
 func (s *Server) Close() error {
-	if s.ln != nil {
+	s.mu.Lock()
+	ln := s.ln
+	s.mu.Unlock()
+	if ln != nil {
 		_ = os.Remove(s.SockPath)
-		return s.ln.Close()
+		return ln.Close()
 	}
 	return nil
 }
@@ -107,11 +117,14 @@ func (s *Server) handle(c net.Conn) {
 	case "ping":
 		writeJSON(c, coord.Response{OK: true, Version: coord.Version, Build: coord.Build})
 	case "status":
+		s.mu.Lock()
+		started := s.started
+		s.mu.Unlock()
 		writeJSON(c, coord.Response{
 			OK:      true,
 			Version: coord.Version,
 			Build:   coord.Build,
-			Uptime:  time.Since(s.started).Round(time.Second).String(),
+			Uptime:  time.Since(started).Round(time.Second).String(),
 		})
 	case "emit":
 		ev, err := s.Store.Emit(req.Session, req.Kind, req.Meta)
