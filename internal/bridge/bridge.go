@@ -356,7 +356,7 @@ func validateArgv(argv []string) error {
 			return fmt.Errorf("relay board %q is not allowed through the desktop bridge", filtered[1])
 		}
 		return nil
-	case "agent", "handoff", "history", "help", "version", "targets", "resolve", "log":
+	case "agent", "handoff", "history", "help", "version", "targets", "resolve", "log", "doctor":
 		return nil
 	default:
 		return fmt.Errorf("relay command %q is not allowed through the desktop bridge", filtered[0])
