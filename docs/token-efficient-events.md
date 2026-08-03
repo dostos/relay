@@ -39,8 +39,8 @@ with the prior route-every-event behavior:
 | relayd events | 8 | 8 |
 | parent envelopes | 8 | 3 |
 | manager wakeups / delivery attempts | 7 | 2 |
-| serialized manager-composer bytes | 418 | 159 |
-| approximate model tokens (bytes / 4) | 105 | 40 |
+| serialized manager-composer bytes | 418 | 139 |
+| approximate model tokens (bytes / 4) | 105 | 35 |
 | retry opportunities | 7 | 2 |
 
 The token estimate is deliberately mechanical, not a tokenizer claim. It
@@ -48,6 +48,12 @@ excludes the much larger avoided manager turns, so it understates savings.
 The compact notice uses the durable parent-message ID as its sole routing key;
 handoff, lineage, child session, and cursor remain recoverable from that ID and
 are not repeated in the composer.
+
+The same rule applies to the default inbox projection. A representative
+permission item shrinks from 226 to 146 serialized bytes (about 57 to 37 tokens)
+by leaving handoff, child-session, and correlation IDs in the authoritative
+envelope and history. `--all` still exposes audit state, while the default item
+retains the exact text, structured gate, message ID, and executable next action.
 
 Adversarial coverage preserves real asks, permission gates, explicit results,
 uncovered exits, replay deduplication, disconnected-manager retry, stale gate

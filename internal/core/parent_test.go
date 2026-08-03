@@ -353,7 +353,7 @@ func TestDisconnectedParentRetriesOneDurableAttentionEnvelope(t *testing.T) {
 
 func TestFormatParentNoticeQualifiesRemoteHandoff(t *testing.T) {
 	got := FormatParentNotice(ParentNotice{MessageID: "pm-1", Kind: "ask", Child: "worker@cancun", Text: "inspect remote", Action: "reply"})
-	if !strings.Contains(got, "worker@cancun pm-1") || !strings.Contains(got, "relay resolve pm-1 --") || strings.Contains(got, "ho-1") {
+	if !strings.Contains(got, "[relay ask worker@cancun]") || !strings.Contains(got, "relay resolve pm-1 --") || strings.Count(got, "pm-1") != 1 || strings.Contains(got, "ho-1") {
 		t.Fatalf("notice lacks remote routing context: %q", got)
 	}
 	receipt := FormatParentNotice(ParentNotice{MessageID: "pm-2", Kind: "result", Child: "worker@cancun", Text: "done"})
@@ -921,7 +921,7 @@ func TestCompactParentMessageOmitsDurableRoutingMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(raw)
-	for _, redundant := range []string{"parent_session_id", "event_seq", "created_at", "\"state\""} {
+	for _, redundant := range []string{"parent_session_id", "child_session_id", "handoff_id", "correlation_id", "event_seq", "created_at", "\"state\""} {
 		if strings.Contains(text, redundant) {
 			t.Fatalf("compact inbox leaked %s: %s", redundant, text)
 		}
@@ -932,6 +932,27 @@ func TestCompactParentMessageOmitsDurableRoutingMetadata(t *testing.T) {
 	if len(raw) > 300 {
 		t.Fatalf("compact inbox item is not compact: %d bytes: %s", len(raw), raw)
 	}
+	legacy, err := json.Marshal(struct {
+		ID             string   `json:"id"`
+		HandoffID      string   `json:"handoff_id"`
+		ChildSessionID string   `json:"child_session_id"`
+		CorrelationID  string   `json:"correlation_id,omitempty"`
+		Kind           string   `json:"kind"`
+		Text           string   `json:"text,omitempty"`
+		Next           string   `json:"next"`
+		Argv           []string `json:"argv"`
+	}{
+		ID: msg.ID, HandoffID: msg.HandoffID, ChildSessionID: msg.ChildSessionID,
+		CorrelationID: msg.CorrelationID, Kind: msg.Kind, Text: msg.Text,
+		Next: item.Next, Argv: item.Argv,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) >= len(legacy) {
+		t.Fatalf("compact inbox did not shrink: before=%d after=%d", len(legacy), len(raw))
+	}
+	t.Logf("serialized_inbox_bytes=%d->%d token_estimate=%d->%d", len(legacy), len(raw), (len(legacy)+3)/4, (len(raw)+3)/4)
 }
 
 func TestParentMessageCarriesFailoverAttribution(t *testing.T) {

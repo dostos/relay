@@ -80,20 +80,17 @@ type ParentMessage struct {
 // Full timestamps, routing identity, and event cursors remain on disk and in
 // history; an orchestrator receives only what it needs for one decision.
 type ParentInboxItem struct {
-	ID             string             `json:"id"`
-	HandoffID      string             `json:"handoff_id"`
-	ChildSessionID string             `json:"child_session_id"`
-	CorrelationID  string             `json:"correlation_id,omitempty"`
-	Kind           string             `json:"kind"`
-	Text           string             `json:"text,omitempty"`
-	Gate           *SecurityGate      `json:"gate,omitempty"`
-	State          ParentMessageState `json:"state,omitempty"`
-	Reply          string             `json:"reply,omitempty"`
-	PolicyID       string             `json:"policy_id,omitempty"`
-	AutoHandled    bool               `json:"auto_handled,omitempty"`
-	PolicyError    string             `json:"policy_error,omitempty"`
-	Next           string             `json:"next"`
-	Argv           []string           `json:"argv"`
+	ID          string             `json:"id"`
+	Kind        string             `json:"kind"`
+	Text        string             `json:"text,omitempty"`
+	Gate        *SecurityGate      `json:"gate,omitempty"`
+	State       ParentMessageState `json:"state,omitempty"`
+	Reply       string             `json:"reply,omitempty"`
+	PolicyID    string             `json:"policy_id,omitempty"`
+	AutoHandled bool               `json:"auto_handled,omitempty"`
+	PolicyError string             `json:"policy_error,omitempty"`
+	Next        string             `json:"next"`
+	Argv        []string           `json:"argv"`
 }
 
 func CompactParentMessage(msg *ParentMessage, includeState bool) ParentInboxItem {
@@ -104,8 +101,7 @@ func CompactParentMessage(msg *ParentMessage, includeState bool) ParentInboxItem
 		argv = []string{"relay", "resolve", msg.ID, "--", "<decision>"}
 	}
 	item := ParentInboxItem{
-		ID: msg.ID, HandoffID: msg.HandoffID, ChildSessionID: msg.ChildSessionID,
-		CorrelationID: msg.CorrelationID, Kind: msg.Kind, Text: msg.Text, Gate: msg.Gate,
+		ID: msg.ID, Kind: msg.Kind, Text: msg.Text, Gate: msg.Gate,
 		Next: next, Argv: argv,
 	}
 	if includeState {
@@ -1311,7 +1307,7 @@ func FormatParentNotice(n ParentNotice) string {
 		// The message ID owns handoff, lineage, child identity, and the durable
 		// decision cursor. Retyping the handoff ID gives the manager no action it
 		// could not already perform with this one key.
-		return fmt.Sprintf("[relay %s %s %s] %s; relay resolve %s -- <decision>", n.Kind, n.Child, n.MessageID, text, n.MessageID)
+		return fmt.Sprintf("[relay %s %s] %s; relay resolve %s -- <decision>", n.Kind, n.Child, text, n.MessageID)
 	}
 	return fmt.Sprintf("[relay %s %s] %s", n.Kind, n.Child, text)
 }
