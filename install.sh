@@ -45,7 +45,17 @@ rm -f "$STATE_ROOT/relayd-services.json" "$STATE_ROOT/relayd-services.lock"
 # preserve an already-running unmanaged daemon as one new process.
 relayd_pids="$(pgrep -f -x "$INSTALL_DIR/relayd serve" 2>/dev/null || true)"
 if [[ -n "$relayd_pids" ]]; then
-  if systemctl --user is-active --quiet relayd.service >/dev/null 2>&1; then
+  if systemctl is-active --quiet relayd.service >/dev/null 2>&1; then
+    # A system unit belongs to root/systemd. Killing its child here creates a
+    # RestartSec outage and can race the next command after this installer.
+    # Do not pretend the new build is active; surface the exact owner action.
+    running_status="$(RELAYD_SOCK="$RELAYD_SOCK_PATH" "$INSTALL_DIR/relayd" status 2>/dev/null || true)"
+    if [[ "$running_status" == *"\"build\":\"$BUILD\""* ]]; then
+      echo "relayd: system service already runs build $BUILD"
+    else
+      echo "relay: WARNING - system relayd still owns the old process; run: sudo systemctl restart relayd" >&2
+    fi
+  elif systemctl --user is-active --quiet relayd.service >/dev/null 2>&1; then
     systemctl --user restart relayd.service
   else
     kill $relayd_pids 2>/dev/null || true
@@ -60,19 +70,21 @@ if [[ -n "$relayd_pids" ]]; then
     nohup env RELAYD_SOCK="$RELAYD_SOCK_PATH" "$INSTALL_DIR/relayd" serve >> "$STATE_ROOT/relayd.log" 2>&1 &
     disown 2>/dev/null || true
   fi
-  daemon_ok=""
-  for _ in {1..20}; do
-    daemon_status="$(RELAYD_SOCK="$RELAYD_SOCK_PATH" "$INSTALL_DIR/relayd" status 2>/dev/null || true)"
-    if [[ "$daemon_status" == *"\"build\":\"$BUILD\""* ]]; then
-      daemon_ok=1
-      break
+  if ! systemctl is-active --quiet relayd.service >/dev/null 2>&1; then
+    daemon_ok=""
+    for _ in {1..20}; do
+      daemon_status="$(RELAYD_SOCK="$RELAYD_SOCK_PATH" "$INSTALL_DIR/relayd" status 2>/dev/null || true)"
+      if [[ "$daemon_status" == *"\"build\":\"$BUILD\""* ]]; then
+        daemon_ok=1
+        break
+      fi
+      sleep 0.25
+    done
+    if [[ -n "$daemon_ok" ]]; then
+      echo "relayd: restarted on build $BUILD"
+    else
+      echo "relay: WARNING - live relayd did not report installed build $BUILD" >&2
     fi
-    sleep 0.25
-  done
-  if [[ -n "$daemon_ok" ]]; then
-    echo "relayd: restarted on build $BUILD"
-  else
-    echo "relay: WARNING - live relayd did not report installed build $BUILD" >&2
   fi
 fi
 
@@ -97,7 +109,17 @@ else
   # an old process keeps its deleted executable image and can look alive while
   # running pre-upgrade watcher logic indefinitely.
   supervisor_pids="$(pgrep -f -x "$INSTALL_DIR/relay supervise" 2>/dev/null || true)"
-  if [[ -n "$supervisor_pids" ]]; then
+  if [[ -n "$supervisor_pids" ]] && systemctl is-active --quiet relay-supervisor.service >/dev/null 2>&1; then
+    supervisor_current=1
+    for pid in $supervisor_pids; do
+      cmp -s "/proc/$pid/exe" "$INSTALL_DIR/relay" || supervisor_current=""
+    done
+    if [[ -n "$supervisor_current" ]]; then
+      echo "relay supervisor: system service already runs the installed binary"
+    else
+      echo "relay: WARNING - system supervisor still owns the old process; run: sudo systemctl restart relay-supervisor" >&2
+    fi
+  elif [[ -n "$supervisor_pids" ]]; then
     kill $supervisor_pids 2>/dev/null || true
     for _ in {1..20}; do
       live_supervisor=""
