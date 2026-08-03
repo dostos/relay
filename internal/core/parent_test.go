@@ -352,12 +352,12 @@ func TestDisconnectedParentRetriesOneDurableAttentionEnvelope(t *testing.T) {
 }
 
 func TestFormatParentNoticeQualifiesRemoteHandoff(t *testing.T) {
-	got := FormatParentNotice(ParentNotice{MessageID: "pm-1", HandoffID: "ho-1", Kind: "ask", Child: "worker@cancun", Text: "inspect remote", Action: "reply"})
-	if !strings.Contains(got, "worker@cancun ho-1") || !strings.Contains(got, "relay resolve pm-1") {
+	got := FormatParentNotice(ParentNotice{MessageID: "pm-1", Kind: "ask", Child: "worker@cancun", Text: "inspect remote", Action: "reply"})
+	if !strings.Contains(got, "worker@cancun pm-1") || !strings.Contains(got, "relay resolve pm-1 --") || strings.Contains(got, "ho-1") {
 		t.Fatalf("notice lacks remote routing context: %q", got)
 	}
-	receipt := FormatParentNotice(ParentNotice{MessageID: "pm-2", HandoffID: "ho-1", Kind: "result", Child: "worker@cancun", Text: "done"})
-	if strings.Contains(receipt, "resolve") || strings.Contains(receipt, "pm-2") || receipt != "[relay result worker@cancun ho-1] done" {
+	receipt := FormatParentNotice(ParentNotice{MessageID: "pm-2", Kind: "result", Child: "worker@cancun", Text: "done"})
+	if strings.Contains(receipt, "resolve") || strings.Contains(receipt, "pm-2") || receipt != "[relay result worker@cancun] done" {
 		t.Fatalf("receipt created a handshake: %q", receipt)
 	}
 }
@@ -1341,7 +1341,10 @@ func TestLifecycleCommunicationMeasurement(t *testing.T) {
 		kind := attentionKind(ev)
 		if kind != "" && ev.Kind != "exit" { // legacy already coalesced result+exit
 			text := eventText(&ev)
-			legacy := FormatParentNotice(ParentNotice{MessageID: "pm-legacy", HandoffID: ho.ID, Kind: kind, Child: "worker@c1", Text: text, Action: map[bool]string{true: "reply"}[attentionMessage(kind)]})
+			legacy := fmt.Sprintf("[relay %s %s %s] %s", kind, "worker@c1", ho.ID, compactText(text))
+			if attentionMessage(kind) {
+				legacy = fmt.Sprintf("[relay %s %s %s %s] %s | relay resolve pm-legacy <decision>", kind, "pm-legacy", "worker@c1", ho.ID, compactText(text))
+			}
 			legacyBytes += len(legacy)
 			legacyWakeups++
 		}

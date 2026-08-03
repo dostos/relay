@@ -120,7 +120,6 @@ func CompactParentMessage(msg *ParentMessage, includeState bool) ParentInboxItem
 
 type ParentNotice struct {
 	MessageID string
-	HandoffID string
 	Kind      string
 	Child     string
 	Text      string
@@ -806,7 +805,7 @@ func (p *ParentService) deliverMessage(ctx context.Context, parent *Session, ho 
 	if attentionMessage(msg.Kind) {
 		action = "reply"
 	}
-	notice := ParentNotice{MessageID: msg.ID, HandoffID: ho.ID, Kind: msg.Kind, Child: childName, Text: msg.Text, Action: action}
+	notice := ParentNotice{MessageID: msg.ID, Kind: msg.Kind, Child: childName, Text: msg.Text, Action: action}
 	var err error
 	if p.Sessions != nil {
 		attemptCtx, cancel := context.WithTimeout(ctx, deliveryAttemptTimeout)
@@ -1309,9 +1308,12 @@ func (p *ParentService) applyPolicy(ctx context.Context, ho *Handoff, ev coord.E
 func FormatParentNotice(n ParentNotice) string {
 	text := compactText(n.Text)
 	if n.Action == "reply" {
-		return fmt.Sprintf("[relay %s %s %s %s] %s | relay resolve %s <decision>", n.Kind, n.MessageID, n.Child, n.HandoffID, text, n.MessageID)
+		// The message ID owns handoff, lineage, child identity, and the durable
+		// decision cursor. Retyping the handoff ID gives the manager no action it
+		// could not already perform with this one key.
+		return fmt.Sprintf("[relay %s %s %s] %s; relay resolve %s -- <decision>", n.Kind, n.Child, n.MessageID, text, n.MessageID)
 	}
-	return fmt.Sprintf("[relay %s %s %s] %s", n.Kind, n.Child, n.HandoffID, text)
+	return fmt.Sprintf("[relay %s %s] %s", n.Kind, n.Child, text)
 }
 
 func (p *ParentService) Watch(ctx context.Context, handoffID string) error {

@@ -39,12 +39,15 @@ with the prior route-every-event behavior:
 | relayd events | 8 | 8 |
 | parent envelopes | 8 | 3 |
 | manager wakeups / delivery attempts | 7 | 2 |
-| serialized manager-composer bytes | 418 | 177 |
-| approximate model tokens (bytes / 4) | 105 | 45 |
+| serialized manager-composer bytes | 418 | 159 |
+| approximate model tokens (bytes / 4) | 105 | 40 |
 | retry opportunities | 7 | 2 |
 
 The token estimate is deliberately mechanical, not a tokenizer claim. It
 excludes the much larger avoided manager turns, so it understates savings.
+The compact notice uses the durable parent-message ID as its sole routing key;
+handoff, lineage, child session, and cursor remain recoverable from that ID and
+are not repeated in the composer.
 
 Adversarial coverage preserves real asks, permission gates, explicit results,
 uncovered exits, replay deduplication, disconnected-manager retry, stale gate

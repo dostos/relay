@@ -110,7 +110,6 @@ func (p *ParentService) ReportStaleEscalations(ctx context.Context, maxHold time
 		manager := chain[0]
 		notice := ParentNotice{
 			MessageID: msg.ID,
-			HandoffID: msg.HandoffID,
 			Kind:      "stalled",
 			Child:     holder.ID,
 			Text: "your child " + holder.ID + " has held an unanswered " + msg.Kind +
