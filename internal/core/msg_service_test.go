@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -82,6 +83,41 @@ func TestWaitOneFanInFirstWins(t *testing.T) {
 	if m.Channel != "a" || m.Text != "from-a" {
 		t.Fatalf("wrong message: %+v", m)
 	}
+}
+
+func TestReadProjectsKnownChannelOnlyOnce(t *testing.T) {
+	c := newFakeCoord()
+	_, _ = c.Emit(context.Background(), nil, channelStream("known"), "msg", map[string]any{"from": "a", "text": "one"})
+	_, _ = c.Emit(context.Background(), nil, channelStream("known"), "msg", map[string]any{"from": "b", "text": "two"})
+	s := newFakeMsg(c)
+	messages, _, err := s.Read(context.Background(), "h", "known", 0, false, 0)
+	if err != nil || len(messages) != 2 {
+		t.Fatalf("read=%+v err=%v", messages, err)
+	}
+	raw, err := json.Marshal(messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "channel") || strings.Contains(string(raw), "\"ts\"") {
+		t.Fatalf("single-channel read repeated durable context: %s", raw)
+	}
+	for _, message := range messages {
+		if message.Seq == 0 || message.Kind != "msg" || message.Text == "" {
+			t.Fatalf("decision content lost: %+v", message)
+		}
+	}
+	legacy := []map[string]any{}
+	for _, message := range messages {
+		legacy = append(legacy, map[string]any{"channel": "known", "seq": message.Seq, "ts": "2026-08-03T00:00:00Z", "kind": message.Kind, "from": message.From, "text": message.Text})
+	}
+	legacyRaw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) >= len(legacyRaw) {
+		t.Fatalf("known-channel projection did not shrink: before=%d after=%d", len(legacyRaw), len(raw))
+	}
+	t.Logf("two_message_read_bytes=%d->%d token_estimate=%d->%d", len(legacyRaw), len(raw), (len(legacyRaw)+3)/4, (len(raw)+3)/4)
 }
 
 func TestWaitOneTimeout(t *testing.T) {

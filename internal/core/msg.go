@@ -20,9 +20,9 @@ func channelStream(channel string) string { return "chan." + channel }
 // MsgEnvelope is one message on a channel — a relayd event with from/text
 // lifted out of meta into the agent-facing shape for `relay msg`.
 type MsgEnvelope struct {
-	Channel string         `json:"channel"`
+	Channel string         `json:"channel,omitempty"`
 	Seq     int64          `json:"seq"`
-	TS      string         `json:"ts,omitempty"`
+	TS      string         `json:"-"` // internal board ordering; event log owns it
 	Kind    string         `json:"kind"`
 	From    string         `json:"from,omitempty"`
 	Text    string         `json:"text,omitempty"`
@@ -134,7 +134,8 @@ func (s *MsgService) Read(ctx context.Context, host, channel string, fromSeq int
 	var out []MsgEnvelope
 	last := fromSeq
 	_ = streamEvents(rctx, s.Coord, t, channelStream(channel), fromSeq, follow, func(ev coord.Event) bool {
-		out = append(out, envelopeFromEvent(channel, ev))
+		message := envelopeFromEvent("", ev) // the read response owns channel
+		out = append(out, message)
 		if ev.Seq > last {
 			last = ev.Seq
 		}

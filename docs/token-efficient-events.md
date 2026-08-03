@@ -66,6 +66,19 @@ and surface flash. Explicit `notify` parents and legacy registrations retain
 desktop presentation. This reduces presentation paths per agent-manager event
 from two to one without changing envelope durability or delivery acknowledgement.
 
+Lateral message reads apply the same projection rule. The response already
+owns the requested channel, so individual messages omit it; event timestamps
+remain in relayd and are used internally for board ordering but are not copied
+into model-facing envelopes. A representative two-message read shrinks from
+187 to 95 bytes (about 47 to 24 tokens). Fan-in waits still include `channel`
+because identifying the winning stream is decision content.
+
+Board queries likewise receive category as an input and use relayd timestamps
+only while folding state, so entries now project just node, key, text, and
+cursor. A representative two-entry board shrinks from 208 to 112 bytes (about
+52 to 28 tokens). Subtree queries preserve node identity, and watches preserve
+the sequence needed for the next cursor.
+
 Adversarial coverage preserves real asks, permission gates, explicit results,
 uncovered exits, replay deduplication, disconnected-manager retry, stale gate
 failure, and durable cursor advancement. Compression happens before envelope

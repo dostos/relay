@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,6 +63,25 @@ func TestBoardQueryReturnsLatestValuePerNodeAndKey(t *testing.T) {
 	if entries[1].Node != "sess-b" || entries[1].Text != "idle" {
 		t.Fatalf("wrong value for sess-b: %+v", entries[1])
 	}
+	raw, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) == "" || strings.Contains(string(raw), "category") || strings.Contains(string(raw), "\"ts\"") {
+		t.Fatalf("board repeated query context: %s", raw)
+	}
+	legacy := []map[string]any{}
+	for _, entry := range entries {
+		legacy = append(legacy, map[string]any{"node": entry.Node, "category": "status", "key": entry.Key, "text": entry.Text, "seq": entry.Seq, "ts": "2026-08-03T00:00:00Z"})
+	}
+	legacyRaw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) >= len(legacyRaw) {
+		t.Fatalf("board projection did not shrink: before=%d after=%d", len(legacyRaw), len(raw))
+	}
+	t.Logf("two_entry_board_bytes=%d->%d token_estimate=%d->%d", len(legacyRaw), len(raw), (len(legacyRaw)+3)/4, (len(raw)+3)/4)
 }
 
 func TestBoardQueryPeersOnlyDropsCallersOwnEntries(t *testing.T) {

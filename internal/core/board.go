@@ -24,12 +24,10 @@ import (
 // BoardEntry is one node's current value for a key. A query returns only the
 // latest entry per (node, key): agents pay for current state, not history.
 type BoardEntry struct {
-	Node     string `json:"node"`
-	Category string `json:"category"`
-	Key      string `json:"key,omitempty"`
-	Text     string `json:"text,omitempty"`
-	Seq      int64  `json:"seq"`
-	TS       string `json:"ts,omitempty"`
+	Node string `json:"node"`
+	Key  string `json:"key,omitempty"`
+	Text string `json:"text,omitempty"`
+	Seq  int64  `json:"seq"`
 }
 
 // BoardService reads and writes manager-scoped boards.
@@ -109,7 +107,7 @@ func (b *BoardService) Query(ctx context.Context, sessionID, category, key strin
 	key = strings.TrimSpace(key)
 	latest := map[string]BoardEntry{}
 	for _, m := range msgs {
-		entry := BoardEntry{Node: m.From, Category: category, Text: m.Text, Seq: m.Seq, TS: m.TS}
+		entry := BoardEntry{Node: m.From, Text: m.Text, Seq: m.Seq}
 		if m.Meta != nil {
 			if k, ok := m.Meta["key"].(string); ok {
 				entry.Key = k
@@ -215,7 +213,7 @@ func (b *BoardService) readBoard(ctx context.Context, manager *Session, category
 	}
 	latest := map[string]BoardEntry{}
 	for _, m := range msgs {
-		entry := BoardEntry{Node: m.From, Category: category, Text: m.Text, Seq: m.Seq, TS: m.TS}
+		entry := BoardEntry{Node: m.From, Text: m.Text, Seq: m.Seq}
 		if m.Meta != nil {
 			if k, ok := m.Meta["key"].(string); ok {
 				entry.Key = k
@@ -275,7 +273,7 @@ func (b *BoardService) Watch(ctx context.Context, sessionID, category string, fr
 		if m.From == sessionID {
 			continue
 		}
-		entry := &BoardEntry{Node: m.From, Category: category, Text: m.Text, Seq: m.Seq, TS: m.TS}
+		entry := &BoardEntry{Node: m.From, Text: m.Text, Seq: m.Seq}
 		if m.Meta != nil {
 			if k, ok := m.Meta["key"].(string); ok {
 				entry.Key = k
