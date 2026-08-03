@@ -9,8 +9,9 @@ Relay is a strict management tree, not a role system.
   nearest live ancestor to that manager's child for operational verbs and
   escalation resolution. This is audited failover, not re-parenting: the
   durable lineage edge stays unchanged. Unknown/unreachable is not absent.
-- A child reports progress, asks, and results to its immediate parent. It does
-  not contact higher ancestors directly.
+- A child records progress and reports asks/results to its immediate parent. A
+  progress receipt advances the durable cursor without interrupting the
+  manager. It never contacts higher ancestors directly.
 - An unresolved decision moves through Relay's durable routing; do not manually
   forward transcripts or recreate the ask at another level.
 - A manager decides scope and acceptance, not the child's tactics. Delegate

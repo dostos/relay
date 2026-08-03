@@ -28,3 +28,8 @@ Include:
 
 A useful goal tells the child what must be true and where it must stop, while
 leaving how to achieve it to the child.
+
+Use `relay signal progress|note` for durable telemetry that should not wake the
+manager, `relay ask` for a real decision, and explicit `relay signal result
+--text ...` for a manager-visible milestone or conclusion. Provider Stop hooks
+are receipts and do not substitute for an explicit result.

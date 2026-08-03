@@ -64,11 +64,9 @@ was *asked*; make diagnostics fail loudly rather than default to passing.
 
 ## Known open items
 
-- **Escalation excerpts still have a screen-scrape fallback.** As of 2026-08-02,
-  `relay ask "<question>"` exists, is advertised in the compact protocol, and
-  every new child goal teaches it. Relay prefers that explicit event text.
-  Keep measuring live adoption; delete the scrape fallback once new children
-  reliably declare their questions instead of maintaining another TUI parser.
+- **Resolved 2026-08-03 — ambiguous idle escalation removed.** Questions use
+  `relay ask "<question>"`. Note/progress/idle and hook receipts advance only
+  durable cursors; the idle pane read remains solely to surface security gates.
 - **Resolved 2026-08-02 — rename/sensor stream split.** Reinstalled sensors now
   attach to the renamed tmux handle while continuing to emit to the active
   handoff's original watcher stream. Verified on a real disposable tmux edge.

@@ -122,11 +122,13 @@ identity for legacy registry entries without restarting or exposing its token
 to the agent transcript.
 
 Each parented handoff starts one detached watcher using a single blocking
-relayd subscription. The watcher routes only actionable events into
-`parent-inbox/<parent>/<message>.json`: `ask`, `permission_required`, `result`,
-and `exit`; ambiguous agent `idle` becomes a short decision request with at
-most four captured lines. Envelopes are bounded and deduplicated by
-parent/handoff/kind/sequence, so replays do not notify twice.
+relayd subscription. The watcher advances the durable cursor for every event,
+but allocates manager envelopes only for `ask`, `permission_required`, explicit
+`result`, and `exit`. Hook receipts, `note`, `progress`, and ordinary `idle`
+never wake a manager. Idle inspection is limited to detecting a real security
+prompt; Relay does not invent questions from a settled composer. Envelopes are
+bounded and deduplicated by parent/handoff/kind/sequence, so replays do not
+notify twice. See [token-efficient-events.md](token-efficient-events.md).
 
 The cmux adapter sends a desktop notification and flash to the exact bound
 surface. Agent parents additionally receive one compact prompt containing the
