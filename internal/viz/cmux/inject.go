@@ -56,7 +56,8 @@ func composerHolds(screen, marker string) bool {
 			}
 		}
 	}
-	if !strings.Contains(composer, marker) {
+	pastedContent := strings.Contains(composer, "[Pasted Content ")
+	if !pastedContent && !strings.Contains(composer, marker) {
 		return false
 	}
 	// Indented lines below a composer are wrapped input or UI hints. A new
@@ -68,6 +69,10 @@ func composerHolds(screen, marker string) bool {
 		}
 	}
 	return true
+}
+
+func injectionSubmitted(screen, marker string) bool {
+	return marker != "" && strings.Contains(screen, marker) && !composerHolds(screen, marker)
 }
 
 // submitInjected presses ENTER and confirms the message left the composer,
@@ -89,11 +94,9 @@ func (v *Viz) submitInjected(ctx context.Context, sessionID string, b binding, m
 		}
 		screen, err := v.CaptureScreen(ctx, sessionID, injectConfirmLines)
 		if err != nil {
-			// Cannot verify: assume the keystroke landed rather than
-			// re-sending blindly into a pane we cannot read.
-			return nil
+			return fmt.Errorf("confirm injected message: %w", err)
 		}
-		if !composerHolds(screen, marker) {
+		if injectionSubmitted(screen, marker) {
 			return nil
 		}
 	}

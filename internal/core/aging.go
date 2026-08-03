@@ -134,11 +134,14 @@ func (p *ParentService) ReportStaleEscalations(ctx context.Context, maxHold time
 func (p *ParentService) notifyStalled(ctx context.Context, manager *Session, notice ParentNotice) error {
 	attemptCtx, cancel := context.WithTimeout(ctx, deliveryAttemptTimeout)
 	defer cancel()
-	if isLocalParent(manager) && p.Notifier != nil {
-		return p.Notifier.NotifyParent(attemptCtx, manager.ID, notice)
-	}
 	if p.Sessions != nil {
-		return p.Sessions.Send(attemptCtx, manager.ID, FormatParentNotice(notice), true)
+		if err := p.Sessions.Send(attemptCtx, manager.ID, FormatParentNotice(notice), true); err != nil {
+			return err
+		}
+		if isLocalParent(manager) && p.Notifier != nil {
+			_ = p.Notifier.NotifyParent(attemptCtx, manager.ID, notice)
+		}
+		return nil
 	}
 	return nil
 }

@@ -38,15 +38,18 @@ func TestComposerHoldsIgnoresTheTranscript(t *testing.T) {
 	}
 }
 
-// An unfamiliar agent UI has no recognisable composer. Reporting "held" there
-// would block delivery to every such pane, so absence of evidence must read as
-// sent rather than stuck.
-func TestComposerHoldsAssumesSentWhenNoComposerIsRecognisable(t *testing.T) {
+func TestUnknownScreenIsNotDeliveryEvidence(t *testing.T) {
 	if composerHolds("just some output\nwith no prompt glyph\n", "pm-x") {
 		t.Fatal("an unrecognisable UI must not be treated as stuck")
 	}
-	if composerHolds("", "pm-x") {
-		t.Fatal("an empty capture must not be treated as stuck")
+	if injectionSubmitted("just some output\nwith no prompt glyph\n", "pm-x") {
+		t.Fatal("an unrecognisable UI must not prove delivery")
+	}
+}
+
+func TestOpaquePasteRemainsUnsent(t *testing.T) {
+	if !composerHolds("› [Pasted Content 2048 chars]\n\n  status", "pm-hidden") {
+		t.Fatal("opaque paste was treated as delivered")
 	}
 }
 

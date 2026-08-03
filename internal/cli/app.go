@@ -77,6 +77,7 @@ func New() *App {
 		NewTransport: tf,
 		Persist:      persist,
 		Viz:          viz,
+		Screen:       viz,
 	}
 	handoffs := &core.HandoffService{
 		Sessions:     sessions,
@@ -1939,6 +1940,22 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 			items = append(items, core.CompactParentMessage(msg, all))
 		}
 		return a.errOut(a.out(map[string]any{"ok": true, "parent_session_id": parentID, "messages": items, "count": len(items)}))
+	case "redeliver":
+		if len(args) != 2 || strings.HasPrefix(args[1], "-") {
+			return a.fail(fmt.Errorf("usage: relay parent redeliver MESSAGE"))
+		}
+		candidate, err := a.Parents.FindMessage(args[1])
+		if err != nil {
+			return a.fail(err)
+		}
+		if err := authorizeParentCaller(candidate.ParentSessionID); err != nil {
+			return a.fail(err)
+		}
+		msg, err := a.Parents.RedeliverReceipt(ctx, candidate.ID)
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "message_id": msg.ID, "state": msg.State, "delivery_method": msg.DeliveryMethod, "delivery_build": msg.DeliveryBuild}))
 	case "log":
 		if len(args) < 2 || strings.HasPrefix(args[1], "-") {
 			return a.fail(fmt.Errorf("usage: relay parent log PARENT [--after CURSOR] [--limit N] [--handoff ID]"))

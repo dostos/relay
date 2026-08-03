@@ -17,12 +17,17 @@ type fakeScreen struct {
 	gotID   string
 	gotLine int
 	calls   int
+	sent    string
 }
 
 func (f *fakeScreen) CaptureScreen(_ context.Context, sessionID string, lines int) (string, error) {
 	f.calls++
 	f.gotID, f.gotLine = sessionID, lines
 	return f.text, nil
+}
+func (f *fakeScreen) SendScreen(_ context.Context, _ string, text string, _ bool) error {
+	f.sent = text
+	return nil
 }
 
 // plainViz has no screen-reading capability, like a headless adapter.
@@ -32,6 +37,18 @@ type plainViz struct{ ports.Viz }
 type fakePersist struct {
 	ports.Persistence
 	calls int
+}
+
+func TestSendToDesktopSessionUsesScreenCapability(t *testing.T) {
+	svc, fp, _ := captureFixture(t, LocalPersistKind)
+	screen := &fakeScreen{}
+	svc.Screen = screen
+	if err := svc.Send(context.Background(), "sess-cap", "manager notice", true); err != nil {
+		t.Fatal(err)
+	}
+	if screen.sent != "manager notice" || fp.calls != 0 {
+		t.Fatalf("screen=%q persist_calls=%d", screen.sent, fp.calls)
+	}
 }
 
 func (f *fakePersist) Capture(_ context.Context, _ ports.Transport, _ ports.PersistHandle, _ int) (string, error) {
@@ -67,7 +84,7 @@ func captureFixture(t *testing.T, kind string) (*SessionService, *fakePersist, *
 func TestCaptureOfACmuxSessionReadsThePaneNotTmux(t *testing.T) {
 	svc, fp, _ := captureFixture(t, LocalPersistKind)
 	screen := &fakeScreen{text: "pane contents"}
-	svc.Viz = screen
+	svc.Screen = screen
 
 	got, err := svc.Capture(context.Background(), "sess-cap", 12)
 	if err != nil {
@@ -88,7 +105,7 @@ func TestCaptureOfACmuxSessionReadsThePaneNotTmux(t *testing.T) {
 func TestCaptureOfATmuxSessionStillUsesPersistence(t *testing.T) {
 	svc, fp, _ := captureFixture(t, "tmux")
 	screen := &fakeScreen{text: "pane contents"}
-	svc.Viz = screen
+	svc.Screen = screen
 
 	got, err := svc.Capture(context.Background(), "sess-cap", 5)
 	if err != nil {
@@ -109,7 +126,7 @@ func TestCaptureOfATmuxSessionStillUsesPersistence(t *testing.T) {
 // tmux and reporting "no server running", which names the wrong subsystem.
 func TestCaptureOfACmuxSessionWithoutAScreenReaderExplainsItself(t *testing.T) {
 	svc, _, _ := captureFixture(t, LocalPersistKind)
-	svc.Viz = plainViz{}
+	svc.Screen = nil
 
 	_, err := svc.Capture(context.Background(), "sess-cap", 5)
 	if err == nil {

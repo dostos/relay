@@ -38,13 +38,23 @@ func TestSendRetriesEnterUntilComposerClears(t *testing.T) {
 	oldDelay := sendConfirmDelay
 	sendConfirmDelay = 0
 	t.Cleanup(func() { sendConfirmDelay = oldDelay })
-	transport := &recordingTransport{outputs: []string{"", "", "❯ relay marker\n", "", "transcript\n❯ \n"}}
+	transport := &recordingTransport{outputs: []string{"", "", "❯ relay marker\n", "", "transcript relay marker\n❯ \n"}}
 	if err := New().Send(context.Background(), transport, ports.PersistHandle{Name: "agent"}, "relay marker", true); err != nil {
 		t.Fatal(err)
 	}
 	joined := strings.Join(transport.commands, "\n")
 	if strings.Count(joined, "send-keys -t '=agent:' Enter") != 2 || strings.Count(joined, "-l -- 'relay marker'") != 1 {
 		t.Fatalf("expected one type and two enters, commands=%v", transport.commands)
+	}
+}
+
+func TestSendDoesNotClaimUnknownDisappearance(t *testing.T) {
+	oldDelay := sendConfirmDelay
+	sendConfirmDelay = 0
+	t.Cleanup(func() { sendConfirmDelay = oldDelay })
+	transport := &recordingTransport{stdout: "popup swallowed input\n"}
+	if err := New().Send(context.Background(), transport, ports.PersistHandle{Name: "agent"}, "relay marker", true); err == nil {
+		t.Fatal("missing pane-level evidence was reported as delivered")
 	}
 }
 

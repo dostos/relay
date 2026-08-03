@@ -71,6 +71,8 @@ type ParentMessage struct {
 	PolicyAction    string             `json:"policy_action,omitempty"`
 	AutoHandled     bool               `json:"auto_handled,omitempty"`
 	PolicyError     string             `json:"policy_error,omitempty"`
+	DeliveryMethod  string             `json:"delivery_method,omitempty"`
+	DeliveryBuild   string             `json:"delivery_build,omitempty"`
 }
 
 // ParentInboxItem is the turn-level projection of a durable parent message.
@@ -748,11 +750,7 @@ func (p *ParentService) deliverMessage(ctx context.Context, parent *Session, ho 
 	}
 	notice := ParentNotice{MessageID: msg.ID, HandoffID: ho.ID, Kind: msg.Kind, Child: childName, Text: msg.Text, Action: action}
 	var err error
-	if isLocalParent(parent) && p.Notifier != nil {
-		attemptCtx, cancel := context.WithTimeout(ctx, deliveryAttemptTimeout)
-		err = p.Notifier.NotifyParent(attemptCtx, parent.ID, notice)
-		cancel()
-	} else if !isLocalParent(parent) && p.Sessions != nil {
+	if p.Sessions != nil {
 		attemptCtx, cancel := context.WithTimeout(ctx, deliveryAttemptTimeout)
 		capture, captureErr := p.Sessions.Capture(attemptCtx, parent.ID, 40)
 		if captureErr != nil {
@@ -769,8 +767,17 @@ func (p *ParentService) deliverMessage(ctx context.Context, parent *Session, ho 
 	if err != nil {
 		return err
 	}
+	// Desktop presentation is supplementary. It can flash a bound surface, but
+	// it never owns or acknowledges the parent communication.
+	if isLocalParent(parent) && p.Notifier != nil {
+		notifyCtx, cancel := context.WithTimeout(ctx, deliveryAttemptTimeout)
+		_ = p.Notifier.NotifyParent(notifyCtx, parent.ID, notice)
+		cancel()
+	}
 	now := time.Now().UTC()
 	msg.DeliveredAt = &now
+	msg.DeliveryMethod = "session_send_confirmed"
+	msg.DeliveryBuild = coord.Build
 	// Results and exits are receipts, not questions. Successful injection is
 	// their delivery acknowledgement; making the manager run a second command
 	// adds no information and doubles the orchestration traffic.
@@ -779,6 +786,35 @@ func (p *ParentService) deliverMessage(ctx context.Context, parent *Session, ho 
 		msg.AckedAt = &now
 	}
 	return writeParentMessage(msg, false)
+}
+
+// RedeliverReceipt repairs an informational envelope whose historical
+// delivery acknowledgement was not backed by pane-level evidence.
+func (p *ParentService) RedeliverReceipt(ctx context.Context, messageID string) (*ParentMessage, error) {
+	msg, err := p.FindMessage(messageID)
+	if err != nil {
+		return nil, err
+	}
+	if attentionMessage(msg.Kind) {
+		return nil, fmt.Errorf("attention message %s requires resolve/ack, not redelivery", msg.ID)
+	}
+	parent, err := p.Reg.GetSession(msg.ParentSessionID)
+	if err != nil {
+		return nil, err
+	}
+	ho, err := p.Reg.GetHandoff(msg.HandoffID)
+	if err != nil {
+		return nil, err
+	}
+	msg.State, msg.DeliveredAt, msg.AckedAt = ParentMessagePending, nil, nil
+	msg.DeliveryMethod, msg.DeliveryBuild = "", ""
+	if err := writeParentMessage(msg, false); err != nil {
+		return nil, err
+	}
+	if err := p.deliverMessage(ctx, parent, ho, msg); err != nil {
+		return msg, err
+	}
+	return msg, nil
 }
 
 // DeliverPending retries durable envelopes after a parent pane is rebound.

@@ -27,6 +27,9 @@ type SessionService struct {
 	// Viz is the visualisation adapter. It is consulted only for sessions
 	// whose persistence is the viz itself (cmux panes), and may be nil.
 	Viz ports.Viz
+	// Screen is the optional desktop pane I/O capability. Control-plane send
+	// and capture use it without assigning communication ownership to Viz.
+	Screen DesktopScreen
 }
 
 // ScreenCapturer is an optional Viz capability: reading a pane's visible text.
@@ -36,6 +39,18 @@ type SessionService struct {
 // with "no server running", naming a subsystem that was never involved.
 type ScreenCapturer interface {
 	CaptureScreen(ctx context.Context, sessionID string, lines int) (string, error)
+}
+
+// ScreenSender is the control-plane delivery capability for sessions whose
+// persistence is a desktop surface rather than tmux. Visualization may render
+// that surface, but message delivery remains a SessionService operation.
+type ScreenSender interface {
+	SendScreen(ctx context.Context, sessionID, text string, enter bool) error
+}
+
+type DesktopScreen interface {
+	ScreenCapturer
+	ScreenSender
 }
 
 func (s *SessionService) applyChrome(ctx context.Context, t ports.Transport, h ports.PersistHandle) {
@@ -387,8 +402,8 @@ func (s *SessionService) Capture(ctx context.Context, id string, lines int) (str
 		lines = 50
 	}
 	if sess.Persist.Kind == LocalPersistKind {
-		capturer, ok := s.Viz.(ScreenCapturer)
-		if !ok {
+		capturer := s.Screen
+		if capturer == nil {
 			return "", fmt.Errorf("capture %s: cmux pane text is not readable through this viz adapter", id)
 		}
 		return capturer.CaptureScreen(ctx, sess.ID, lines)
@@ -426,6 +441,13 @@ func (s *SessionService) Send(ctx context.Context, id, text string, enter bool) 
 	t, err := s.transportFor(sess)
 	if err != nil {
 		return err
+	}
+	if sess.Persist.Kind == LocalPersistKind {
+		sender := s.Screen
+		if sender == nil {
+			return fmt.Errorf("send %s: desktop pane input is unavailable", id)
+		}
+		return sender.SendScreen(ctx, sess.ID, text, enter)
 	}
 	return s.Persist.Send(ctx, t, sess.Persist, text, enter)
 }

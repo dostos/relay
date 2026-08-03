@@ -167,11 +167,15 @@ func (p *Persist) Send(ctx context.Context, t ports.Transport, h ports.PersistHa
 		if captureErr != nil {
 			return fmt.Errorf("confirm send: %w", captureErr)
 		}
-		if !composerHolds(screen, marker) {
+		if messageSubmitted(screen, marker) {
 			return nil
 		}
 	}
 	return fmt.Errorf("message is still unsent in %s's composer after %d attempts", h.Name, sendConfirmAttempts)
+}
+
+func messageSubmitted(screen, marker string) bool {
+	return marker != "" && strings.Contains(screen, marker) && !composerHolds(screen, marker)
 }
 
 func composerHolds(screen, marker string) bool {

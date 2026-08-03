@@ -468,9 +468,8 @@ func (v *Viz) ForgetBinding(sessionID string) error {
 	return err
 }
 
-// NotifyParent emits a desktop notification/flash and, for agent parents,
-// injects one compact actionable envelope. The durable inbox deduplicates the
-// event before this method is called, so a replay cannot spam the pane.
+// NotifyParent is presentation only: it emits a desktop notification/flash.
+// Authoritative message delivery goes through core.SessionService.Send.
 func (v *Viz) NotifyParent(ctx context.Context, sessionID string, notice core.ParentNotice) error {
 	b, err := v.lookup(sessionID)
 	if err != nil {
@@ -491,6 +490,27 @@ func (v *Viz) NotifyParent(ctx context.Context, sessionID string, notice core.Pa
 	}
 	_, _ = v.run(ctx, flash...)
 	return nil
+}
+
+// SendScreen implements core.ScreenSender for legacy cmux-persisted sessions.
+// The control plane calls this through SessionService; Viz supplies only the
+// surface-specific keystroke adapter.
+func (v *Viz) SendScreen(ctx context.Context, sessionID, text string, enter bool) error {
+	b, err := v.lookup(sessionID)
+	if err != nil {
+		return err
+	}
+	if _, err := v.run(ctx, surfaceCommand("send", b.Surface, b.Workspace, "--", text)...); err != nil {
+		return err
+	}
+	if !enter {
+		return nil
+	}
+	marker := text
+	if len(marker) > 48 {
+		marker = marker[:48]
+	}
+	return v.submitInjected(ctx, sessionID, b, marker)
 }
 
 // surfaceCommand keeps multi-step input directed at the same pane even when

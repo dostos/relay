@@ -19,6 +19,7 @@ import (
 type fakeParentNotifier struct {
 	bound      []string
 	notices    []ParentNotice
+	sent       []string
 	notifyFail bool
 }
 
@@ -80,13 +81,23 @@ func (f *fakeParentNotifier) NotifyParent(_ context.Context, _ string, notice Pa
 	}
 	return nil
 }
+func (f *fakeParentNotifier) CaptureScreen(context.Context, string, int) (string, error) {
+	return "› \n", nil
+}
+func (f *fakeParentNotifier) SendScreen(_ context.Context, _ string, text string, _ bool) error {
+	if f.notifyFail {
+		return errors.New("parent disconnected")
+	}
+	f.sent = append(f.sent, text)
+	return nil
+}
 
 func newParentTestService(t *testing.T) (*ParentService, *fakeParentNotifier, *Registry) {
 	t.Helper()
 	t.Setenv("RELAY_STATE_DIR", t.TempDir())
 	reg := &Registry{}
 	notifier := &fakeParentNotifier{}
-	sessions := &SessionService{Reg: reg, Persist: &renamePersistence{}, NewTransport: func(host string) (ports.Transport, error) {
+	sessions := &SessionService{Reg: reg, Persist: &renamePersistence{}, Screen: notifier, NewTransport: func(host string) (ports.Transport, error) {
 		return &fakeTransport{id: host, outputs: map[string]string{host: ""}}, nil
 	}}
 	return &ParentService{Reg: reg, Sessions: sessions, Notifier: notifier}, notifier, reg
@@ -326,7 +337,7 @@ func TestDisconnectedParentRetriesOneDurableAttentionEnvelope(t *testing.T) {
 		t.Fatalf("reconnect second=%+v err=%v", second, err)
 	}
 	messages, err := service.ListMessages(parent.ID, false)
-	if err != nil || len(messages) != 1 || len(notifier.notices) != 2 {
+	if err != nil || len(messages) != 1 || len(notifier.notices) != 1 {
 		t.Fatalf("messages=%+v notices=%d err=%v", messages, len(notifier.notices), err)
 	}
 }
@@ -870,6 +881,28 @@ func TestDeliveryAttemptIsBounded(t *testing.T) {
 	}
 	if elapsed > 10*time.Second {
 		t.Fatalf("delivery was not bounded, took %s", elapsed)
+	}
+}
+
+func TestRedeliverReceiptRequiresConfirmedSessionSend(t *testing.T) {
+	service, _, reg := newParentTestService(t)
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "parent"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c1", Persist: ports.PersistHandle{Kind: "tmux", Name: "child"}, CreatedAt: now}
+	_ = reg.PutSession(parent)
+	_ = reg.PutSession(child)
+	ho := &Handoff{ID: "ho-result", SessionID: child.ID, HostID: "c1", Kind: KindAgent, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
+	_ = reg.PutHandoff(ho)
+	msg := &ParentMessage{V: 1, ID: "pm-result", ParentSessionID: parent.ID, ChildSessionID: child.ID, HandoffID: ho.ID, EventSeq: 9, Kind: "result", Text: "complete", State: ParentMessageAcked, DeliveredAt: &now, AckedAt: &now, CreatedAt: now}
+	if err := writeParentMessage(msg, true); err != nil {
+		t.Fatal(err)
+	}
+	got, err := service.RedeliverReceipt(context.Background(), msg.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != ParentMessageAcked || got.DeliveryMethod != "session_send_confirmed" || got.DeliveryBuild == "" {
+		t.Fatalf("redelivery=%+v", got)
 	}
 }
 
