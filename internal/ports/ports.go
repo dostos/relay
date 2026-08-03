@@ -110,6 +110,10 @@ type Presentation struct {
 	SSHHost         string `json:"ssh_host,omitempty"`
 	SSHUser         string `json:"ssh_user,omitempty"`
 	SSHPort         int    `json:"ssh_port,omitempty"`
+	// ProjectionRevision identifies an authority-requested presentation whose
+	// receipt may need recovery after a follower or bridge restart. Zero means
+	// the authority has not requested visualization for this session.
+	ProjectionRevision int64 `json:"projection_revision,omitempty"`
 }
 
 type ProjectionOp string

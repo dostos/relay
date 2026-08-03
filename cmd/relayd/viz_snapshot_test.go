@@ -27,7 +27,7 @@ func TestVisualizationAuthoritySnapshotCarriesCurrentLineageAndContext(t *testin
 	}
 	reg := &core.Registry{}
 	for _, session := range []*core.Session{
-		{ID: "sess-apex", HostID: "home", Persist: ports.PersistHandle{Kind: "tmux", Name: "apex"}},
+		{ID: "sess-apex", HostID: "home", Persist: ports.PersistHandle{Kind: "tmux", Name: "apex"}, VizSurfaceRef: "viz:queued:39"},
 		{ID: "sess-engram", HostID: "c3", Persist: ports.PersistHandle{Kind: "tmux", Name: "engram"}, SourceSessionID: "sess-apex"},
 	} {
 		if err := reg.PutSession(session); err != nil {
@@ -43,6 +43,9 @@ func TestVisualizationAuthoritySnapshotCarriesCurrentLineageAndContext(t *testin
 	}
 	if items[1].SSHUser != "worker" || items[1].SSHPort != 22 {
 		t.Fatalf("effective SSH options missing from snapshot: %+v", items[1])
+	}
+	if items[0].ProjectionRevision != 39 {
+		t.Fatalf("outstanding projection identity missing: %+v", items[0])
 	}
 	resolution, err := visualizationAuthorityResume("apex")
 	if err != nil {
@@ -65,6 +68,14 @@ func TestVisualizationAuthoritySnapshotCarriesCurrentLineageAndContext(t *testin
 	snapshot, err := visualizationAuthoritySnapshotV2("relay-viz-mac")
 	if err != nil || snapshot.V != 1 || snapshot.Revision != 1 || len(snapshot.Items) != 2 {
 		t.Fatalf("v2 snapshot=%+v err=%v", snapshot, err)
+	}
+}
+
+func TestQueuedProjectionRevisionRejectsMalformedRefs(t *testing.T) {
+	for _, ref := range []string{"", "surface:2", "viz:queued:", "viz:queued:0", "viz:queued:-1", "viz:queued:nope"} {
+		if got := queuedProjectionRevision(ref); got != 0 {
+			t.Fatalf("queuedProjectionRevision(%q)=%d", ref, got)
+		}
 	}
 }
 

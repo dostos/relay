@@ -156,6 +156,45 @@ func TestCoveredHistoricalDeleteConvergesToCurrentSnapshot(t *testing.T) {
 	}
 }
 
+func TestSnapshotReconcileRecoversLostAckWithoutDuplicatePane(t *testing.T) {
+	state := t.TempDir()
+	binDir := t.TempDir()
+	t.Setenv("RELAY_STATE_DIR", state)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmuxLog := filepath.Join(t.TempDir(), "cmux.log")
+	sshLog := filepath.Join(t.TempDir(), "ssh.log")
+	tree := `{"windows":[{"workspaces":[{"ref":"workspace:38","panes":[{"ref":"pane:219","surfaces":[{"ref":"surface:289"}]}]}]}]}`
+	cmuxScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '" + cmuxLog + "'\nif [ \"$1 $2\" = 'tree --all' ]; then printf '%s\\n' '" + tree + "'; fi\n"
+	if err := os.WriteFile(filepath.Join(binDir, "cmux"), []byte(cmuxScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sshScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '" + sshLog + "'\n"
+	if err := os.WriteFile(filepath.Join(binDir, "ssh"), []byte(sshScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	v := &Viz{Bin: filepath.Join(binDir, "cmux"), ServiceID: "client", Control: &targetConfig{Host: "authority", Identity: "/tmp/viz-key"}}
+	if err := v.persistBinding("sess-apex", binding{V: 2, Revision: 39, SessionID: "sess-apex", Surface: "surface:289", Pane: "pane:219", Workspace: "workspace:38"}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := ports.AuthoritySnapshot{V: 1, Revision: 50, Items: []ports.Presentation{{
+		SessionID: "sess-apex", Target: "home", TmuxName: "apex-v4", ProjectionRevision: 39,
+	}}}
+	if err := v.reconcileManagedSnapshot(context.Background(), snapshot); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(cmuxLog)
+	if strings.Contains(string(raw), "new-split") || strings.Contains(string(raw), "new-pane") {
+		t.Fatalf("lost ack recovery duplicated the live pane:\n%s", raw)
+	}
+	ack, _ := os.ReadFile(sshLog)
+	if !strings.Contains(string(ack), "viz-ack relay-viz-client") {
+		t.Fatalf("lost acknowledgement was not recovered:\n%s", ack)
+	}
+	if !strings.Contains(string(ack), "IdentitiesOnly=yes") || !strings.Contains(string(ack), "ControlPath=none") {
+		t.Fatalf("recovery escaped the confined control connection:\n%s", ack)
+	}
+}
+
 func TestPresentationMetadataKeepsIntegerSSHPort(t *testing.T) {
 	got := presentationFromMeta(map[string]any{"ssh_user": "jingyulee", "ssh_port": 7777})
 	if got.SSHUser != "jingyulee" || got.SSHPort != 7777 {

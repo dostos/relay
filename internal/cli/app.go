@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -3785,6 +3786,14 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 				checks = append(checks, check{"governed_event_channels", true, "all governed children observable"})
 			}
 		}
+		if sessions, err := a.Reg.ListSessions(); err != nil {
+			checks = append(checks, check{"presentation_effects", false, "inspection failed: " + err.Error()})
+		} else if stale := staleQueuedPresentations(sessions, time.Now().UTC(), 5*time.Minute); len(stale) > 0 {
+			checks = append(checks, check{"presentation_effects", false,
+				"unacknowledged visualization requests: " + strings.Join(stale, ", ")})
+		} else {
+			checks = append(checks, check{"presentation_effects", true, "none stale"})
+		}
 		if a.Parents != nil {
 			if uncertain, err := a.Parents.UncertainDeliveries(); err == nil {
 				if len(uncertain) == 0 {
@@ -3863,6 +3872,25 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 			"transport": "ssh", "persistence": "tmux", "viz": "cmux", "coord": "relayd",
 		}})
 	return code
+}
+
+func staleQueuedPresentations(sessions []*core.Session, now time.Time, after time.Duration) []string {
+	var stale []string
+	for _, session := range sessions {
+		if session == nil || !strings.HasPrefix(session.VizSurfaceRef, "viz:queued:") {
+			continue
+		}
+		queuedAt := session.UpdatedAt
+		if queuedAt.IsZero() {
+			queuedAt = session.CreatedAt
+		}
+		if queuedAt.IsZero() || now.Sub(queuedAt) < after {
+			continue
+		}
+		stale = append(stale, fmt.Sprintf("%s (%s, %dm)", session.ID, session.VizSurfaceRef, int(now.Sub(queuedAt).Minutes())))
+	}
+	sort.Strings(stale)
+	return stale
 }
 
 func (a *App) brandAll(ctx context.Context) error {

@@ -407,15 +407,64 @@ func (v *Viz) reconcileManagedSnapshot(ctx context.Context, snapshot ports.Autho
 	}
 	for _, item := range items {
 		binding, err := v.loadBinding(item.SessionID)
-		if err != nil || binding.Deleted {
-			continue
+		if err != nil {
+			if item.ProjectionRevision <= 0 {
+				continue
+			}
+			surface, applyErr := v.ApplyProjection(ctx, ports.ProjectionEvent{V: 1, Revision: item.ProjectionRevision, Op: ports.ProjectionUpsert, Item: item})
+			if applyErr != nil {
+				return fmt.Errorf("recover queued visualization session %s: %w", item.SessionID, applyErr)
+			}
+			binding, err = v.loadBinding(item.SessionID)
+			if err != nil {
+				return fmt.Errorf("load recovered visualization session %s: %w", item.SessionID, err)
+			}
+			binding.Surface = surface
 		}
-		if locations[binding.Surface].Workspace != "" {
-			continue
+		if binding.Deleted {
+			if item.ProjectionRevision <= binding.Revision {
+				continue
+			}
+			if _, err := v.ApplyProjection(ctx, ports.ProjectionEvent{V: 1, Revision: item.ProjectionRevision, Op: ports.ProjectionUpsert, Item: item}); err != nil {
+				return fmt.Errorf("revive queued visualization session %s: %w", item.SessionID, err)
+			}
+			binding, err = v.loadBinding(item.SessionID)
+			if err != nil {
+				return err
+			}
 		}
-		if _, err := v.ApplyProjection(ctx, ports.ProjectionEvent{V: 1, Revision: snapshot.Revision, Op: ports.ProjectionUpsert, Item: item}); err != nil {
-			return fmt.Errorf("repair visualization session %s: %w", item.SessionID, err)
+		if locations[binding.Surface].Workspace == "" {
+			if _, err := v.ApplyProjection(ctx, ports.ProjectionEvent{V: 1, Revision: snapshot.Revision, Op: ports.ProjectionUpsert, Item: item}); err != nil {
+				return fmt.Errorf("repair visualization session %s: %w", item.SessionID, err)
+			}
+			binding, err = v.loadBinding(item.SessionID)
+			if err != nil {
+				return err
+			}
 		}
+		if item.ProjectionRevision > 0 {
+			if err := v.emitRecoveredProjectionAck(ctx, item, binding); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (v *Viz) emitRecoveredProjectionAck(ctx context.Context, item ports.Presentation, b binding) error {
+	if item.ProjectionRevision <= 0 || b.Surface == "" {
+		return nil
+	}
+	result, _ := json.Marshal(map[string]any{
+		"session_id": item.SessionID, "revision": item.ProjectionRevision,
+		"surface": b.Surface, "workspace": b.Workspace, "pane": b.Pane,
+		"parent_session_id": item.ParentSessionID,
+	})
+	event := coord.Event{Seq: item.ProjectionRevision, Kind: "project", Meta: map[string]any{
+		"op": string(ports.ProjectionUpsert), "session_id": item.SessionID,
+	}}
+	if err := v.emitAck(ctx, event, string(result)); err != nil {
+		return fmt.Errorf("recover visualization acknowledgement for session %s: %w", item.SessionID, err)
 	}
 	return nil
 }

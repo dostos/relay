@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/dostos/relay/internal/coord/relayd"
 	"github.com/dostos/relay/internal/core"
@@ -28,10 +30,23 @@ func visualizationAuthoritySnapshot() ([]ports.Presentation, error) {
 			SessionID: session.ID, ParentSessionID: session.SourceSessionID,
 			Target: session.HostID, TmuxName: session.Persist.Name,
 			SSHHost: target.Hostname, SSHUser: target.User, SSHPort: target.Port,
+			ProjectionRevision: queuedProjectionRevision(session.VizSurfaceRef),
 		})
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].SessionID < items[j].SessionID })
 	return items, nil
+}
+
+func queuedProjectionRevision(ref string) int64 {
+	const prefix = "viz:queued:"
+	if !strings.HasPrefix(ref, prefix) {
+		return 0
+	}
+	revision, err := strconv.ParseInt(strings.TrimPrefix(ref, prefix), 10, 64)
+	if err != nil || revision <= 0 {
+		return 0
+	}
+	return revision
 }
 
 func visualizationAuthoritySnapshotV2(service string) (*ports.AuthoritySnapshot, error) {

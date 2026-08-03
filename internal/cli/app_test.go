@@ -55,6 +55,19 @@ func TestProjectionOnlyCLIUsesSnapshotOnlyForSessionList(t *testing.T) {
 	}
 }
 
+func TestStaleQueuedPresentationsDistinguishesPendingFromInert(t *testing.T) {
+	now := time.Now().UTC()
+	sessions := []*core.Session{
+		{ID: "sess-stale", VizSurfaceRef: "viz:queued:39", UpdatedAt: now.Add(-10 * time.Minute)},
+		{ID: "sess-recent", VizSurfaceRef: "viz:queued:40", UpdatedAt: now.Add(-time.Minute)},
+		{ID: "sess-done", VizSurfaceRef: "surface:289", UpdatedAt: now.Add(-time.Hour)},
+	}
+	got := staleQueuedPresentations(sessions, now, 5*time.Minute)
+	if len(got) != 1 || !strings.Contains(got[0], "sess-stale") || !strings.Contains(got[0], "viz:queued:39") {
+		t.Fatalf("stale presentations=%v", got)
+	}
+}
+
 func TestProjectionSessionListDoesNotCollapseInventoryFailureToEmpty(t *testing.T) {
 	state := t.TempDir()
 	t.Setenv("RELAY_STATE_DIR", state)
