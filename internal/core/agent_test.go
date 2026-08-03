@@ -143,6 +143,14 @@ func TestManagedStartHasNoDuplicateWait(t *testing.T) {
 	}
 }
 
+func TestStartedEventCannotClearDeliveryBlockedState(t *testing.T) {
+	ho := &Handoff{Kind: KindAgent, Status: StatusNeedsInput, DeliveryState: EffectBlocked}
+	applyHandoffEventStatus(ho, "started")
+	if ho.Status != StatusNeedsInput || ho.DeliveryState != EffectBlocked {
+		t.Fatalf("startup event cleared security hold: %+v", ho)
+	}
+}
+
 func TestAbsentAgentCannotAdvertiseOrAcceptSend(t *testing.T) {
 	t.Setenv("RELAY_STATE_DIR", t.TempDir())
 	reg := &Registry{}

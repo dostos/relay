@@ -192,6 +192,26 @@ func (h *HandoffService) absentAgentResponse(ho *Handoff) *AgentResponse {
 	return &resp
 }
 
+func applyHandoffEventStatus(ho *Handoff, kind string) {
+	if ho == nil {
+		return
+	}
+	switch kind {
+	case "needs_input", "permission_required", "ask":
+		ho.Status = StatusNeedsInput
+	case "idle":
+		if ho.Kind == KindAgent {
+			ho.Status = StatusNeedsInput
+		}
+	case "started":
+		// A repeated startup event is not evidence that a human resolved the
+		// security gate or that the pending goal reached the composer.
+		if ho.DeliveryState != EffectBlocked {
+			ho.Status = StatusRunning
+		}
+	}
+}
+
 // AgentStart launches a handoff. Hierarchical children are owned by the
 // detached parent watcher, so their manager gets no duplicate wait command.
 // Unmanaged callers retain the one-shot wait continuation.
@@ -326,16 +346,7 @@ func (h *HandoffService) AgentWait(ctx context.Context, handoffID string, fromSe
 	// status transitions and stops at the first actionable event.
 	subErr := streamEvents(wctx, h.Coord, t, sess.Persist.Name, fromSeq, true, func(ev Event) bool {
 		ho.LastSeq = ev.Seq
-		switch ev.Kind {
-		case "needs_input", "permission_required", "ask":
-			ho.Status = StatusNeedsInput
-		case "idle":
-			if ho.Kind == KindAgent {
-				ho.Status = StatusNeedsInput
-			}
-		case "started":
-			ho.Status = StatusRunning
-		}
+		applyHandoffEventStatus(ho, ev.Kind)
 		_ = h.Reg.PutHandoff(ho)
 
 		// Explicit-signaling kinds are actionable regardless of handoff kind:

@@ -500,16 +500,8 @@ func (h *HandoffService) TailEvents(ctx context.Context, handoffID string, fromS
 			cursor = ev.Seq
 			ho.LastSeq = ev.Seq
 			// Do not mark terminal StatusDone here — that breaks reconcile/finalize.
-			switch ev.Kind {
-			case "needs_input":
-				ho.Status = StatusNeedsInput
-			case "idle":
-				if ho.Kind == KindAgent {
-					ho.Status = StatusNeedsInput
-				}
-			case "started":
-				ho.Status = StatusRunning
-			case "exit":
+			applyHandoffEventStatus(ho, ev.Kind)
+			if ev.Kind == "exit" {
 				if ho.Status != StatusDone && ho.Status != StatusFailed && ho.Status != StatusAbandoned {
 					ho.Status = StatusRunning // still needs finalize for outcome/teardown
 				}
