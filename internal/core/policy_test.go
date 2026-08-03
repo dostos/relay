@@ -9,10 +9,13 @@ import (
 func TestPolicyReplyRequiresLiteralGuard(t *testing.T) {
 	err := validatePolicyRule(PolicyRule{ID: "unsafe", Kind: "permission_required", Action: "reply", Reply: "y"})
 	if err == nil {
-		t.Fatal("unguarded automatic reply was accepted")
+		t.Fatal("automatic permission reply was accepted")
 	}
-	if err := validatePolicyRule(PolicyRule{ID: "safe", Kind: "permission_required", Agent: "cursor-agent", Contains: []string{"git status"}, Action: "reply", Reply: "y"}); err != nil {
-		t.Fatalf("guarded reply rejected: %v", err)
+	if err := validatePolicyRule(PolicyRule{ID: "still-unsafe", Kind: "permission_required", Agent: "cursor-agent", Contains: []string{"git status"}, Action: "reply", Reply: "y"}); err == nil {
+		t.Fatal("guarded automatic permission reply was accepted")
+	}
+	if err := validatePolicyRule(PolicyRule{ID: "safe", Kind: "ask", Agent: "cursor-agent", Contains: []string{"choice"}, Action: "reply", Reply: "A"}); err != nil {
+		t.Fatalf("guarded ask reply rejected: %v", err)
 	}
 }
 

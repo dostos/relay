@@ -701,7 +701,15 @@ func eventWakesManager(ev coord.Event) bool {
 }
 
 func (p *ParentService) classifySecurityEvent(ctx context.Context, ho *Handoff, ev coord.Event) (coord.Event, bool) {
-	if ev.Kind != "idle" && ev.Kind != "permission_required" || p.Sessions == nil {
+	// Event kind and metadata are child-controlled. Inspect every event that
+	// could trigger a policy reply; an agent must not bypass a visible trust,
+	// login, or tool-permission gate by labeling it as an ordinary ask.
+	switch ev.Kind {
+	case "idle", "ask", "needs_input", "permission_required":
+	default:
+		return ev, ev.Kind != "idle"
+	}
+	if p.Sessions == nil {
 		return ev, ev.Kind != "idle"
 	}
 	capture, err := p.Sessions.Capture(ctx, ho.SessionID, 40)
@@ -710,7 +718,7 @@ func (p *ParentService) classifySecurityEvent(ctx context.Context, ho *Handoff, 
 	}
 	readiness := ClassifyAgentPane(capture)
 	if readiness.State != AgentBlocked || readiness.Gate == nil {
-		if ev.Kind == "idle" && panePermissionPrompt(capture) {
+		if panePermissionPrompt(capture) {
 			ev.Kind = "permission_required"
 			ev.Meta = map[string]any{"text": decisionExcerpt(capture)}
 			return ev, true
@@ -1248,6 +1256,9 @@ func (p *ParentService) applyPolicy(ctx context.Context, ho *Handoff, ev coord.E
 	if p.Policies == nil || msg == nil {
 		return msg, false
 	}
+	if msg.Kind == "permission_required" {
+		return msg, false
+	}
 	seen, pending := map[string]bool{}, map[string]bool{}
 	if messages, err := p.ListMessages(msg.ParentSessionID, false); err == nil {
 		for _, other := range messages {
@@ -1272,12 +1283,6 @@ func (p *ParentService) applyPolicy(ctx context.Context, ho *Handoff, ev coord.E
 		return msg, false
 	}
 	if !decision.Matched {
-		return msg, false
-	}
-	// A launch-time security gate is never policy-resolvable. Policy may
-	// coalesce duplicate notices, but only an explicit relay resolve made by the
-	// human holding the envelope may select one of the persisted choices.
-	if msg.Kind == "permission_required" && ho.PendingGate != nil {
 		return msg, false
 	}
 	msg.PolicyID, msg.PolicyAction = decision.RuleID, decision.Action
@@ -1337,6 +1342,7 @@ func (p *ParentService) Watch(ctx context.Context, handoffID string) error {
 	windowStart := time.Now()
 	for {
 		ended := false
+		var routeFailure error
 		from := ho.ParentSeq
 		var subErr error
 		if subErr = p.Coord.Ensure(ctx, t); subErr == nil {
@@ -1349,17 +1355,37 @@ func (p *ParentService) Watch(ctx context.Context, handoffID string) error {
 					ended = true
 					return false
 				}
-				_, _ = p.RouteChildEvent(ctx, ho, ev)
+				msg, routeErr := p.RouteChildEvent(ctx, ho, ev)
+				if routeErr != nil && msg == nil {
+					routeFailure = routeErr
+					return false
+				}
+				// A delivery error after envelope creation is retryable durable
+				// state, so consuming the event is safe. An error before an
+				// envelope exists must replay from the same cursor.
 				if ev.Seq > ho.ParentSeq {
 					ho.ParentSeq = ev.Seq
-					_ = p.Reg.PutHandoff(ho)
+					if putErr := p.Reg.PutHandoff(ho); putErr != nil {
+						ho.ParentSeq = from
+						routeFailure = putErr
+						return false
+					}
 				}
 				ended = ev.Kind == "exit"
 				return !ended
 			})
 		}
+		if routeFailure != nil {
+			subErr = routeFailure
+		}
 		if ended {
 			return nil
+		}
+		if routeFailure != nil {
+			// Local durability failures are not transport reconnects. Return them
+			// to the supervisor so its single backoff/retry owner can restart from
+			// the unchanged cursor.
+			return routeFailure
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()

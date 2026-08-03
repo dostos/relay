@@ -38,7 +38,16 @@ type capturePersistence struct {
 	capture string
 }
 
+type captureThenRecordPersistence struct {
+	*recordingPersistence
+	capture string
+}
+
 func (p *capturePersistence) Capture(context.Context, ports.Transport, ports.PersistHandle, int) (string, error) {
+	return p.capture, nil
+}
+
+func (p *captureThenRecordPersistence) Capture(context.Context, ports.Transport, ports.PersistHandle, int) (string, error) {
 	return p.capture, nil
 }
 
@@ -529,11 +538,13 @@ func TestRepeatedPermissionFramesUseOneEnvelope(t *testing.T) {
 
 func TestBlockedSecurityGateIgnoresAutoReplyPolicy(t *testing.T) {
 	service, _, reg := newParentTestService(t)
-	policy := &PolicyService{Path: filepath.Join(t.TempDir(), "policy.yaml")}
-	if err := policy.Add(PolicyRule{ID: "must-not-trust", Kind: "permission_required", Contains: []string{"directory"}, Action: "reply", Reply: "approve"}); err != nil {
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	// Preserve an old policy file as an adversarial upgrade case. Runtime must
+	// not execute a permission reply even if an earlier build accepted it.
+	if err := os.WriteFile(path, []byte("version: 1\nrules:\n  - id: must-not-trust\n    kind: permission_required\n    contains: [directory]\n    action: reply\n    reply: approve\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	service.Policies = policy
+	service.Policies = &PolicyService{Path: path}
 	now := time.Now().UTC()
 	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "root"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
 	child := &Session{ID: "sess-child", HostID: "c3", Persist: ports.PersistHandle{Kind: "tmux", Name: "worker"}, CreatedAt: now}
@@ -619,12 +630,12 @@ func TestExplicitGateApproveDeliversPendingGoalAndDenyCleansUp(t *testing.T) {
 	}
 }
 
-func TestPolicyAutoReplyIsAuditedAndSkipsManagerPing(t *testing.T) {
+func TestPolicyAutoReplyToAskIsAuditedAndSkipsManagerPing(t *testing.T) {
 	service, notifier, reg := newParentTestService(t)
 	recorder := &recordingPersistence{}
 	service.Sessions.Persist = recorder
 	policy := &PolicyService{Path: filepath.Join(t.TempDir(), "policy.yaml")}
-	if err := policy.Add(PolicyRule{ID: "cursor-safe-read", Kind: "permission_required", Agent: "cursor-agent", Contains: []string{"git status"}, Action: "reply", Reply: "y"}); err != nil {
+	if err := policy.Add(PolicyRule{ID: "choose-a", Kind: "ask", Agent: "cursor-agent", Contains: []string{"choose"}, Action: "reply", Reply: "A"}); err != nil {
 		t.Fatal(err)
 	}
 	service.Policies = policy
@@ -637,15 +648,15 @@ func TestPolicyAutoReplyIsAuditedAndSkipsManagerPing(t *testing.T) {
 	if err := reg.PutHandoff(ho); err != nil {
 		t.Fatal(err)
 	}
-	msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "permission_required", Meta: map[string]any{"text": "Run git status?", "command": "git status"}})
-	if err != nil || msg.State != ParentMessageReplied || msg.Reply != "y" || !msg.AutoHandled || msg.PolicyID != "cursor-safe-read" {
+	msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "ask", Meta: map[string]any{"text": "choose A or B"}})
+	if err != nil || msg.State != ParentMessageReplied || msg.Reply != "A" || !msg.AutoHandled || msg.PolicyID != "choose-a" {
 		t.Fatalf("message=%+v err=%v", msg, err)
 	}
-	if len(notifier.notices) != 0 || len(recorder.sent) != 1 || recorder.sent[0] != "y" {
+	if len(notifier.notices) != 0 || len(recorder.sent) != 1 || recorder.sent[0] != "A" {
 		t.Fatalf("notices=%d sent=%v", len(notifier.notices), recorder.sent)
 	}
 	graph, err := LoadHistory()
-	if err != nil || len(graph.Communications) != 2 || graph.Communications[1].PolicyID != "cursor-safe-read" || !graph.Communications[1].AutoHandled {
+	if err != nil || len(graph.Communications) != 2 || graph.Communications[1].PolicyID != "choose-a" || !graph.Communications[1].AutoHandled {
 		t.Fatalf("policy audit history=%+v err=%v", graph, err)
 	}
 }
@@ -663,7 +674,7 @@ func TestPolicyFailureFallsBackToManagerAndIsAudited(t *testing.T) {
 	_ = reg.PutSession(parent)
 	_ = reg.PutSession(child)
 	ho := &Handoff{ID: "ho-1", SessionID: child.ID, HostID: child.HostID, Agent: "codex", Kind: KindAgent, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
-	msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "permission_required", Meta: map[string]any{"text": "approve?"}})
+	msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "ask", Meta: map[string]any{"text": "choose?"}})
 	if err != nil || msg.State != ParentMessagePending || msg.PolicyError == "" {
 		t.Fatalf("message=%+v err=%v", msg, err)
 	}

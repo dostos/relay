@@ -386,7 +386,7 @@ func TestPolicyCLIRejectsUnguardedReply(t *testing.T) {
 			t.Fatal("unguarded reply policy accepted")
 		}
 	})
-	if !bytes.Contains([]byte(out), []byte("literal --contains guard")) {
+	if !bytes.Contains([]byte(out), []byte("permission decisions require explicit relay resolve")) {
 		t.Fatalf("unexpected error=%q", out)
 	}
 }

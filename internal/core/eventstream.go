@@ -17,10 +17,12 @@ import (
 // scanner + JSON-decode + heartbeat/seq filter that the message bus (Read,
 // WaitOne) and the agent loop (AgentWait) previously each re-implemented.
 func streamEvents(ctx context.Context, c ports.Coord, t ports.Transport, stream string, fromSeq int64, follow bool, fn func(coord.Event) bool) error {
+	subCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	pr, pw := io.Pipe()
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- c.Subscribe(ctx, t, stream, fromSeq, follow, pw)
+		errCh <- c.Subscribe(subCtx, t, stream, fromSeq, follow, pw)
 		_ = pw.Close()
 	}()
 	sc := bufio.NewScanner(pr)
@@ -38,6 +40,7 @@ func streamEvents(ctx context.Context, c ports.Coord, t ports.Transport, stream 
 			continue
 		}
 		if !fn(ev) {
+			cancel()
 			break
 		}
 	}

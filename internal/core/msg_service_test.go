@@ -16,9 +16,10 @@ import (
 // for a stream, then (in follow mode) blocks until ctx is cancelled — modelling
 // a real relayd follow stream so WaitOne's cancel/leak path is exercised.
 type fakeCoord struct {
-	mu      sync.Mutex
-	events  map[string][]coord.Event
-	nextSeq map[string]int64
+	mu         sync.Mutex
+	events     map[string][]coord.Event
+	nextSeq    map[string]int64
+	subscribed chan struct{}
 }
 
 func newFakeCoord() *fakeCoord {
@@ -39,6 +40,12 @@ func (f *fakeCoord) Emit(ctx context.Context, t ports.Transport, session, kind s
 	return seq, nil
 }
 func (f *fakeCoord) Subscribe(ctx context.Context, t ports.Transport, session string, fromSeq int64, follow bool, w io.Writer) error {
+	if f.subscribed != nil {
+		select {
+		case f.subscribed <- struct{}{}:
+		default:
+		}
+	}
 	f.mu.Lock()
 	evs := append([]coord.Event(nil), f.events[session]...)
 	f.mu.Unlock()

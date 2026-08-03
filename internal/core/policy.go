@@ -137,8 +137,8 @@ func validatePolicyRule(rule PolicyRule) error {
 	}
 	switch rule.Action {
 	case "reply":
-		if rule.Kind != "ask" && rule.Kind != "permission_required" {
-			return fmt.Errorf("reply is allowed only for ask or permission_required")
+		if rule.Kind != "ask" {
+			return fmt.Errorf("reply is allowed only for ask; permission decisions require explicit relay resolve")
 		}
 		if strings.TrimSpace(rule.Reply) == "" || len(rule.Reply) > 160 {
 			return fmt.Errorf("reply must be 1..160 bytes")
