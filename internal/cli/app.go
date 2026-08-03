@@ -1809,20 +1809,38 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 	switch args[0] {
 	case "send":
 		if len(args) < 2 {
-			return a.fail(fmt.Errorf("usage: relay parent send CHILD -- TEXT"))
+			return a.fail(fmt.Errorf("usage: relay parent send CHILD [--delivery-only] -- TEXT"))
 		}
-		text, ok := afterDashDash(args[2:])
-		if !ok || text == "" {
-			return a.fail(fmt.Errorf("usage: relay parent send CHILD -- TEXT"))
+		deliveryOnly := false
+		separator := -1
+		for i, arg := range args[2:] {
+			if arg == "--" {
+				separator = i + 2
+				break
+			}
+			switch arg {
+			case "--delivery-only":
+				deliveryOnly = true
+			default:
+				return a.fail(rejectUnknownFlag(arg))
+			}
+		}
+		if separator < 0 || separator+1 >= len(args) {
+			return a.fail(fmt.Errorf("usage: relay parent send CHILD [--delivery-only] -- TEXT"))
+		}
+		text := strings.TrimSpace(strings.Join(args[separator+1:], " "))
+		if text == "" {
+			return a.fail(fmt.Errorf("usage: relay parent send CHILD [--delivery-only] -- TEXT"))
 		}
 		managerID, err := a.currentParentID()
 		if err != nil {
 			return a.fail(err)
 		}
-		if err := a.Sessions.SendManagedChild(ctx, managerID, args[1], text); err != nil {
+		receipt, err := a.Sessions.SendManagedChild(ctx, managerID, args[1], text, deliveryOnly)
+		if err != nil {
 			return a.fail(err)
 		}
-		return a.errOut(a.out(map[string]any{"ok": true, "parent_session_id": managerID, "child_session_id": args[1], "submitted": true}))
+		return a.errOut(a.out(map[string]any{"ok": true, "parent_session_id": managerID, "child_session_id": args[1], "submitted": receipt.Submitted, "delivery": receipt.Delivery, "event_stream": receipt.EventStream, "handoff_id": receipt.HandoffID}))
 	case "register":
 		var opts core.RegisterParentOpts
 		for i := 1; i < len(args); i++ {
@@ -3757,6 +3775,15 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 			ready := a.Roots.AgentReadinessFor(ctx, a.Sessions, apex.ID)
 			checks = append(checks, check{"apex_agent", ready.State == core.AgentReady,
 				string(ready.State) + " " + ready.Reason})
+		}
+		if a.Sessions != nil {
+			if missing, err := a.Sessions.UnobservableGovernedChildren(); err != nil {
+				checks = append(checks, check{"governed_event_channels", false, "inspection failed: " + err.Error()})
+			} else if len(missing) > 0 {
+				checks = append(checks, check{"governed_event_channels", false, "no live handoff event stream: " + strings.Join(missing, ", ")})
+			} else {
+				checks = append(checks, check{"governed_event_channels", true, "all governed children observable"})
+			}
 		}
 		if a.Parents != nil {
 			if uncertain, err := a.Parents.UncertainDeliveries(); err == nil {

@@ -202,6 +202,29 @@ func TestAuthenticatedManagerCannotBypassHierarchy(t *testing.T) {
 	}
 }
 
+func TestParentSendRefusesSilentZeroEventChannel(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	t.Setenv(bridge.SourceSessionEnv, "sess-manager")
+	now := time.Now().UTC()
+	a := New()
+	for _, sess := range []*core.Session{
+		{ID: "sess-manager", HostID: core.LocalHostID, Persist: ports.PersistHandle{Kind: core.LocalPersistKind, Name: "manager"}, Labels: map[string]string{"role": core.ParentRole}, CreatedAt: now},
+		{ID: "sess-child", HostID: "c3", SourceSessionID: "sess-manager", Persist: ports.PersistHandle{Kind: "tmux", Name: "engram"}, Labels: map[string]string{"governed": "true"}, CreatedAt: now},
+	} {
+		if err := a.Reg.PutSession(sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := captureStdout(t, func() {
+		if code := a.Run([]string{"--json", "parent", "send", "sess-child", "--", "continue"}); code == 0 {
+			t.Fatal("zero-event send unexpectedly succeeded")
+		}
+	})
+	if !strings.Contains(out, "no observable handoff event channel") || !strings.Contains(out, "--delivery-only") {
+		t.Fatalf("missing fail-loud route: %q", out)
+	}
+}
+
 func TestUnknownFlagRejected(t *testing.T) {
 	a := New()
 	if code := a.Run([]string{"session", "create", "--bogus", "x"}); code == 0 {

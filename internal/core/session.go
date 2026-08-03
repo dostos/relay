@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -452,21 +453,78 @@ func (s *SessionService) Send(ctx context.Context, id, text string, enter bool) 
 	return s.Persist.Send(ctx, t, sess.Persist, text, enter)
 }
 
+// ManagedSendReceipt separates composer delivery from response observability.
+// A handoff owns sensors, the event stream, and its watcher; a bare session
+// edge owns none of them even when its pane is live.
+type ManagedSendReceipt struct {
+	Submitted   bool   `json:"submitted"`
+	Delivery    string `json:"delivery"`
+	EventStream string `json:"event_stream"`
+	HandoffID   string `json:"handoff_id,omitempty"`
+}
+
+// UnobservableGovernedChildren finds topology edges advertised as governed but
+// lacking a live handoff, which is the owner of sensors, event cursors, and the
+// watcher. A live tmux pane alone is not an event channel.
+func (s *SessionService) UnobservableGovernedChildren() ([]string, error) {
+	sessions, err := s.Reg.ListSessions()
+	if err != nil {
+		return nil, err
+	}
+	handoffs, err := s.Reg.ListHandoffs()
+	if err != nil {
+		return nil, err
+	}
+	observable := map[string]bool{}
+	for _, ho := range handoffs {
+		if !handoffTerminal(ho) {
+			observable[ho.SessionID] = true
+		}
+	}
+	var out []string
+	for _, sess := range sessions {
+		if sess.SourceSessionID != "" && sess.Labels["governed"] == "true" && !observable[sess.ID] {
+			out = append(out, sess.ID)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 // SendManagedChild lets an authenticated manager communicate with exactly one
-// immediate interactive child. It is the session analogue of agent send; the
-// durable lineage edge is the authorization boundary.
-func (s *SessionService) SendManagedChild(ctx context.Context, managerID, childID, text string) error {
+// immediate interactive child. By default it requires an observable handoff
+// event channel so composer success cannot imply a response path that does not
+// exist. deliveryOnly is an explicit opt-in for intentionally unmanaged panes.
+func (s *SessionService) SendManagedChild(ctx context.Context, managerID, childID, text string, deliveryOnly bool) (*ManagedSendReceipt, error) {
 	if strings.TrimSpace(managerID) == "" {
-		return fmt.Errorf("authenticated manager required")
+		return nil, fmt.Errorf("authenticated manager required")
 	}
 	child, err := s.Reg.GetSession(childID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if child.SourceSessionID != managerID {
-		return fmt.Errorf("session %s is not an immediate child of %s", childID, managerID)
+		return nil, fmt.Errorf("session %s is not an immediate child of %s", childID, managerID)
 	}
-	return s.Send(ctx, childID, text, true)
+	receipt := &ManagedSendReceipt{Delivery: "composer_confirmed", EventStream: "absent"}
+	handoffs, err := s.Reg.ListHandoffs()
+	if err != nil {
+		return nil, err
+	}
+	for _, ho := range handoffs {
+		if ho.SessionID == childID && ho.SourceSessionID == managerID && !handoffTerminal(ho) {
+			receipt.EventStream, receipt.HandoffID = "active", ho.ID
+			break
+		}
+	}
+	if receipt.EventStream != "active" && !deliveryOnly {
+		return receipt, fmt.Errorf("session %s has no observable handoff event channel; use --delivery-only only when composer delivery without a response stream is intentional", childID)
+	}
+	if err := s.Send(ctx, childID, text, true); err != nil {
+		return receipt, err
+	}
+	receipt.Submitted = true
+	return receipt, nil
 }
 
 func (s *SessionService) Exec(ctx context.Context, id, command string) (stdout, stderr string, err error) {
