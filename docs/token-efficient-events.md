@@ -85,6 +85,12 @@ handoff, and correlation IDs. Filters still run against the full ledger before
 projection. A representative delta entry shrinks from 394 to 308 bytes (about
 99 to 77 tokens); its kind, action, bounded summary, and policy outcome remain.
 
+Pending parent envelopes are retried by the supervisor even when no new child
+event arrives. Duplicate child frames now perform deduplication only; they are
+not an implicit delivery scheduler. In the failure/recovery regression, five
+repeated frames fall from five pane-delivery attempts to two: the initial
+attempt and one supervisor-owned recovery attempt.
+
 Adversarial coverage preserves real asks, permission gates, explicit results,
 uncovered exits, replay deduplication, disconnected-manager retry, stale gate
 failure, and durable cursor advancement. Compression happens before envelope

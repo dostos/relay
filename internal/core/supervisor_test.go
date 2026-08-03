@@ -93,6 +93,38 @@ func TestReconcileAdoptsAnUnwatchedLiveHandoff(t *testing.T) {
 	}
 }
 
+func TestReconcileRedeliversPendingEnvelopeWithoutNewChildEvent(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-manager", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "manager"}, Labels: map[string]string{"role": ParentRole, "wake_mode": "inject"}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c1", Persist: ports.PersistHandle{Kind: "tmux", Name: "child"}, CreatedAt: now}
+	_ = reg.PutSession(parent)
+	_ = reg.PutSession(child)
+	ho := &Handoff{ID: "ho-child", SessionID: child.ID, HostID: child.HostID, Kind: KindAgent, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
+	_ = reg.PutHandoff(ho)
+	notifier.notifyFail = true
+	msg, err := service.RouteChildEvent(context.Background(), ho, Event{Seq: 1, Kind: "ask", Meta: map[string]any{"text": "A or B?"}})
+	if err == nil || msg == nil || msg.DeliveredAt != nil {
+		t.Fatalf("failed initial delivery = %+v err=%v", msg, err)
+	}
+	notifier.notifyFail = false
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sup := &SupervisorService{Reg: reg, Parents: service}
+	if _, err := sup.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := service.FindMessage(msg.ID)
+	if err != nil || stored.DeliveredAt == nil || len(notifier.sent) != 1 {
+		t.Fatalf("supervisor retry = %+v sends=%d err=%v", stored, len(notifier.sent), err)
+	}
+	// A later duplicate event is only a cursor/deduplication concern; it must
+	// not become a second delivery owner.
+	if _, err := service.RouteChildEvent(context.Background(), ho, Event{Seq: 2, Kind: "ask", Meta: map[string]any{"text": "A or B?"}}); err != nil || len(notifier.sent) != 1 {
+		t.Fatalf("duplicate event retried delivery: sends=%d err=%v", len(notifier.sent), err)
+	}
+}
+
 func TestReconcileDoesNotDoubleStartTheSameHandoff(t *testing.T) {
 	sup, reg := newSupervisorFixture(t)
 	putSupervisedHandoff(t, reg, "ho-live", "running", "sess-manager")

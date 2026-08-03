@@ -1218,15 +1218,9 @@ func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coo
 	// instead of allocating and injecting another one.
 	if attentionMessage(kind) {
 		if pending := p.pendingAttention(parent.ID, ho.ID); pending != nil && (ev.Kind == "idle" || pending.Kind == kind) {
-			if pending.DeliveredAt == nil {
-				// Retry against whoever actually holds the envelope. After a
-				// failover that is an ancestor, not the intended manager.
-				holder, err := p.Reg.GetSession(pending.ParentSessionID)
-				if err != nil || holder == nil {
-					holder = parent
-				}
-				return pending, p.deliverMessage(ctx, holder, ho, pending)
-			}
+			// Event replay is not a delivery scheduler. The supervisor owns
+			// pending-envelope retries, so repeated child frames cannot turn into
+			// repeated pane injections or manager wake attempts.
 			return pending, nil
 		}
 	}

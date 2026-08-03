@@ -166,6 +166,19 @@ func (s *SupervisorService) Reconcile(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Durable parent envelopes have one periodic retry owner. Child event
+	// replay only deduplicates; it never injects the same pending decision
+	// again. A parent rebind may still trigger an immediate repair, while this
+	// tick guarantees recovery even when no new child event arrives.
+	parents := map[string]struct{}{}
+	for _, ho := range pending {
+		parents[ho.SourceSessionID] = struct{}{}
+	}
+	for parentID := range parents {
+		if _, deliveryErr := s.Parents.DeliverPending(ctx, parentID); deliveryErr != nil {
+			s.emit("pending_delivery_error", parentID, deliveryErr)
+		}
+	}
 	// A question nobody answers must reach someone who can. This is the same
 	// tick because both are "the tree is not making progress" problems.
 	if n, ageErr := s.Parents.ReportStaleEscalations(ctx, EscalationMaxHold()); ageErr != nil {

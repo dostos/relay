@@ -17,10 +17,11 @@ import (
 )
 
 type fakeParentNotifier struct {
-	bound      []string
-	notices    []ParentNotice
-	sent       []string
-	notifyFail bool
+	bound        []string
+	notices      []ParentNotice
+	sent         []string
+	sendAttempts int
+	notifyFail   bool
 }
 
 type fakeRetirementViz struct {
@@ -94,6 +95,7 @@ func (f *fakeParentNotifier) CaptureScreen(context.Context, string, int) (string
 	return "› \n", nil
 }
 func (f *fakeParentNotifier) SendScreen(_ context.Context, _ string, text string, _ bool) error {
+	f.sendAttempts++
 	if f.notifyFail {
 		return errors.New("parent disconnected")
 	}
@@ -337,7 +339,7 @@ func TestIdlePermissionPromptIsClassifiedAndNotifiedOnce(t *testing.T) {
 	}
 }
 
-func TestDisconnectedParentRetriesOneDurableAttentionEnvelope(t *testing.T) {
+func TestDisconnectedParentReplayDoesNotRetryDurableAttentionEnvelope(t *testing.T) {
 	service, notifier, reg := newParentTestService(t)
 	service.Policies = &PolicyService{Path: filepath.Join(t.TempDir(), "missing-policy.yaml")}
 	service.Sessions.Persist = &capturePersistence{capture: "Completed checkpoint\n→ Add a follow-up\n"}
@@ -356,13 +358,25 @@ func TestDisconnectedParentRetriesOneDurableAttentionEnvelope(t *testing.T) {
 	}
 	notifier.notifyFail = false
 	second, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 2, Kind: "ask", Meta: map[string]any{"text": "continue?"}})
-	if err != nil || second.ID != first.ID || second.DeliveredAt == nil {
+	if err != nil || second.ID != first.ID || second.DeliveredAt != nil || len(notifier.sent) != 0 {
 		t.Fatalf("reconnect second=%+v err=%v", second, err)
 	}
+	for seq := int64(3); seq <= 5; seq++ {
+		if _, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: seq, Kind: "ask", Meta: map[string]any{"text": "continue?"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if notifier.sendAttempts != 1 {
+		t.Fatalf("duplicate child frames caused %d delivery attempts, want initial attempt only", notifier.sendAttempts)
+	}
+	if delivered, err := service.DeliverPending(context.Background(), parent.ID); err != nil || delivered != 1 {
+		t.Fatalf("durable retry delivered=%d err=%v", delivered, err)
+	}
 	messages, err := service.ListMessages(parent.ID, false)
-	if err != nil || len(messages) != 1 || len(notifier.notices) != 1 {
+	if err != nil || len(messages) != 1 || messages[0].DeliveredAt == nil || len(notifier.notices) != 1 || len(notifier.sent) != 1 {
 		t.Fatalf("messages=%+v notices=%d err=%v", messages, len(notifier.notices), err)
 	}
+	t.Logf("five_child_frames_delivery_attempts=5->2")
 }
 
 func TestFormatParentNoticeQualifiesRemoteHandoff(t *testing.T) {
