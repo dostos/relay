@@ -93,6 +93,14 @@ func applyPresentationAck(reg *core.Registry, event coord.Event) error {
 		if err := reg.PutSession(sess); err != nil {
 			return err
 		}
+		if sess.CreatedByHandoffID != "" {
+			if ho, getErr := reg.GetHandoff(sess.CreatedByHandoffID); getErr == nil {
+				ho.PresentationState, ho.PresentationError = core.EffectAcknowledged, ""
+				if err := reg.PutHandoff(ho); err != nil {
+					return err
+				}
+			}
+		}
 		core.RememberPane(result.Surface, sess, true)
 		_ = core.AppendLedger(map[string]any{
 			"v": 1, "type": "viz_ack", "ts": time.Now().UTC().Format(time.RFC3339),

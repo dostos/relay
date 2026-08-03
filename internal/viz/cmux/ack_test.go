@@ -15,10 +15,13 @@ func TestApplyPresentationAckReplacesQueuedReference(t *testing.T) {
 	reg := &core.Registry{}
 	sess := &core.Session{
 		ID: "sess-child", HostID: "c3", Persist: ports.PersistHandle{Kind: "tmux", Name: "engram"},
-		Labels:        map[string]string{"agent": "future-agent-cli"},
-		VizSurfaceRef: "viz:queued:17", CreatedAt: time.Now().UTC(),
+		Labels:             map[string]string{"agent": "future-agent-cli"},
+		CreatedByHandoffID: "ho-child", VizSurfaceRef: "viz:queued:17", CreatedAt: time.Now().UTC(),
 	}
 	if err := reg.PutSession(sess); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.PutHandoff(&core.Handoff{ID: "ho-child", SessionID: sess.ID, PresentationState: core.EffectPending, CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	result, _ := json.Marshal(map[string]any{"session_id": sess.ID, "revision": int64(17), "surface": "surface:42"})
@@ -37,6 +40,10 @@ func TestApplyPresentationAckReplacesQueuedReference(t *testing.T) {
 	}
 	if got.Labels["agent"] != "future-agent-cli" {
 		t.Fatalf("agent-agnostic metadata changed: %+v", got.Labels)
+	}
+	ho, err := reg.GetHandoff("ho-child")
+	if err != nil || ho.PresentationState != core.EffectAcknowledged {
+		t.Fatalf("presentation effect = %+v err=%v", ho, err)
 	}
 }
 

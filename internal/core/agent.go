@@ -13,6 +13,7 @@ import (
 type AgentResponse struct {
 	OK        bool           `json:"ok"`
 	V         int            `json:"v"`
+	AttemptID string         `json:"attempt_id,omitempty"`
 	HandoffID string         `json:"handoff_id,omitempty"`
 	SessionID string         `json:"session_id,omitempty"`
 	HostID    string         `json:"host_id,omitempty"`
@@ -180,6 +181,7 @@ func (h *HandoffService) agentBase(ho *Handoff) AgentResponse {
 	return AgentResponse{
 		OK:        true,
 		V:         1,
+		AttemptID: ho.ID,
 		HandoffID: ho.ID,
 		LastSeq:   ho.LastSeq,
 	}
@@ -218,10 +220,18 @@ func applyHandoffEventStatus(ho *Handoff, kind string) {
 func (h *HandoffService) AgentStart(ctx context.Context, opts HandoffOpts) (*AgentResponse, error) {
 	b, ho, err := h.Launch(ctx, opts)
 	if err != nil {
-		resp := &AgentResponse{OK: false, V: 1, Error: err.Error(), Next: ""}
+		resp := &AgentResponse{OK: false, V: 1, Error: redactedFailureError(err), Next: "", Managed: opts.SourceSessionID != ""}
 		if ho != nil {
-			resp.HandoffID, resp.SessionID, resp.HostID = ho.ID, ho.SessionID, ho.HostID
+			resp.AttemptID, resp.HandoffID, resp.SessionID, resp.HostID = ho.ID, ho.ID, ho.SessionID, ho.HostID
 			resp.Kind, resp.Status = string(ho.Kind), string(ho.Status)
+			resp.Extra = map[string]any{
+				"failure_stage": ho.FailureStage, "launch_state": ho.LaunchState,
+				"failure_error":  ho.FailureError,
+				"delivery_state": ho.DeliveryState, "presentation_state": ho.PresentationState,
+				"cleanup_error": ho.CleanupError, "retry_safe": ho.RetrySafe,
+				"failure_notice_state": ho.FailureNoticeState,
+				"failure_event_state":  ho.FailureEventState,
+			}
 		}
 		return resp, err
 	}
@@ -231,8 +241,12 @@ func (h *HandoffService) AgentStart(ctx context.Context, opts HandoffOpts) (*Age
 	resp.Kind = string(ho.Kind)
 	resp.Status = string(ho.Status)
 	setStartContinuation(&resp, ho.ID, opts.SourceSessionID != "")
+	resp.Extra = map[string]any{
+		"launch_state": ho.LaunchState, "delivery_state": ho.DeliveryState,
+		"presentation_state": ho.PresentationState,
+	}
 	if b != nil {
-		resp.Extra = map[string]any{"pane": b.Pane}
+		resp.Extra["pane"] = b.Pane
 	}
 	if ho.RestartedFromID != "" {
 		if resp.Extra == nil {

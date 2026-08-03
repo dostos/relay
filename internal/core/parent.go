@@ -160,6 +160,7 @@ type ParentNotifier interface {
 
 type ParentEventRouter interface {
 	RouteChildEvent(context.Context, *Handoff, coord.Event) (*ParentMessage, error)
+	RouteLaunchFailure(context.Context, *Handoff, coord.Event) (*ParentMessage, error)
 }
 
 type ParentService struct {
@@ -1012,11 +1013,16 @@ func (p *ParentService) DeliverPending(ctx context.Context, parentID string) (in
 			continue
 		}
 		ho, getErr := p.Reg.GetHandoff(msg.HandoffID)
-		if getErr != nil || handoffTerminal(ho) {
+		launchFailure := strings.HasPrefix(msg.CorrelationID, "launch-failure:")
+		if getErr != nil || (handoffTerminal(ho) && !launchFailure) {
 			continue
 		}
 		if err := p.deliverMessage(ctx, parent, ho, msg); err != nil {
 			return delivered, err
+		}
+		if launchFailure {
+			ho.FailureNoticeState, ho.FailureNoticeError = EffectAcknowledged, ""
+			_ = p.Reg.PutHandoff(ho)
 		}
 		delivered++
 	}
@@ -1315,7 +1321,15 @@ func (p *ParentService) deliverEscalation(ctx context.Context, candidates []*Ses
 }
 
 func (p *ParentService) RouteChildEvent(ctx context.Context, ho *Handoff, ev coord.Event) (*ParentMessage, error) {
-	if ho == nil || ho.SourceSessionID == "" || handoffTerminal(ho) {
+	return p.routeChildEvent(ctx, ho, ev, false)
+}
+
+func (p *ParentService) RouteLaunchFailure(ctx context.Context, ho *Handoff, ev coord.Event) (*ParentMessage, error) {
+	return p.routeChildEvent(ctx, ho, ev, true)
+}
+
+func (p *ParentService) routeChildEvent(ctx context.Context, ho *Handoff, ev coord.Event, allowTerminal bool) (*ParentMessage, error) {
+	if ho == nil || ho.SourceSessionID == "" || (handoffTerminal(ho) && !allowTerminal) {
 		return nil, nil
 	}
 	var keep, freshStructuredGate bool

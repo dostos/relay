@@ -69,18 +69,52 @@ func (h *HandoffService) selectPreferredAgent(ctx context.Context, profile *Host
 
 // Launch creates a session, starts work, installs events, optionally presents viz, returns binding.
 func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding, *Handoff, error) {
+	now := time.Now().UTC()
+	hid := newID("ho")
+	kind := KindAgent
+	if opts.Command != "" && opts.Goal == "" && opts.Agent == "" {
+		kind = KindJob
+	}
+	ho := &Handoff{
+		ID: hid, HostID: opts.HostID, Kind: kind, Status: StatusPending,
+		LaunchState: EffectPending, DeliveryState: EffectNotApplicable,
+		PresentationState: EffectNotApplicable, Goal: opts.Goal, Agent: opts.Agent,
+		Name: opts.Name, RepoRef: opts.RepoRef, RemoteCWD: opts.RemoteCWD,
+		Container: opts.Container, NoPane: opts.NoPane, Silence: opts.Silence,
+		RestartedFromID: opts.RestartedFromID, CreatedAt: now, UpdatedAt: now,
+		SourceSessionID: opts.SourceSessionID, SourceHostID: opts.SourceHostID,
+		SourcePersistName: opts.SourcePersistName,
+	}
+	if kind == KindAgent {
+		ho.DeliveryState = EffectPending
+	}
+	if !opts.NoPane && h.Viz != nil {
+		ho.PresentationState = EffectPending
+	}
+	if h.Reg == nil {
+		return nil, ho, fmt.Errorf("persist launch attempt %s: registry unavailable", hid)
+	}
+	if err := h.Reg.PutHandoff(ho); err != nil {
+		return nil, ho, fmt.Errorf("persist launch attempt %s: %w", hid, err)
+	}
+	fail := func(stage string, sess *Session, cause error) (*Binding, *Handoff, error) {
+		return nil, ho, h.failLaunchStage(ctx, ho, sess, stage, cause)
+	}
 	if opts.HostID == "" {
-		return nil, nil, fmt.Errorf("host required")
+		return fail("validate", nil, fmt.Errorf("host required"))
+	}
+	if h.Profiles == nil || h.Sessions == nil || h.Persist == nil || h.NewTransport == nil {
+		return fail("adapters", nil, fmt.Errorf("launcher adapters are not fully configured"))
 	}
 	profile, err := h.Profiles.Get(ctx, opts.HostID, false)
 	if err != nil {
-		return nil, nil, err
+		return fail("profile", nil, err)
 	}
 	var cref *ContainerRef
 	if opts.Container != "" {
 		cspec, err := profile.ResolveContainer(opts.Container)
 		if err != nil {
-			return nil, nil, err
+			return fail("container", nil, err)
 		}
 		cwd := opts.RemoteCWD
 		if cwd == "" {
@@ -101,7 +135,6 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 		silence = DefaultSilenceSec
 	}
 
-	kind := KindJob
 	var launchCmd string
 	agentName := opts.Agent
 	if opts.Command != "" && opts.Goal == "" && opts.Agent == "" {
@@ -110,7 +143,7 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 	} else {
 		kind = KindAgent
 		if opts.Goal == "" {
-			return nil, nil, fmt.Errorf("--goal required for agent handoff")
+			return fail("validate", nil, fmt.Errorf("--goal required for agent handoff"))
 		}
 		if agentName == "" {
 			// No explicit --agent: let a configured usage hook steer the
@@ -122,21 +155,25 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 		}
 		ag, err := profile.FindAgent(agentName)
 		if err != nil {
-			return nil, nil, err
+			return fail("resolve_agent", nil, err)
 		}
 		agentName = ag.Name
 		launchCmd = ag.LaunchCommand(opts.Goal)
 		if cref != nil {
 			launchCmd, err = ContainerExec(cref.Runtime, *cref, ag.InnerCommand(), true)
 			if err != nil {
-				return nil, nil, err
+				return fail("container", nil, err)
 			}
 		}
+	}
+	ho.Kind, ho.Agent, ho.Command = kind, agentName, launchCmd
+	ho.Silence = silence
+	if err := h.Reg.PutHandoff(ho); err != nil {
+		return fail("persist_attempt", nil, err)
 	}
 
 	// Allocate the edge id before the target session so session history can name
 	// the exact handoff that created it.
-	hid := newID("ho")
 	// Holding shell first so we can install events before the real work starts.
 	labels := map[string]string{"role": "handoff"}
 	if agentName != "" {
@@ -155,72 +192,49 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 		CreatedByHandoffID: hid,
 	})
 	if err != nil {
-		return nil, nil, err
+		return fail("create_session", nil, err)
+	}
+	ho.SessionID, ho.Name, ho.RemoteCWD = sess.ID, sess.Persist.Name, sess.RemoteCWD
+	if err := h.Reg.PutHandoff(ho); err != nil {
+		return fail("persist_session", sess, err)
 	}
 
 	t, err := h.NewTransport(opts.HostID)
 	if err != nil {
-		return nil, nil, err
+		return fail("transport", sess, err)
 	}
 	if cref != nil {
 		sess.Container = cref
-		_ = h.Sessions.Reg.PutSession(sess)
+		if err := h.Sessions.Reg.PutSession(sess); err != nil {
+			return fail("persist_container", sess, err)
+		}
 		agInner := "" // resolved agent inner command for the probe
 		if ag, aerr := profile.FindAgent(agentName); aerr == nil {
 			agInner = ag.InnerCommand()
 		}
 		if agInner != "" {
 			if verr := h.verifyContainerAgent(ctx, t, *cref, agInner); verr != nil {
-				_ = h.Sessions.Destroy(ctx, sess.ID, false) // tear down the holding shell
-				return nil, nil, verr
+				return fail("verify_container_agent", sess, verr)
 			}
 		}
 	}
 	if h.Coord == nil {
-		return nil, nil, fmt.Errorf("coord adapter not configured")
+		return fail("event_stream", sess, fmt.Errorf("coord adapter not configured"))
 	}
 	if err := h.Coord.Ensure(ctx, t); err != nil {
-		return nil, nil, err
+		return fail("event_stream", sess, err)
 	}
 	emitFactory := func(kind string) (string, error) {
 		return h.Coord.SensorCommand(sess.Persist.Name, kind)
 	}
 	if err := h.Persist.InstallSensors(ctx, t, sess.Persist, silence, emitFactory); err != nil {
-		return nil, nil, fmt.Errorf("install sensors: %w", err)
+		return fail("install_sensors", sess, fmt.Errorf("install sensors: %w", err))
 	}
 
 	eventsPath := h.Coord.EventsPath(sess.Persist.Name)
-	now := time.Now().UTC()
-	ho := &Handoff{
-		ID:                hid,
-		SessionID:         sess.ID,
-		HostID:            opts.HostID,
-		Kind:              kind,
-		Status:            StatusPending,
-		LaunchState:       EffectPending,
-		DeliveryState:     EffectNotApplicable,
-		Goal:              opts.Goal,
-		Agent:             agentName,
-		Command:           launchCmd,
-		Name:              sess.Persist.Name,
-		RepoRef:           opts.RepoRef,
-		RemoteCWD:         sess.RemoteCWD,
-		Container:         opts.Container,
-		NoPane:            opts.NoPane,
-		Silence:           silence,
-		RestartedFromID:   opts.RestartedFromID,
-		EventsPath:        eventsPath,
-		CreatedAt:         now,
-		UpdatedAt:         now,
-		SourceSessionID:   opts.SourceSessionID,
-		SourceHostID:      opts.SourceHostID,
-		SourcePersistName: opts.SourcePersistName,
-	}
-	if kind == KindAgent {
-		ho.DeliveryState = EffectPending
-	}
+	ho.EventsPath = eventsPath
 	if err := h.Reg.PutHandoff(ho); err != nil {
-		return nil, nil, err
+		return fail("persist_event_stream", sess, err)
 	}
 	startRecord := map[string]any{
 		"v": 1, "type": "start", "ts": now.Format(time.RFC3339),
@@ -232,25 +246,29 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 	if opts.RestartedFromID != "" {
 		startRecord["restarted_from_id"] = opts.RestartedFromID
 	}
-	_ = AppendLedger(startRecord)
+	if err := AppendLedger(startRecord); err != nil {
+		return fail("record_start", sess, err)
+	}
 
 	// Start work through the holding-shell launch protocol. Agent-composer
 	// delivery is a separate contract used only after readiness is established.
 	launcher, ok := h.Persist.(ports.HoldingShellLauncher)
 	if !ok {
 		err := fmt.Errorf("persistence %s cannot acknowledge holding-shell launch", h.Persist.Kind())
-		return nil, ho, h.failLaunch(ctx, ho, sess, err)
+		return fail("launch", sess, err)
 	}
 	if err := launcher.Launch(ctx, t, sess.Persist, launchCmd); err != nil {
-		return nil, ho, h.failLaunch(ctx, ho, sess, err)
+		return fail("launch", sess, err)
 	}
 	ho.LaunchState = EffectAcknowledged
 	ho.Status = StatusRunning
-	_ = h.Reg.PutHandoff(ho)
+	if err := h.Reg.PutHandoff(ho); err != nil {
+		return fail("persist_launch_effect", sess, err)
+	}
 
 	// Emit started via relayd (authoritative seq).
 	if _, err := h.Coord.Emit(ctx, t, sess.Persist.Name, "started", nil); err != nil {
-		return nil, nil, fmt.Errorf("emit started: %w", err)
+		return fail("emit_started", sess, fmt.Errorf("emit started: %w", err))
 	}
 
 	// Inject goal for agent mode after a short readiness wait.
@@ -268,19 +286,37 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 		// Restorable argv: `relay resume --session <persist>` (cmux Vault extracts --session).
 		launch := ResumeLaunchCmd(sess.Persist.Name)
 		ref, err := PresentSession(ctx, h.Viz, sess, launch, handoffLayout(opts))
-		if err == nil {
-			pane = true
-			sess.VizSurfaceRef = ref
-			_ = h.Sessions.Reg.PutSession(sess)
-			RememberResume(sess)
-			RememberPane(ref, sess, true)
-			labels := map[string]string{sess.ID: ProjectLabel(sess.Persist.Name)}
-			if all, err := h.Sessions.List(); err == nil {
-				for _, s := range all {
-					labels[s.ID] = ProjectLabel(s.Persist.Name)
-				}
+		if err != nil {
+			ho.PresentationState, ho.PresentationError = EffectFailed, err.Error()
+			return nil, ho, h.failPresentation(ctx, ho, sess, "visualization", err)
+		}
+		pane = !strings.HasPrefix(ref, "viz:queued:")
+		if pane {
+			ho.PresentationState = EffectAcknowledged
+		} else {
+			ho.PresentationState = EffectPending
+		}
+		ho.PresentationError = ""
+		sess.VizSurfaceRef = ref
+		if err := h.Sessions.Reg.PutSession(sess); err != nil {
+			return nil, ho, h.failPresentation(ctx, ho, sess, "persist_visualization", err)
+		}
+		if err := h.Reg.PutHandoff(ho); err != nil {
+			return nil, ho, h.failPresentation(ctx, ho, sess, "persist_visualization_effect", err)
+		}
+		RememberResume(sess)
+		RememberPane(ref, sess, true)
+		labels := map[string]string{sess.ID: ProjectLabel(sess.Persist.Name)}
+		if all, err := h.Sessions.List(); err == nil {
+			for _, s := range all {
+				labels[s.ID] = ProjectLabel(s.Persist.Name)
 			}
-			_ = h.Viz.BrandLabels(ctx, labels)
+		}
+		_ = h.Viz.BrandLabels(ctx, labels)
+	} else if ho.PresentationState == EffectPending {
+		ho.PresentationState = EffectNotApplicable
+		if err := h.Reg.PutHandoff(ho); err != nil {
+			return fail("persist_visualization_effect", sess, err)
 		}
 	}
 
@@ -302,14 +338,32 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 }
 
 func (h *HandoffService) failLaunch(ctx context.Context, ho *Handoff, sess *Session, cause error) error {
-	ho.LaunchState = EffectFailed
-	ho.LaunchError = cause.Error()
+	return h.failLaunchStage(ctx, ho, sess, "launch", cause)
+}
+
+func (h *HandoffService) failLaunchStage(ctx context.Context, ho *Handoff, sess *Session, stage string, cause error) error {
+	if ho.LaunchState == EffectPending {
+		ho.LaunchState = EffectFailed
+		ho.LaunchError = redactedFailureError(cause)
+	}
+	ho.FailureStage = stage
+	ho.FailureError = redactedFailureError(cause)
 	return h.failEffect(ctx, ho, sess, cause)
 }
 
 func (h *HandoffService) failDelivery(ctx context.Context, ho *Handoff, sess *Session, cause error) error {
 	ho.DeliveryState = EffectFailed
-	ho.DeliveryError = cause.Error()
+	ho.DeliveryError = redactedFailureError(cause)
+	ho.FailureStage = "delivery"
+	ho.FailureError = redactedFailureError(cause)
+	return h.failEffect(ctx, ho, sess, cause)
+}
+
+func (h *HandoffService) failPresentation(ctx context.Context, ho *Handoff, sess *Session, stage string, cause error) error {
+	ho.PresentationState = EffectFailed
+	ho.PresentationError = redactedFailureError(cause)
+	ho.FailureStage = stage
+	ho.FailureError = redactedFailureError(cause)
 	return h.failEffect(ctx, ho, sess, cause)
 }
 
@@ -321,17 +375,114 @@ func (h *HandoffService) failEffect(ctx context.Context, ho *Handoff, sess *Sess
 	if err := h.Reg.PutHandoff(ho); err != nil {
 		return fmt.Errorf("%w; persist terminal handoff: %v", cause, err)
 	}
+	h.recordFailureEvent(ctx, ho, sess)
 	// Terminalize before teardown so concurrent idle events cannot create a
 	// parent ask. Session destruction is best effort; the durable failure keeps
 	// retries idempotent even if remote cleanup needs reconciliation.
 	if h.Sessions != nil && sess != nil {
 		if err := h.Sessions.Destroy(ctx, sess.ID, false); err != nil {
-			ho.CleanupError = err.Error()
+			ho.CleanupError = redactedFailureError(err)
+			ho.RetrySafe = false
 			_ = h.Reg.PutHandoff(ho)
+			h.notifyLaunchFailure(ctx, ho)
 			return fmt.Errorf("%w; cleanup failed: %v", cause, err)
 		}
 	}
+	ho.RetrySafe = true
+	_ = h.Reg.PutHandoff(ho)
+	h.notifyLaunchFailure(ctx, ho)
 	return cause
+}
+
+func (h *HandoffService) recordFailureEvent(ctx context.Context, ho *Handoff, sess *Session) {
+	if h.Coord == nil || sess == nil || h.NewTransport == nil {
+		ho.FailureEventState = EffectNotApplicable
+		_ = h.Reg.PutHandoff(ho)
+		return
+	}
+	ho.FailureEventState = EffectPending
+	_ = h.Reg.PutHandoff(ho)
+	t, err := h.NewTransport(ho.HostID)
+	if err == nil {
+		_, err = h.Coord.Emit(ctx, t, sess.Persist.Name, "result", map[string]any{
+			"source": "launcher", "correlation_id": "launch-failure:" + ho.ID,
+			"attempt_id": ho.ID, "failure_stage": ho.FailureStage,
+			"text": "launch failed at " + ho.FailureStage + ": " + redactedFailureError(firstFailure(ho)),
+		})
+	}
+	if err != nil {
+		ho.FailureEventState, ho.FailureEventError = EffectFailed, redactedFailureError(err)
+	} else {
+		ho.FailureEventState, ho.FailureEventError = EffectAcknowledged, ""
+	}
+	_ = h.Reg.PutHandoff(ho)
+}
+
+func redactedFailureError(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := compactText(err.Error())
+	lower := strings.ToLower(text)
+	for _, marker := range []string{"password", "passwd", "token=", "secret", "authorization:", "private key"} {
+		if strings.Contains(lower, marker) {
+			return "sensitive failure details redacted; inspect the local handoff record"
+		}
+	}
+	if len(text) > 240 {
+		text = text[:240]
+	}
+	return text
+}
+
+func (h *HandoffService) notifyLaunchFailure(ctx context.Context, ho *Handoff) {
+	if ho == nil || ho.SourceSessionID == "" {
+		if ho != nil {
+			ho.FailureNoticeState = EffectNotApplicable
+			_ = h.Reg.PutHandoff(ho)
+		}
+		return
+	}
+	ho.FailureNoticeState = EffectPending
+	_ = h.Reg.PutHandoff(ho)
+	if h.ParentRouter == nil {
+		ho.FailureNoticeState = EffectFailed
+		ho.FailureNoticeError = "parent router unavailable; recover from durable handoff"
+		_ = h.Reg.PutHandoff(ho)
+		return
+	}
+	cleanup := "complete"
+	if ho.CleanupError != "" {
+		cleanup = "failed: " + redactedFailureError(fmt.Errorf("%s", ho.CleanupError))
+	}
+	text := fmt.Sprintf("launch attempt %s failed | host=%s agent=%s cwd=%s name=%s stage=%s launch=%s delivery=%s presentation=%s cleanup=%s retry_safe=%t session=%s handoff=%s error=%s",
+		ho.ID, ho.HostID, ho.Agent, ho.RemoteCWD, ho.Name, ho.FailureStage,
+		ho.LaunchState, ho.DeliveryState, ho.PresentationState, cleanup, ho.RetrySafe,
+		ho.SessionID, ho.ID, redactedFailureError(firstFailure(ho)))
+	ev := Event{Kind: "result", Meta: map[string]any{
+		"text": compactText(text), "source": "launcher", "correlation_id": "launch-failure:" + ho.ID,
+		"attempt_id": ho.ID, "failure_stage": ho.FailureStage, "retry_safe": ho.RetrySafe,
+	}}
+	msg, err := h.ParentRouter.RouteLaunchFailure(ctx, ho, ev)
+	if err != nil {
+		ho.FailureNoticeError = redactedFailureError(err)
+		if msg == nil {
+			ho.FailureNoticeState = EffectFailed
+		}
+		_ = h.Reg.PutHandoff(ho)
+		return
+	}
+	ho.FailureNoticeState, ho.FailureNoticeError = EffectAcknowledged, ""
+	_ = h.Reg.PutHandoff(ho)
+}
+
+func firstFailure(ho *Handoff) error {
+	for _, text := range []string{ho.FailureError, ho.PresentationError, ho.DeliveryError, ho.LaunchError} {
+		if text != "" {
+			return fmt.Errorf("%s", text)
+		}
+	}
+	return nil
 }
 
 func agentGoalPrompt(goal string) string {
