@@ -110,7 +110,7 @@ func Command(args []string) int {
 func ValidAck(meta map[string]any) bool {
 	for key := range meta {
 		switch key {
-		case "request_seq", "request_kind", "result", "build", "session_id", "op":
+		case "request_seq", "request_kind", "result", "build", "session_id", "op", "status", "error":
 		default:
 			return false
 		}
@@ -131,7 +131,22 @@ func ValidAck(meta map[string]any) bool {
 	if kind == "update_relayd" || kind == "retire_control" {
 		_, hasSession := meta["session_id"]
 		_, hasOp := meta["op"]
-		return !hasSession && !hasOp && !strings.ContainsRune(result, '\x00')
+		if hasSession || hasOp || strings.ContainsRune(result, '\x00') {
+			return false
+		}
+		status, _ := meta["status"].(string)
+		if status == "" {
+			_, hasError := meta["error"]
+			return !hasError
+		}
+		failure, ok := meta["error"].(string)
+		return status == "failed" && ok && len(failure) > 0 && len(failure) <= 2048 && !strings.ContainsRune(failure, '\x00')
+	}
+	if _, hasStatus := meta["status"]; hasStatus {
+		return false
+	}
+	if _, hasError := meta["error"]; hasError {
+		return false
 	}
 	if kind != "project" || meta["op"] != "upsert" {
 		return false

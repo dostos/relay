@@ -63,6 +63,7 @@ type UpdateStatus struct {
 	AckedAt        string `json:"acked_at,omitempty"`
 	InstalledBuild string `json:"installed_build,omitempty"`
 	State          string `json:"state"`
+	Error          string `json:"error,omitempty"`
 }
 
 type QueueOutcome struct {
@@ -355,10 +356,15 @@ func Status(root string) ([]UpdateStatus, error) {
 			}
 			if ack.Seq > 0 {
 				s.AckedAt = ack.TS
-				s.InstalledBuild, _ = ack.Meta["result"].(string)
-				if ack.Kind == "client_ack" {
+				if ack.Meta["status"] == "failed" {
+					s.State = "failed"
+					s.Error, _ = ack.Meta["error"].(string)
+					s.InstalledBuild, _ = ack.Meta["build"].(string)
+				} else if ack.Kind == "client_ack" {
+					s.InstalledBuild, _ = ack.Meta["result"].(string)
 					s.State = "active"
 				} else {
+					s.InstalledBuild, _ = ack.Meta["result"].(string)
 					s.State = "installed_unverified"
 				}
 			}

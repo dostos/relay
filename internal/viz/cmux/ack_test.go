@@ -2,6 +2,8 @@ package cmux
 
 import (
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,6 +54,17 @@ func TestUpdateAckReportsInstalledBuildBeforeRestart(t *testing.T) {
 	meta, ok := vizAckMeta(event, "d894f9f")
 	if !ok || meta["request_seq"] != int64(46) || meta["request_kind"] != "update_relayd" || meta["result"] != "d894f9f" || meta["build"] != coord.Build {
 		t.Fatalf("update ack=%+v ok=%v", meta, ok)
+	}
+}
+
+func TestLifecycleFailureAckIsBoundedAndTyped(t *testing.T) {
+	meta := lifecycleFailureAckMeta(coord.Event{Seq: 47, Kind: "update_relayd"}, errors.New("build failed\n"+strings.Repeat("x", 3000)))
+	if meta["request_seq"] != int64(47) || meta["request_kind"] != "update_relayd" || meta["status"] != "failed" || meta["build"] != coord.Build || meta["result"] != coord.Build {
+		t.Fatalf("failure ack=%+v", meta)
+	}
+	failure, _ := meta["error"].(string)
+	if failure == "" || len(failure) > 2050 || strings.Contains(failure, "\n") {
+		t.Fatalf("unbounded failure=%q len=%d", failure, len(failure))
 	}
 }
 

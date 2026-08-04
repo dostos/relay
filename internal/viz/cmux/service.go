@@ -256,6 +256,21 @@ func (v *Viz) Follow(ctx context.Context, follow bool) error {
 			emitReceipt = true
 		}
 		if handleErr != nil {
+			if lifecycleEvent(event.Kind) {
+				// Lifecycle work is deliberately ordered on the same durable
+				// transport, but its failure must not pin the projection cursor.
+				// Report the failure, advance, and let an explicit later request
+				// retry it so panes behind a bad update keep converging.
+				if err := v.emitLifecycleFailureAck(ctx, event, handleErr); err != nil {
+					_ = cmd.Process.Kill()
+					return err
+				}
+				if err := v.saveCursor(event.Seq); err != nil {
+					_ = cmd.Process.Kill()
+					return err
+				}
+				continue
+			}
 			_ = cmd.Process.Kill()
 			return fmt.Errorf("viz event %d %s: %w", event.Seq, event.Kind, handleErr)
 		}
@@ -681,6 +696,10 @@ func (v *Viz) emitAck(ctx context.Context, event coord.Event, result string) err
 	if !ok {
 		return nil
 	}
+	return v.emitAckMeta(ctx, metaMap)
+}
+
+func (v *Viz) emitAckMeta(ctx context.Context, metaMap map[string]any) error {
 	meta, _ := json.Marshal(metaMap)
 	command := "viz-ack " + v.serviceChannel() + " " + base64.RawURLEncoding.EncodeToString(meta)
 	args, err := v.controlSSHArgs(command)
@@ -694,6 +713,26 @@ func (v *Viz) emitAck(ctx context.Context, event coord.Event, result string) err
 		return fmt.Errorf("visualization ack: %w (%s)", err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+func lifecycleEvent(kind string) bool {
+	return kind == "update_relayd" || kind == "retire_control"
+}
+
+func (v *Viz) emitLifecycleFailureAck(ctx context.Context, event coord.Event, cause error) error {
+	return v.emitAckMeta(ctx, lifecycleFailureAckMeta(event, cause))
+}
+
+func lifecycleFailureAckMeta(event coord.Event, cause error) map[string]any {
+	failure := strings.Join(strings.Fields(cause.Error()), " ")
+	if len(failure) > 2048 {
+		failure = failure[:2047] + "…"
+	}
+	return map[string]any{
+		"request_seq": event.Seq, "request_kind": event.Kind,
+		"result": coord.Build, "build": coord.Build,
+		"status": "failed", "error": failure,
+	}
 }
 
 func vizAckMeta(event coord.Event, result string) (map[string]any, bool) {

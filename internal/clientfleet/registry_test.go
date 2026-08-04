@@ -122,4 +122,15 @@ func TestStatusRequiresMatchingEffectAck(t *testing.T) {
 	if status[0].State != "active" || status[0].InstalledBuild != "new" {
 		t.Fatalf("effect ack=%+v", status[0])
 	}
+	writeEvent(c.Channel, coord.Event{Seq: 8, TS: "requested-again", Kind: "update_relayd"})
+	writeEvent(c.Channel+"-ack", coord.Event{Seq: 3, TS: "failed", Kind: "client_ack", Meta: map[string]any{
+		"request_seq": float64(8), "request_kind": "update_relayd", "result": "old", "build": "old", "status": "failed", "error": "worktree is dirty",
+	}})
+	status, err = Status(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status[0].State != "failed" || status[0].InstalledBuild != "old" || status[0].Error != "worktree is dirty" {
+		t.Fatalf("failed effect ack=%+v", status[0])
+	}
 }

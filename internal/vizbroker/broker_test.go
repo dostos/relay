@@ -18,6 +18,17 @@ func TestValidAckAcceptsProjectionAndLifecycleSchemas(t *testing.T) {
 	if !ValidAck(project) || !ValidAck(lifecycle) {
 		t.Fatal("valid projection or lifecycle acknowledgement refused")
 	}
+	failure := map[string]any{
+		"request_seq": float64(9), "request_kind": "update_relayd",
+		"result": "old-build", "build": "old-build", "status": "failed", "error": "worktree is dirty",
+	}
+	if !ValidAck(failure) {
+		t.Fatal("typed lifecycle failure acknowledgement refused")
+	}
+	failure["error"] = ""
+	if ValidAck(failure) {
+		t.Fatal("empty lifecycle failure accepted")
+	}
 	lifecycle["session_id"] = "sess-injected"
 	if ValidAck(lifecycle) {
 		t.Fatal("lifecycle acknowledgement accepted projection-only fields")
