@@ -91,6 +91,8 @@ type Handoff struct {
 	FailureEventState  EffectState   `json:"failure_event_state,omitempty"`
 	FailureEventError  string        `json:"failure_event_error,omitempty"`
 	CleanupError       string        `json:"cleanup_error,omitempty"`
+	TerminalExitCode   *int          `json:"terminal_exit_code,omitempty"`
+	TerminalCapture    string        `json:"terminal_capture,omitempty"`
 	PendingGate        *SecurityGate `json:"pending_gate,omitempty"`
 	Goal               string        `json:"goal,omitempty"`
 	Agent              string        `json:"agent,omitempty"`

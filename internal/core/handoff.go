@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -166,6 +168,7 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 			}
 		}
 	}
+	launchCmd = withLaunchTerminalReceipt(launchCmd, hid)
 	ho.Kind, ho.Agent, ho.Command = kind, agentName, launchCmd
 	ho.Silence = silence
 	if err := h.Reg.PutHandoff(ho); err != nil {
@@ -368,6 +371,7 @@ func (h *HandoffService) failPresentation(ctx context.Context, ho *Handoff, sess
 }
 
 func (h *HandoffService) failEffect(ctx context.Context, ho *Handoff, sess *Session, cause error) error {
+	h.collectTerminalDiagnostics(ctx, ho, sess)
 	now := time.Now().UTC()
 	ho.Status = StatusFailed
 	ho.Outcome = string(OutcomeFailed)
@@ -392,6 +396,68 @@ func (h *HandoffService) failEffect(ctx context.Context, ho *Handoff, sess *Sess
 	_ = h.Reg.PutHandoff(ho)
 	h.notifyLaunchFailure(ctx, ho)
 	return cause
+}
+
+const terminalCaptureLimit = 1200
+
+var launchTerminalReceipt = regexp.MustCompile(`\[relay-launch-terminal handoff=([a-zA-Z0-9_-]+) rc=([0-9]+)\]`)
+
+// withLaunchTerminalReceipt leaves a correlated, machine-readable exit receipt
+// in the pane. The holding shell remains alive so Relay can capture the receipt
+// and the final bounded output before teardown.
+func withLaunchTerminalReceipt(command, handoffID string) string {
+	receipt := fmt.Sprintf(`printf '\n[relay-launch-terminal handoff=%s rc=%%s]\n' "$relay_launch_rc"`, handoffID)
+	// Run the payload in a child shell so even a direct job containing `exit`
+	// cannot skip the receipt emitted by its supervising shell.
+	script := "bash -lc " + shellQuote(command) + `; relay_launch_rc=$?; ` + receipt + `; exit "$relay_launch_rc"`
+	return "bash -lc " + shellQuote(script)
+}
+
+func (h *HandoffService) collectTerminalDiagnostics(ctx context.Context, ho *Handoff, sess *Session) {
+	if h == nil || ho == nil || sess == nil || h.Persist == nil || h.NewTransport == nil {
+		return
+	}
+	t, err := h.NewTransport(ho.HostID)
+	if err != nil {
+		return
+	}
+	capture, err := h.Persist.Capture(ctx, t, sess.Persist, 40)
+	if err != nil {
+		return
+	}
+	found := false
+	for _, match := range launchTerminalReceipt.FindAllStringSubmatch(capture, -1) {
+		if len(match) != 3 || match[1] != ho.ID {
+			continue
+		}
+		if code, parseErr := strconv.Atoi(match[2]); parseErr == nil {
+			ho.TerminalExitCode = &code
+			found = true
+		}
+	}
+	if !found {
+		return
+	}
+	ho.TerminalCapture = redactedTerminalCapture(capture)
+	_ = AppendLedger(map[string]any{
+		"v": 1, "type": "launch_terminal", "ts": time.Now().UTC().Format(time.RFC3339),
+		"handoff_id": ho.ID, "session_id": sess.ID, "host_id": ho.HostID,
+		"exit_code": *ho.TerminalExitCode, "capture": ho.TerminalCapture,
+	})
+}
+
+func redactedTerminalCapture(capture string) string {
+	text := strings.Join(strings.Fields(strings.TrimSpace(capture)), " ")
+	lower := strings.ToLower(text)
+	for _, marker := range []string{"password", "passwd", "token=", "secret", "authorization:", "private key", "api_key", "apikey"} {
+		if strings.Contains(lower, marker) {
+			return "sensitive terminal output redacted"
+		}
+	}
+	if len(text) > terminalCaptureLimit {
+		text = text[len(text)-terminalCaptureLimit:]
+	}
+	return text
 }
 
 func (h *HandoffService) recordFailureEvent(ctx context.Context, ho *Handoff, sess *Session) {

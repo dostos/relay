@@ -3,12 +3,90 @@ package core
 import (
 	"context"
 	"errors"
+	"os/exec"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dostos/relay/internal/ports"
 )
+
+func TestLaunchTerminalReceiptAcrossAgentCLIsAndJob(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash unavailable")
+	}
+	cases := []struct {
+		name string
+		cmd  string
+		rc   int
+	}{
+		{"cursor-agent", (&AgentSpec{Name: "cursor-agent"}).LaunchCommand("goal"), 0},
+		{"codex", (&AgentSpec{Name: "codex"}).LaunchCommand("goal"), 0},
+		{"claude", (&AgentSpec{Name: "claude"}).LaunchCommand("goal"), 0},
+		{"direct-job", "printf job-output; exit 7", 7},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wrapped := withLaunchTerminalReceipt(tc.cmd, "ho-canary")
+			if !strings.Contains(wrapped, "relay-launch-terminal handoff=ho-canary") {
+				t.Fatalf("generated command lacks terminal receipt: %s", wrapped)
+			}
+			// Provider commands are inspected structurally so this test never starts
+			// an authenticated CLI or encounters/answers one of its gates. The direct
+			// job is the disposable live shell canary.
+			if tc.name != "direct-job" {
+				return
+			}
+			out, err := exec.Command("bash", "-lc", wrapped).CombinedOutput()
+			if err == nil {
+				t.Fatal("non-zero direct job was reported successful")
+			}
+			if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != tc.rc {
+				t.Fatalf("wrapped exit = %v, want %d", err, tc.rc)
+			}
+			if !strings.Contains(string(out), "[relay-launch-terminal handoff=ho-canary rc=7]") {
+				t.Fatalf("missing correlated receipt: %q", out)
+			}
+		})
+	}
+}
+
+func TestCollectTerminalDiagnosticsBeforeCleanup(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	reg := &Registry{}
+	now := time.Now().UTC()
+	sess := &Session{ID: "sess-failed", HostID: "self", Persist: ports.PersistHandle{Kind: "tmux", Name: "failed"}, CreatedAt: now}
+	ho := &Handoff{ID: "ho-failed", SessionID: sess.ID, HostID: "self", Kind: KindAgent, Status: StatusRunning, CreatedAt: now}
+	_ = reg.PutSession(sess)
+	_ = reg.PutHandoff(ho)
+	persist := &gatePersistence{capture: "provider error\n[relay-launch-terminal handoff=ho-failed rc=23]\n$ "}
+	sessions := &SessionService{Reg: reg, Persist: persist, NewTransport: func(string) (ports.Transport, error) { return &fakeTransport{id: "self"}, nil }}
+	service := &HandoffService{Reg: reg, Persist: persist, Sessions: sessions, NewTransport: sessions.NewTransport}
+	_ = service.failDelivery(context.Background(), ho, sess, errors.New("early exit"))
+	stored, err := reg.GetHandoff(ho.ID)
+	if err != nil || stored.TerminalExitCode == nil || *stored.TerminalExitCode != 23 {
+		t.Fatalf("terminal exit diagnostic = %+v, err=%v", stored, err)
+	}
+	if !strings.Contains(stored.TerminalCapture, "provider error") || !persist.destroyed {
+		t.Fatalf("capture/cleanup ordering lost: %+v destroyed=%t", stored, persist.destroyed)
+	}
+}
+
+func TestTerminalCaptureIsBoundedAndRedacted(t *testing.T) {
+	if got := redactedTerminalCapture("Authorization: Bearer abc"); got != "sensitive terminal output redacted" {
+		t.Fatalf("credential leaked: %q", got)
+	}
+	got := redactedTerminalCapture(strings.Repeat("x", terminalCaptureLimit+50))
+	if len(got) != terminalCaptureLimit {
+		t.Fatalf("bounded capture length=%d", len(got))
+	}
+	match := launchTerminalReceipt.FindStringSubmatch("[relay-launch-terminal handoff=ho-7 rc=19]")
+	if len(match) != 3 || match[1] != "ho-7" || match[2] != strconv.Itoa(19) || !regexp.MustCompile(`^ho-`).MatchString(match[1]) {
+		t.Fatalf("receipt parse = %v", match)
+	}
+}
 
 type sensorRecordingPersistence struct {
 	renamePersistence
