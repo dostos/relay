@@ -85,6 +85,10 @@ func (b *BootstrapService) Bootstrap(ctx context.Context, hostID string) (*Boots
 		return nil, err
 	}
 	defer cleanupBuildRepo()
+	goBinary, err := bootstrapGoBinary()
+	if err != nil {
+		return nil, err
+	}
 	tmpBase := filepath.Join(os.TempDir(), fmt.Sprintf("relay-bootstrap-%s-%d", goarch, time.Now().UnixNano()))
 	tmpRelay := tmpBase + "-relay"
 	// Stamp the remote with the build of the relay doing the deploying, so
@@ -94,7 +98,7 @@ func (b *BootstrapService) Bootstrap(ctx context.Context, hostID string) (*Boots
 	// ignore it.
 	ldflags := "-X github.com/dostos/relay/internal/coord.Build=" + coord.Build
 	build := func(output, pkg string) error {
-		cmd := exec.CommandContext(ctx, "go", "build", "-ldflags", ldflags, "-o", output, pkg)
+		cmd := exec.CommandContext(ctx, goBinary, "build", "-ldflags", ldflags, "-o", output, pkg)
 		cmd.Dir = buildRepo
 		cmd.Env = append(os.Environ(),
 			"CGO_ENABLED=0",
@@ -197,6 +201,45 @@ fi
 	out.Version = "0.1.0"
 	out.Build = remoteBuild
 	return out, nil
+}
+
+// bootstrapGoBinary resolves the compiler from the trusted service account,
+// not from the invoking agent's environment. The unified systemd unit has a
+// deliberately small PATH, while user-managed Go installations commonly live
+// under ~/.local/go. Passing a caller-controlled PATH across the authenticated
+// command boundary would be both unreliable and an executable-injection risk,
+// so known absolute installations are checked explicitly.
+func bootstrapGoBinary() (string, error) {
+	var candidates []string
+	if goRoot := strings.TrimSpace(os.Getenv("GOROOT")); goRoot != "" {
+		candidates = append(candidates, filepath.Join(goRoot, "bin", "go"))
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		candidates = append(candidates,
+			filepath.Join(home, ".local", "go", "bin", "go"),
+			filepath.Join(home, "go", "bin", "go"),
+		)
+	}
+	candidates = append(candidates,
+		"/usr/local/go/bin/go",
+		"/opt/homebrew/bin/go",
+	)
+	if fromPath, err := exec.LookPath("go"); err == nil {
+		candidates = append(candidates, fromPath)
+	}
+	seen := map[string]bool{}
+	for _, candidate := range candidates {
+		candidate = filepath.Clean(candidate)
+		if seen[candidate] {
+			continue
+		}
+		seen[candidate] = true
+		info, err := os.Stat(candidate)
+		if err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("Go compiler not found in service PATH or trusted install locations")
 }
 
 func exactBuildWorktree(ctx context.Context, repo, build string) (string, func(), error) {
