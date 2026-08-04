@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1407,7 +1408,7 @@ type failingPersistence struct {
 
 func (p *failingPersistence) Send(_ context.Context, _ ports.Transport, handle ports.PersistHandle, _ string, _ bool) error {
 	p.attempts = append(p.attempts, handle.Name)
-	return errors.New("host unreachable")
+	return &ports.TargetUnavailableError{Err: errors.New("host unreachable")}
 }
 
 func failoverTree(t *testing.T, reg *Registry) (root, manager, child *Session, ho *Handoff) {
@@ -1593,7 +1594,7 @@ type selectivePersistence struct {
 
 func (p *selectivePersistence) Send(_ context.Context, _ ports.Transport, handle ports.PersistHandle, text string, _ bool) error {
 	if p.fail[handle.Name] {
-		return errors.New("host unreachable")
+		return &ports.TargetUnavailableError{Err: errors.New("host unreachable")}
 	}
 	p.sent = append(p.sent, handle.Name+"|"+text)
 	return nil
@@ -1738,6 +1739,86 @@ func TestLifecycleCommunicationMeasurement(t *testing.T) {
 		t.Fatalf("manager bytes did not shrink: before=%d after=%d", legacyBytes, currentBytes)
 	}
 	t.Logf("events=8 envelopes=8->3 wakeups=7->2 manager_bytes=%d->%d token_estimate=%d->%d retry_opportunities=7->2", legacyBytes, currentBytes, (legacyBytes+3)/4, (currentBytes+3)/4)
+}
+
+func TestConcurrentAskFramesCreateOneSemanticEnvelope(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	service.Policies = &PolicyService{Path: filepath.Join(t.TempDir(), "missing-policy.yaml")}
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "parent"}, Labels: map[string]string{"role": ParentRole}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c1", Persist: ports.PersistHandle{Kind: "tmux", Name: "child"}, SourceSessionID: parent.ID, CreatedAt: now}
+	ho := &Handoff{ID: "ho-child", SessionID: child.ID, HostID: child.HostID, Kind: KindAgent, Status: StatusRunning, SourceSessionID: parent.ID, CreatedAt: now}
+	_ = reg.PutSession(parent)
+	_ = reg.PutSession(child)
+	_ = reg.PutHandoff(ho)
+
+	const frames = 24
+	start := make(chan struct{})
+	errs := make(chan error, frames)
+	var wg sync.WaitGroup
+	for i := 1; i <= frames; i++ {
+		wg.Add(1)
+		go func(seq int64) {
+			defer wg.Done()
+			<-start
+			_, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: seq, Kind: "ask", Meta: map[string]any{"text": "choose A or B"}})
+			errs <- err
+		}(int64(i))
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	messages, err := service.ListMessages(parent.ID, false)
+	if err != nil || len(messages) != 1 || len(notifier.notices) != 1 {
+		t.Fatalf("concurrent semantic replay messages=%d notices=%d err=%v", len(messages), len(notifier.notices), err)
+	}
+}
+
+func TestApexRootSignalRoutesDurablyToHumanSurface(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	now := time.Now().UTC()
+	apex := &Session{ID: "sess-apex", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: "tmux", Name: "apex"}, Labels: map[string]string{ApexLabel: "true"}, CreatedAt: now}
+	ho := &Handoff{ID: "ho-apex", SessionID: apex.ID, HostID: apex.HostID, Kind: KindAgent, Status: StatusRunning, CreatedAt: now}
+	_ = reg.PutSession(apex)
+	_ = reg.PutHandoff(ho)
+
+	msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 708, Kind: "ask", Meta: map[string]any{"text": "repair governed edge"}})
+	if err != nil || msg == nil || msg.ParentSessionID != apex.ID || msg.DeliveredAt == nil || msg.DeliveryMethod != "human_notification_confirmed" {
+		t.Fatalf("root authority route msg=%+v err=%v", msg, err)
+	}
+	if len(notifier.notices) != 1 || len(notifier.sent) != 0 {
+		t.Fatalf("root route notifications=%d pane_sends=%d", len(notifier.notices), len(notifier.sent))
+	}
+	stored, listErr := service.ListMessages(apex.ID, false)
+	if listErr != nil || len(stored) != 1 || stored[0].EventSeq != 708 {
+		t.Fatalf("durable root receipt=%+v err=%v", stored, listErr)
+	}
+	result, resultErr := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 710, Kind: "result", Meta: map[string]any{"text": "authority repair complete"}})
+	if resultErr != nil || result == nil || result.DeliveredAt == nil || len(notifier.notices) != 2 {
+		t.Fatalf("root result route=%+v notices=%d err=%v", result, len(notifier.notices), resultErr)
+	}
+}
+
+func TestBlockedImmediateManagerIsNeverSkipped(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	service.Sessions.Persist = &capturePersistence{capture: "Do you trust the contents of this directory?\n1. Yes\n2. No"}
+	_, manager, _, ho := failoverTree(t, reg)
+
+	msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "ask", Meta: map[string]any{"text": "ordinary choice"}})
+	if err == nil || msg == nil {
+		t.Fatalf("blocked parent must leave a durable pending envelope: msg=%+v err=%v", msg, err)
+	}
+	if msg.ParentSessionID != manager.ID || msg.DeliveredAt != nil || len(notifier.notices) != 0 {
+		t.Fatalf("blocked manager was bypassed: msg=%+v human_notices=%d", msg, len(notifier.notices))
+	}
+	if msg.DeliveryAttempts != 0 {
+		t.Fatalf("readiness failure must not reserve a mutating attempt: %+v", msg)
+	}
 }
 
 func TestTelemetryDoesNotProbeOrInjectIntoAbsentManager(t *testing.T) {

@@ -83,13 +83,69 @@ func authorizeOperation(reg *Registry, actor *Session, args []string) (bool, str
 		}
 		return false, "target is outside caller lineage"
 	}
+	if args[0] == "parent" {
+		if len(args) < 2 {
+			return false, "parent subcommand required"
+		}
+		// Commands naming a manager session are confined to that manager or a
+		// governing ancestor. Message commands resolve their durable inbox owner.
+		if map[string]bool{"inbox": true, "log": true, "sweep": true, "status": true, "retire": true, "state": true, "active": true, "idle": true, "complete": true}[args[1]] {
+			if len(args) < 3 || !(actor.ID == args[2] || sessionAncestor(reg, actor.ID, args[2])) {
+				return false, "parent target is outside caller lineage"
+			}
+			return true, "manager lineage authority"
+		}
+		if map[string]bool{"reply": true, "ack": true, "redeliver": true}[args[1]] && len(args) >= 3 {
+			msg, err := (&ParentService{Reg: reg}).FindMessage(args[2])
+			if err != nil || !(actor.ID == msg.ParentSessionID || sessionAncestor(reg, actor.ID, msg.ParentSessionID)) {
+				return false, "message is outside caller lineage"
+			}
+			return true, "manager message authority"
+		}
+		if args[1] == "send" || args[1] == "watch" {
+			return true, "authenticated manager operation"
+		}
+		return false, "parent operation is outside authenticated scope"
+	}
+	if args[0] == "resolve" && len(args) >= 2 {
+		msg, err := (&ParentService{Reg: reg}).FindMessage(args[1])
+		if err != nil || !(actor.ID == msg.ParentSessionID || sessionAncestor(reg, actor.ID, msg.ParentSessionID)) {
+			return false, "message is outside caller lineage"
+		}
+		return true, "manager message authority"
+	}
+	if args[0] == "agent" && len(args) >= 2 && args[1] != "start" {
+		if len(args) < 3 {
+			return false, "agent operation requires a handoff"
+		}
+		ho, err := reg.GetHandoff(args[2])
+		if err != nil || !(actor.ID == ho.SourceSessionID || sessionAncestor(reg, actor.ID, ho.SourceSessionID)) {
+			return false, "handoff is outside caller lineage"
+		}
+		return true, "manager handoff authority"
+	}
+	if args[0] == "session" {
+		if len(args) == 2 && args[1] == "list" {
+			return true, "authenticated session discovery"
+		}
+		if len(args) == 3 && args[1] == "cleanup" {
+			target, err := reg.GetSession(args[2])
+			if err == nil && target.SourceSessionID == actor.ID {
+				return true, "immediate-child cleanup"
+			}
+		}
+		return false, "session operation is outside authenticated scope"
+	}
+	if args[0] == "resume" && len(args) == 3 && args[1] == "list" && args[2] == "--probe" {
+		return true, "authenticated session discovery"
+	}
 	// Existing agent, handoff, messaging, discovery, board and diagnostic verbs
 	// operate on identities resolved by their services. Their bridge authority
 	// derives from authenticated scope; destructive/external verbs above remain
 	// explicitly excluded.
 	allowed := map[string]bool{
-		"agent": true, "handoff": true, "parent": true, "resolve": true, "log": true,
-		"msg": true, "board": true, "session": true, "resume": true, "history": true,
+		"agent": true, "handoff": true, "log": true,
+		"msg": true, "board": true, "history": true,
 		"targets": true, "doctor": true, "events": true, "help": true, "version": true,
 	}
 	if allowed[args[0]] {

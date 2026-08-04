@@ -111,9 +111,9 @@ func (s *SupervisorService) Unwatched() ([]*Handoff, error) {
 	return out, nil
 }
 
-// NeedsWatch lists non-terminal handoffs that have a parent to escalate to.
-// A handoff with no SourceSessionID has nowhere to route, and a terminal one
-// is done — neither needs watching.
+// NeedsWatch lists non-terminal handoffs that have a boundary destination.
+// Ordinary children need a parent; an intentional apex root needs its watcher
+// too because its own asks/results route to the bound human authority surface.
 func (s *SupervisorService) NeedsWatch() ([]*Handoff, error) {
 	all, err := s.Reg.ListHandoffs()
 	if err != nil {
@@ -125,8 +125,14 @@ func (s *SupervisorService) NeedsWatch() ([]*Handoff, error) {
 			continue
 		}
 		effective, err := effectiveLiveHandoff(s.Reg, ho)
-		if err != nil || effective.SourceSessionID == "" {
+		if err != nil {
 			continue
+		}
+		if effective.SourceSessionID == "" {
+			sess, getErr := s.Reg.GetSession(effective.SessionID)
+			if getErr != nil || sess.Labels[ApexLabel] != "true" {
+				continue
+			}
 		}
 		out = append(out, effective)
 	}
@@ -176,7 +182,11 @@ func (s *SupervisorService) Reconcile(ctx context.Context) (int, error) {
 	// tick guarantees recovery even when no new child event arrives.
 	parents := map[string]struct{}{}
 	for _, ho := range pending {
-		parents[ho.SourceSessionID] = struct{}{}
+		parentID := ho.SourceSessionID
+		if parentID == "" {
+			parentID = ho.SessionID
+		}
+		parents[parentID] = struct{}{}
 	}
 	for parentID := range parents {
 		if _, deliveryErr := s.Parents.DeliverPending(ctx, parentID); deliveryErr != nil {

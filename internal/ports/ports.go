@@ -68,6 +68,14 @@ type DeliveryUncertainError struct{ Err error }
 func (e *DeliveryUncertainError) Error() string { return e.Err.Error() }
 func (e *DeliveryUncertainError) Unwrap() error { return e.Err }
 
+// TargetUnavailableError means the adapter conclusively found that the target
+// cannot receive input (for example, its pane or remote host is gone). Only
+// this pre-mutation outcome may authorize hierarchy failover.
+type TargetUnavailableError struct{ Err error }
+
+func (e *TargetUnavailableError) Error() string { return e.Err.Error() }
+func (e *TargetUnavailableError) Unwrap() error { return e.Err }
+
 // HoldingShellLauncher is the narrow capability used to leave Relay's
 // freshly-created holding shell. Its acknowledgement proves only that the
 // shell evaluated the launch line; interactive message delivery is separate.

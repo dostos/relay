@@ -30,7 +30,7 @@ func putSupervisedHandoff(t *testing.T, reg *Registry, id, status string, source
 	}
 }
 
-func TestNeedsWatchSelectsOnlyLiveHandoffsWithAParent(t *testing.T) {
+func TestNeedsWatchSelectsLiveChildrenAndApexRoot(t *testing.T) {
 	sup, reg := newSupervisorFixture(t)
 	putSupervisedHandoff(t, reg, "ho-live", "running", "sess-manager")
 	putSupervisedHandoff(t, reg, "ho-needs-input", "needs_input", "sess-manager")
@@ -39,6 +39,12 @@ func TestNeedsWatchSelectsOnlyLiveHandoffsWithAParent(t *testing.T) {
 	putSupervisedHandoff(t, reg, "ho-abandoned", "abandoned", "sess-manager")
 	// No parent to escalate to: nowhere to route, so nothing to watch.
 	putSupervisedHandoff(t, reg, "ho-orphan", "running", "")
+	apexSession, _ := reg.GetSession("sess-child-ho-orphan")
+	apexSession.Labels = map[string]string{ApexLabel: "true"}
+	if err := reg.PutSession(apexSession); err != nil {
+		t.Fatal(err)
+	}
+	putSupervisedHandoff(t, reg, "ho-unmanaged-root", "running", "")
 
 	got, err := sup.NeedsWatch()
 	if err != nil {
@@ -48,8 +54,8 @@ func TestNeedsWatchSelectsOnlyLiveHandoffsWithAParent(t *testing.T) {
 	for _, ho := range got {
 		ids[ho.ID] = true
 	}
-	if len(ids) != 2 || !ids["ho-live"] || !ids["ho-needs-input"] {
-		t.Fatalf("want the two live parented handoffs, got %v", ids)
+	if len(ids) != 3 || !ids["ho-live"] || !ids["ho-needs-input"] || !ids["ho-orphan"] || ids["ho-unmanaged-root"] {
+		t.Fatalf("want two parented handoffs and the apex root, got %v", ids)
 	}
 }
 
