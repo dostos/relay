@@ -133,6 +133,55 @@ func TestStallIsNotReAnnouncedEveryTick(t *testing.T) {
 	}
 }
 
+func TestFailedStallNoticeIsBackedOffDurably(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	_, manager, _, ho := failoverTree(t, reg)
+	if err := reg.PutHandoff(ho); err != nil {
+		t.Fatal(err)
+	}
+	msg := agedMessage(t, "pm-failed-stall", manager.ID, ho.ID, 40*time.Minute, ParentMessagePending, "ask")
+	notifier.notifyFail = true
+
+	for i := 0; i < 5; i++ {
+		n, err := service.ReportStaleEscalations(context.Background(), 15*time.Minute)
+		if n != 0 {
+			t.Fatalf("tick %d reported=%d", i, n)
+		}
+		if i == 0 && err == nil {
+			t.Fatal("initial failed notification returned nil")
+		}
+		if i > 0 && err != nil {
+			t.Fatalf("backed-off tick %d returned %v", i, err)
+		}
+	}
+	stored, err := service.FindMessage(msg.ID)
+	if err != nil || stored.StallAttemptedAt == nil || stored.StallReportedAt != nil || notifier.sendAttempts != 1 {
+		t.Fatalf("stored=%+v send_attempts=%d err=%v", stored, notifier.sendAttempts, err)
+	}
+}
+
+func TestStallClaimReloadsDurableAttempt(t *testing.T) {
+	service, _, reg := newParentTestService(t)
+	_, manager, _, ho := failoverTree(t, reg)
+	if err := reg.PutHandoff(ho); err != nil {
+		t.Fatal(err)
+	}
+	msg := agedMessage(t, "pm-racing-stall", manager.ID, ho.ID, 40*time.Minute, ParentMessagePending, "ask")
+	staleCopy, err := service.FindMessage(msg.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	claimed, err := claimStallReport(msg, 40*time.Minute, 15*time.Minute, now)
+	if err != nil || !claimed {
+		t.Fatalf("first claim=%v err=%v", claimed, err)
+	}
+	claimed, err = claimStallReport(staleCopy, 40*time.Minute, 15*time.Minute, now)
+	if err != nil || claimed {
+		t.Fatalf("stale concurrent claim=%v err=%v", claimed, err)
+	}
+}
+
 // It must still get louder as it ages, so a long stall is not forgotten.
 func TestStallIsReAnnouncedOnceItHasAgedFurther(t *testing.T) {
 	now := time.Now().UTC()
@@ -162,7 +211,7 @@ func TestRedeliveryDoesNotResetTheStallClock(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	asked := now.Add(-3 * time.Hour)      // the child asked 3h ago
+	asked := now.Add(-3 * time.Hour)         // the child asked 3h ago
 	redelivered := now.Add(-2 * time.Minute) // but it was re-handed 2m ago
 	msg := &ParentMessage{
 		V: 1, ID: "pm-redelivered", ParentSessionID: manager.ID,

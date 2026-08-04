@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"time"
@@ -96,6 +98,7 @@ func (p *ParentService) ReportStaleEscalations(ctx context.Context, maxHold time
 		return 0, err
 	}
 	reported := 0
+	var reportErrs []error
 	for _, item := range stale {
 		msg := item.Message
 		holder, err := p.Reg.GetSession(msg.ParentSessionID)
@@ -117,17 +120,79 @@ func (p *ParentService) ReportStaleEscalations(ctx context.Context, maxHold time
 				"); it still owns the decision",
 			Action: "inspect",
 		}
-		if !stallDue(msg, item.HeldFor, maxHold, time.Now().UTC()) {
+		claimed, claimErr := claimStallReport(msg, item.HeldFor, maxHold, time.Now().UTC())
+		if claimErr != nil {
+			reportErrs = append(reportErrs, fmt.Errorf("claim stalled notice %s: %w", msg.ID, claimErr))
 			continue
 		}
-		if p.notifyStalled(ctx, manager, notice) == nil {
-			now := time.Now().UTC()
-			msg.StallReportedAt = &now
-			_ = writeParentMessage(msg, false)
-			reported++
+		if !claimed {
+			continue
 		}
+		if notifyErr := p.notifyStalled(ctx, manager, notice); notifyErr != nil {
+			// Keep StallAttemptedAt. A failed notification is retryable, but not
+			// on every supervisor tick; the durable attempt owns the same bounded
+			// schedule as a confirmed reminder.
+			reportErrs = append(reportErrs, fmt.Errorf("deliver stalled notice %s: %w", msg.ID, notifyErr))
+			continue
+		}
+		if confirmErr := confirmStallReport(msg, time.Now().UTC()); confirmErr != nil {
+			// The pre-send claim remains durable, so a successful visible effect
+			// cannot burst merely because confirmation persistence failed.
+			reportErrs = append(reportErrs, fmt.Errorf("confirm stalled notice %s: %w", msg.ID, confirmErr))
+			continue
+		}
+		reported++
 	}
-	return reported, nil
+	return reported, errors.Join(reportErrs...)
+}
+
+// claimStallReport reserves one visible reminder before mutating a manager's
+// composer. It reloads under the authority lock so concurrent supervisor calls
+// cannot both act on the same stale in-memory envelope.
+func claimStallReport(msg *ParentMessage, heldFor, maxHold time.Duration, now time.Time) (bool, error) {
+	if err := EnsureAuthorityWritable(); err != nil {
+		return false, err
+	}
+	unlock, err := lockAuthorityWrite()
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+	stored, err := readParentMessage(parentMessagePath(msg.ParentSessionID, msg.ID))
+	if err != nil {
+		return false, err
+	}
+	if stored.State != ParentMessagePending || !attentionMessage(stored.Kind) || stored.DeliveredAt == nil || !stallDue(stored, heldFor, maxHold, now) {
+		*msg = *stored
+		return false, nil
+	}
+	stored.StallAttemptedAt = &now
+	if err := writeParentMessageLocked(stored, false); err != nil {
+		return false, err
+	}
+	*msg = *stored
+	return true, nil
+}
+
+func confirmStallReport(msg *ParentMessage, now time.Time) error {
+	if err := EnsureAuthorityWritable(); err != nil {
+		return err
+	}
+	unlock, err := lockAuthorityWrite()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	stored, err := readParentMessage(parentMessagePath(msg.ParentSessionID, msg.ID))
+	if err != nil {
+		return err
+	}
+	stored.StallReportedAt = &now
+	if err := writeParentMessageLocked(stored, false); err != nil {
+		return err
+	}
+	*msg = *stored
+	return nil
 }
 
 func (p *ParentService) notifyStalled(ctx context.Context, manager *Session, notice ParentNotice) error {
@@ -153,10 +218,14 @@ func (p *ParentService) notifyStalled(ctx context.Context, manager *Session, not
 // the threshold, then at 2x, 4x, 8x the wait. A stall stays visible, and gets
 // louder the longer it lasts, without ever repeating itself minute to minute.
 func stallDue(msg *ParentMessage, heldFor, maxHold time.Duration, now time.Time) bool {
-	if msg.StallReportedAt == nil {
+	last := msg.StallAttemptedAt
+	if msg.StallReportedAt != nil && (last == nil || msg.StallReportedAt.After(*last)) {
+		last = msg.StallReportedAt
+	}
+	if last == nil {
 		return true
 	}
-	sinceReport := now.Sub(*msg.StallReportedAt)
+	sinceReport := now.Sub(*last)
 	// Next report is due one full "held so far" later, i.e. geometric.
 	next := heldFor / 2
 	if next < maxHold {

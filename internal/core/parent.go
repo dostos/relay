@@ -66,6 +66,7 @@ type ParentMessage struct {
 	ResolvedBySessionID     string   `json:"resolved_by_session_id,omitempty"`
 	// StallReportedAt records when this envelope's holder-manager was last told
 	// it was stuck, so a standing stall is not re-announced every tick.
+	StallAttemptedAt   *time.Time         `json:"stall_attempted_at,omitempty"`
 	StallReportedAt    *time.Time         `json:"stall_reported_at,omitempty"`
 	HandoffID          string             `json:"handoff_id"`
 	EventSeq           int64              `json:"event_seq"`
