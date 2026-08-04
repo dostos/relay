@@ -271,6 +271,7 @@ func TestManagedFailurePersistsParentEnvelopeAndDirectResponseOnce(t *testing.T)
 		t.Fatalf("notice state=%+v err=%v", stored, getErr)
 	}
 	notifier.notifyFail = false
+	ageDeliveryRetry(t, messages[0])
 	if delivered, deliverErr := parentService.DeliverPending(context.Background(), parent.ID); deliverErr != nil || delivered != 1 {
 		messages, _ = parentService.ListMessages(parent.ID, false)
 		t.Fatalf("reconnect delivery=%d err=%v message=%+v", delivered, deliverErr, *messages[0])

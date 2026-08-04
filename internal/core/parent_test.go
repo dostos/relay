@@ -23,6 +23,7 @@ type fakeParentNotifier struct {
 	sent         []string
 	sendAttempts int
 	notifyFail   bool
+	failNotices  map[string]bool
 	uncertain    bool
 	started      chan struct{}
 	release      chan struct{}
@@ -90,7 +91,7 @@ func (f *fakeParentNotifier) BindLocalParent(_ context.Context, sessionID, surfa
 }
 func (f *fakeParentNotifier) NotifyParent(_ context.Context, _ string, notice ParentNotice) error {
 	f.notices = append(f.notices, notice)
-	if f.notifyFail {
+	if f.notifyFail || f.failNotices[notice.MessageID] {
 		return errors.New("parent disconnected")
 	}
 	return nil
@@ -496,6 +497,9 @@ func TestDisconnectedParentReplayDoesNotRetryDurableAttentionEnvelope(t *testing
 	if notifier.sendAttempts != 1 {
 		t.Fatalf("duplicate child frames caused %d delivery attempts, want initial attempt only", notifier.sendAttempts)
 	}
+	// Automatic delivery owns a durable retry schedule; age the failed attempt
+	// instead of depending on a timing sleep.
+	ageDeliveryRetry(t, first)
 	if delivered, err := service.DeliverPending(context.Background(), parent.ID); err != nil || delivered != 1 {
 		t.Fatalf("durable retry delivered=%d err=%v", delivered, err)
 	}
@@ -504,6 +508,89 @@ func TestDisconnectedParentReplayDoesNotRetryDurableAttentionEnvelope(t *testing
 		t.Fatalf("messages=%+v notices=%d err=%v", messages, len(notifier.notices), err)
 	}
 	t.Logf("five_child_frames_delivery_attempts=5->2")
+}
+
+func timePointer(value time.Time) *time.Time { return &value }
+
+func ageDeliveryRetry(t *testing.T, msg *ParentMessage) {
+	t.Helper()
+	msg.LastAttemptAt = timePointer(time.Now().Add(-deliveryRetryCap))
+	if err := writeParentMessage(msg, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAutomaticDeliveryBackoffIsDurableAndCapped(t *testing.T) {
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		attempts int
+		age      time.Duration
+		due      bool
+	}{
+		{attempts: 1, age: 4 * time.Second, due: false},
+		{attempts: 1, age: 5 * time.Second, due: true},
+		{attempts: 2, age: 9 * time.Second, due: false},
+		{attempts: 2, age: 10 * time.Second, due: true},
+		{attempts: 15_464, age: 14 * time.Minute, due: false},
+		{attempts: 15_464, age: 15 * time.Minute, due: true},
+	} {
+		msg := &ParentMessage{DeliveryAttempts: tc.attempts, LastAttemptAt: timePointer(now.Add(-tc.age)), LastAttemptOutcome: "retryable"}
+		if got := deliveryRetryDue(msg, now); got != tc.due {
+			t.Fatalf("attempts=%d age=%s due=%v want=%v", tc.attempts, tc.age, got, tc.due)
+		}
+	}
+}
+
+func TestDeliverPendingDoesNotBurstUnchangedApexFailure(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	now := time.Now().UTC()
+	apex := &Session{ID: "sess-apex", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: "tmux", Name: "apex"}, Labels: map[string]string{ApexLabel: "true"}, CreatedAt: now}
+	ho := &Handoff{ID: "ho-apex", SessionID: apex.ID, HostID: apex.HostID, Kind: KindAgent, Status: StatusRunning, CreatedAt: now}
+	_ = reg.PutSession(apex)
+	_ = reg.PutHandoff(ho)
+	notifier.notifyFail = true
+
+	msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 2, Kind: "result", Meta: map[string]any{"text": "unchanged stuck result"}})
+	if err == nil || msg == nil || msg.DeliveryAttempts != 1 || len(notifier.notices) != 1 {
+		t.Fatalf("initial failure msg=%+v attempts=%d err=%v", msg, len(notifier.notices), err)
+	}
+	for i := 0; i < 100; i++ {
+		if delivered, retryErr := service.DeliverPending(context.Background(), apex.ID); retryErr != nil || delivered != 0 {
+			t.Fatalf("backoff retry %d delivered=%d err=%v", i, delivered, retryErr)
+		}
+	}
+	stored, err := service.FindMessage(msg.ID)
+	if err != nil || stored.DeliveryAttempts != 1 || len(notifier.notices) != 1 {
+		t.Fatalf("unchanged failure burst: msg=%+v attempts=%d err=%v", stored, len(notifier.notices), err)
+	}
+}
+
+func TestFailedEnvelopeDoesNotBlockDueSibling(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	now := time.Now().UTC()
+	apex := &Session{ID: "sess-apex", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: "tmux", Name: "apex"}, Labels: map[string]string{ApexLabel: "true"}, CreatedAt: now}
+	_ = reg.PutSession(apex)
+	for _, handoffID := range []string{"ho-stuck", "ho-ready"} {
+		_ = reg.PutHandoff(&Handoff{ID: handoffID, SessionID: apex.ID, HostID: apex.HostID, Kind: KindAgent, Status: StatusRunning, CreatedAt: now})
+	}
+	stuck := &ParentMessage{V: 1, ID: "pm-stuck", CorrelationID: "stuck", ParentSessionID: apex.ID, ChildSessionID: apex.ID, HandoffID: "ho-stuck", EventSeq: 1, Kind: "result", Text: "stuck", State: ParentMessagePending, CreatedAt: now}
+	ready := &ParentMessage{V: 1, ID: "pm-ready", CorrelationID: "ready", ParentSessionID: apex.ID, ChildSessionID: apex.ID, HandoffID: "ho-ready", EventSeq: 2, Kind: "result", Text: "ready", State: ParentMessagePending, CreatedAt: now.Add(time.Second)}
+	if err := writeParentMessage(stuck, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeParentMessage(ready, true); err != nil {
+		t.Fatal(err)
+	}
+	notifier.failNotices = map[string]bool{stuck.ID: true}
+
+	delivered, err := service.DeliverPending(context.Background(), apex.ID)
+	if delivered != 1 || err == nil || !strings.Contains(err.Error(), stuck.ID) {
+		t.Fatalf("delivered=%d err=%v", delivered, err)
+	}
+	storedReady, findErr := service.FindMessage(ready.ID)
+	if findErr != nil || storedReady.DeliveredAt == nil || len(notifier.notices) != 2 {
+		t.Fatalf("ready=%+v notices=%d err=%v", storedReady, len(notifier.notices), findErr)
+	}
 }
 
 func TestUncertainSubmissionIsNotRetypedAcrossSupervisorRetries(t *testing.T) {

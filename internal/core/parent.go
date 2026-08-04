@@ -34,6 +34,15 @@ const ParentTextLimit = 600
 // so without this a dead SSH host would stall the whole ancestor walk.
 const deliveryAttemptTimeout = 5 * time.Second
 
+// A failed, definitely-unapplied delivery is safe to retry, but not on every
+// supervisor tick. The schedule is derived from durable attempt metadata so a
+// service restart cannot reset it into a burst. Explicit redelivery bypasses
+// this scheduler; automatic reminders converge to at most one per 15 minutes.
+const (
+	deliveryRetryBase = 5 * time.Second
+	deliveryRetryCap  = 15 * time.Minute
+)
+
 type ParentMessageState string
 
 const (
@@ -102,6 +111,21 @@ func deliveryUnavailable(err error) bool {
 
 func deliveryInDoubt(msg *ParentMessage) bool {
 	return msg != nil && (msg.DeliveryMethod == deliveryAttempting || msg.DeliveryMethod == deliveryUncertain)
+}
+
+func deliveryRetryDue(msg *ParentMessage, now time.Time) bool {
+	if msg == nil || msg.LastAttemptAt == nil || msg.LastAttemptOutcome != "retryable" || msg.DeliveryAttempts <= 0 {
+		return true
+	}
+	shift := msg.DeliveryAttempts - 1
+	if shift > 8 {
+		shift = 8
+	}
+	delay := deliveryRetryBase * time.Duration(1<<uint(shift))
+	if delay > deliveryRetryCap {
+		delay = deliveryRetryCap
+	}
+	return !now.Before(msg.LastAttemptAt.Add(delay))
 }
 
 // ParentInboxItem is the turn-level projection of a durable parent message.
@@ -1114,8 +1138,10 @@ func (p *ParentService) DeliverPending(ctx context.Context, parentID string) (in
 		return 0, err
 	}
 	delivered := 0
+	var deliveryErrs []error
+	now := time.Now().UTC()
 	for _, msg := range messages {
-		if msg.DeliveredAt != nil || deliveryInDoubt(msg) {
+		if msg.DeliveredAt != nil || deliveryInDoubt(msg) || !deliveryRetryDue(msg, now) {
 			continue
 		}
 		ho, getErr := p.Reg.GetHandoff(msg.HandoffID)
@@ -1124,7 +1150,11 @@ func (p *ParentService) DeliverPending(ctx context.Context, parentID string) (in
 			continue
 		}
 		if err := p.deliverMessage(ctx, parent, ho, msg); err != nil {
-			return delivered, err
+			// One stuck envelope must not head-of-line block unrelated due
+			// messages for the same manager. Each failure carries its own durable
+			// retry schedule, while the caller still receives an honest aggregate.
+			deliveryErrs = append(deliveryErrs, fmt.Errorf("%s: %w", msg.ID, err))
+			continue
 		}
 		if launchFailure {
 			ho.FailureNoticeState, ho.FailureNoticeError = EffectAcknowledged, ""
@@ -1132,7 +1162,7 @@ func (p *ParentService) DeliverPending(ctx context.Context, parentID string) (in
 		}
 		delivered++
 	}
-	return delivered, nil
+	return delivered, errors.Join(deliveryErrs...)
 }
 
 // UncertainDeliveries returns post-reservation effects that cannot be retried

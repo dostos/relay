@@ -121,6 +121,7 @@ func TestReconcileRedeliversPendingEnvelopeWithoutNewChildEvent(t *testing.T) {
 		t.Fatalf("failed initial delivery = %+v err=%v", msg, err)
 	}
 	notifier.notifyFail = false
+	ageDeliveryRetry(t, msg)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sup := &SupervisorService{Reg: reg, Parents: service}
