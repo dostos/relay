@@ -2741,6 +2741,16 @@ func (a *App) cmdSignal(ctx context.Context, mode string, args []string) int {
 	}
 	session := strings.TrimSpace(os.Getenv("RELAY_SESSION_NAME"))
 	if session == "" {
+		// Some MCP hosts intentionally filter child-process environments. A
+		// managed Relay pane still has an owner-only durable bridge identity, so
+		// recover the persistence name from that authenticated local context
+		// instead of making provider-specific environment inheritance a
+		// correctness requirement.
+		if identity, err := core.LoadBridgeIdentityForCurrentPane(); err == nil {
+			session = strings.TrimSpace(identity.PersistName)
+		}
+	}
+	if session == "" {
 		return a.fail(fmt.Errorf("RELAY_SESSION_NAME is not set"))
 	}
 	if text != "" {

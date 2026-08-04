@@ -74,7 +74,7 @@ func TestAgentLaunchCCS(t *testing.T) {
 
 func TestAgentLaunchHooksAreGeneralAndProviderAware(t *testing.T) {
 	codex := (&AgentSpec{Name: "codex"}).LaunchCommand("goal")
-	for _, want := range []string{"PermissionRequest", "relay hook --kind result", "relay\" signal exit", "--dangerously-bypass-approvals-and-sandbox", "mcp_servers.relay.command", "goal"} {
+	for _, want := range []string{"PermissionRequest", "relay hook --kind result", "relay\" signal exit", "--dangerously-bypass-approvals-and-sandbox", "mcp_servers.relay.command", "mcp_servers.relay.env_vars", "RELAY_SESSION_NAME", "TMUX_PANE", "goal"} {
 		if !strings.Contains(codex, want) {
 			t.Fatalf("codex command missing %q: %s", want, codex)
 		}

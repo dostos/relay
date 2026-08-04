@@ -272,7 +272,12 @@ func withAgentRelayMCP(a AgentSpec, inner string) string {
 	case base == "codex" || a.Name == "codex":
 		commandCfg := `mcp_servers.relay.command="relay"`
 		argsCfg := `mcp_servers.relay.args=["mcp","serve"]`
-		return inner + " -c " + shellQuote(commandCfg) + " -c " + shellQuote(argsCfg)
+		// Codex deliberately filters the environment of stdio MCP servers.
+		// Whitelist only Relay's managed-session identity and tmux recovery
+		// handle; without this the tool can read global protocol but cannot emit
+		// an event for the handoff that invoked it.
+		envCfg := `mcp_servers.relay.env_vars=["RELAY_SESSION_ID","RELAY_SESSION_HOST","RELAY_SESSION_NAME","RELAY_BRIDGE_SOCK","RELAY_SOURCE_TOKEN","TMUX_PANE"]`
+		return inner + " -c " + shellQuote(commandCfg) + " -c " + shellQuote(argsCfg) + " -c " + shellQuote(envCfg)
 	case base == "claude" || a.Name == "claude":
 		config := map[string]any{"mcpServers": map[string]any{"relay": map[string]any{"type": "stdio", "command": "relay", "args": []string{"mcp", "serve"}}}}
 		raw, _ := json.Marshal(config)
