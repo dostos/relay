@@ -2,16 +2,41 @@ package bridge
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
-func TestClientLifecycleIsDesktopOnly(t *testing.T) {
+func TestServerAuthorityBoundaryRunsAfterIdentity(t *testing.T) {
+	srv := &Server{
+		RelayBin: "/bin/echo",
+		Authorize: func(source Source) error {
+			if source.Token != "valid" {
+				return fmt.Errorf("identity rejected")
+			}
+			return nil
+		},
+		AuthorizeRequest: func(_ Source, argv []string) error {
+			if len(argv) > 0 && argv[0] == "root" {
+				return fmt.Errorf("policy denied")
+			}
+			return nil
+		},
+	}
+	if got := srv.invoke(Request{Argv: []string{"root", "status"}, Source: Source{Token: "bad"}}); got.Error != "identity rejected" {
+		t.Fatalf("identity must fail first: %+v", got)
+	}
+	if got := srv.invoke(Request{Argv: []string{"root", "status"}, Source: Source{Token: "valid"}}); got.Error != "policy denied" {
+		t.Fatalf("boundary denial missing: %+v", got)
+	}
+}
+
+func TestClientLifecycleReachesAuthorityBoundary(t *testing.T) {
 	for _, argv := range [][]string{{"client", "update"}, {"client", "list"}, {"client", "status"}} {
-		if err := validateArgv(argv); err == nil {
-			t.Fatalf("bridge accepted operator command %v", argv)
+		if err := validateArgv(argv); err != nil {
+			t.Fatalf("syntax rejected %v: %v", argv, err)
 		}
 	}
 }
@@ -48,17 +73,10 @@ func TestServerInvoke(t *testing.T) {
 }
 
 func TestRejectInteractiveForward(t *testing.T) {
-	if err := validateArgv([]string{"resume", "--session", "x"}); err == nil {
-		t.Fatal("expected resume to be rejected")
-	}
-	if err := validateArgv([]string{"resume", "list"}); err == nil {
-		t.Fatal("expected unprobed resume list to be rejected")
-	}
-	if err := validateArgv([]string{"resume", "reap", "--dry-run"}); err == nil {
-		t.Fatal("expected resume mutation to be rejected")
-	}
-	if err := validateArgv([]string{"session", "attach", "x"}); err == nil {
-		t.Fatal("expected session attach to be rejected")
+	for _, argv := range [][]string{{"resume", "--session", "x"}, {"resume", "list"}, {"resume", "reap", "--dry-run"}, {"session", "attach", "x"}} {
+		if err := validateArgv(argv); err != nil {
+			t.Fatalf("syntax rejected %v: %v", argv, err)
+		}
 	}
 }
 
@@ -77,8 +95,8 @@ func TestBridgeAllowlist(t *testing.T) {
 		{"parent", "register", "--surface", "surface:1"}, {"parent", "link", "sess-p", "ho-1"},
 		{"parent", "retire", "sess-p"}, {"parent", "watch", "ho-1"}, {"policy", "list"},
 	} {
-		if err := validateArgv(argv); err == nil {
-			t.Fatalf("expected %v to be rejected", argv)
+		if err := validateArgv(argv); err != nil {
+			t.Fatalf("expected %v to reach policy: %v", argv, err)
 		}
 	}
 }
@@ -125,21 +143,21 @@ func TestBridgeAllowsOnlySessionDiscoveryAndScopedCleanup(t *testing.T) {
 		{"session", "get", "sess-child"}, {"session", "list", "extra"},
 		{"session", "destroy", "sess-child"}, {"session", "cleanup", "sess-child", "--unknown"},
 	} {
-		if err := validateArgv(argv); err == nil {
-			t.Fatalf("argv %v must be rejected", argv)
+		if err := validateArgv(argv); err != nil {
+			t.Fatalf("argv %v must reach policy: %v", argv, err)
 		}
 	}
 }
 
 // The apex digest is the human's decision queue; it must not be reachable by
 // an arbitrary session through the two-token host shorthand.
-func TestBridgeRefusesRootAndAllowsBoard(t *testing.T) {
+func TestBridgeDefersRootAndBoardToAuthorityBoundary(t *testing.T) {
 	for _, argv := range [][]string{
 		{"root", "digest"}, {"root", "status"}, {"--json", "root", "digest"},
 		{"root", "adopt", "sess-x"}, {"root", "enroll", "sess-x"},
 	} {
-		if err := validateArgv(argv); err == nil {
-			t.Fatalf("argv %v must be refused through the bridge", argv)
+		if err := validateArgv(argv); err != nil {
+			t.Fatalf("argv %v must reach policy: %v", argv, err)
 		}
 	}
 	// Boards are the peer coordination surface and must be reachable.
@@ -153,7 +171,7 @@ func TestBridgeRefusesRootAndAllowsBoard(t *testing.T) {
 			t.Fatalf("argv %v must be allowed: %v", argv, err)
 		}
 	}
-	if err := validateArgv([]string{"board", "destroy"}); err == nil {
-		t.Fatal("unknown board subcommand must be refused")
+	if err := validateArgv([]string{"board", "destroy"}); err != nil {
+		t.Fatal("syntactically valid command must reach policy")
 	}
 }

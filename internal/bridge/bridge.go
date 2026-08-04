@@ -123,12 +123,13 @@ func (c Client) call(ctx context.Context, req Request) (*Response, error) {
 // relay binary directly (never a shell), and invocations are serialized so
 // registry writes from separate handoffs cannot overwrite one another.
 type Server struct {
-	SockPath  string
-	RelayBin  string
-	Build     string
-	Authorize func(Source) error
-	ln        net.Listener
-	invokeMu  sync.Mutex
+	SockPath         string
+	RelayBin         string
+	Build            string
+	Authorize        func(Source) error
+	AuthorizeRequest func(Source, []string) error
+	ln               net.Listener
+	invokeMu         sync.Mutex
 }
 
 func (s *Server) Serve() error {
@@ -198,6 +199,11 @@ func (s *Server) invoke(req Request) Response {
 	}
 	if s.Authorize != nil {
 		if err := s.Authorize(req.Source); err != nil {
+			return Response{OK: false, ExitCode: 1, Error: err.Error()}
+		}
+	}
+	if s.AuthorizeRequest != nil {
+		if err := s.AuthorizeRequest(req.Source, req.Argv); err != nil {
 			return Response{OK: false, ExitCode: 1, Error: err.Error()}
 		}
 	}
@@ -303,71 +309,11 @@ func validateArgv(argv []string) error {
 	if len(filtered) == 0 {
 		return fmt.Errorf("empty relay command")
 	}
-	// Remote panes may create named sessions, operate handoffs, or inspect
-	// lineage. Host bootstrap/auth and raw session mutation remain desktop-only.
-	reserved := map[string]bool{
-		"host": true, "auth": true, "targets": true, "session": true, "sess": true,
-		"handoff": true, "agent": true, "parent": true, "policy": true, "msg": true, "gc": true, "events": true,
-		"viz": true, "pane": true, "resume": true, "doctor": true, "history": true,
-		"help": true, "version": true, "install-cmux-restore": true,
-		"resolve": true, "log": true,
-		"client": true,
-		// board and root are reserved so the two-token host shorthand below
-		// cannot admit them unchecked. board is re-allowed per subcommand;
-		// root stays desktop-only because the apex lifecycle is an operator
-		// action and its digest is the human's decision queue.
-		"board": true, "root": true,
-	}
-	if len(filtered) == 2 && !reserved[filtered[0]] && !strings.HasPrefix(filtered[0], "-") && !strings.HasPrefix(filtered[1], "-") {
-		return nil
-	}
-	switch filtered[0] {
-	case "session":
-		// Active-session discovery is the authoritative source used by agents
-		// for hierarchy and resume decisions. It is read-only and already less
-		// revealing than the allowed handoff list; refusing it forced callers
-		// back to stale pane-local caches.
-		if len(filtered) == 2 && filtered[1] == "list" {
-			return nil
-		}
-		if len(filtered) == 3 && filtered[1] == "cleanup" && !strings.HasPrefix(filtered[2], "-") {
-			return nil
-		}
-		return fmt.Errorf("only relay session list or session cleanup ID is allowed through the desktop bridge")
-	case "resume":
-		// Session discovery must use the host probe, not the optimistic local
-		// registry. Keep interactive resume and registry mutation desktop-only.
-		if len(filtered) == 3 && filtered[1] == "list" && filtered[2] == "--probe" {
-			return nil
-		}
-		return fmt.Errorf("only relay resume list --probe is allowed through the desktop bridge")
-	case "parent":
-		if len(filtered) < 2 {
-			return fmt.Errorf("parent subcommand required")
-		}
-		// Remote children may inspect/respond to the durable goal channel, but
-		// cannot register, relink, retire, or otherwise mutate local panes.
-		allowed := map[string]bool{"inbox": true, "reply": true, "ack": true, "status": true, "send": true}
-		if !allowed[filtered[1]] {
-			return fmt.Errorf("relay parent %q is not allowed through the desktop bridge", filtered[1])
-		}
-		return nil
-	case "board":
-		if len(filtered) < 2 {
-			return fmt.Errorf("board subcommand required")
-		}
-		// Peers coordinate through the board; the caller's identity is taken
-		// from the authenticated envelope, so these are safe to forward.
-		allowed := map[string]bool{"post": true, "query": true, "watch": true}
-		if !allowed[filtered[1]] {
-			return fmt.Errorf("relay board %q is not allowed through the desktop bridge", filtered[1])
-		}
-		return nil
-	case "agent", "handoff", "history", "help", "version", "targets", "resolve", "log", "doctor":
-		return nil
-	default:
-		return fmt.Errorf("relay command %q is not allowed through the desktop bridge", filtered[0])
-	}
+	// Command authority is evaluated once by Server.AuthorizeRequest after
+	// bridge identity authentication. This function is deliberately syntax
+	// only; duplicating semantic allowlists here caused authenticated apex and
+	// manager repair operations to be rejected before lineage policy ran.
+	return nil
 }
 
 func writeResponse(conn net.Conn, resp Response) {

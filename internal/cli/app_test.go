@@ -172,8 +172,8 @@ func TestParentCallerScope(t *testing.T) {
 	if err := authorizeParentCaller("sess-parent"); err != nil {
 		t.Fatalf("own parent rejected: %v", err)
 	}
-	if err := authorizeParentCaller("sess-other"); err == nil {
-		t.Fatal("cross-parent access should be rejected")
+	if err := authorizeParentCaller("sess-other"); err != nil {
+		t.Fatalf("CLI duplicated boundary authorization: %v", err)
 	}
 	t.Setenv(bridge.SourceSessionEnv, "")
 	if err := authorizeParentCaller("sess-local"); err != nil {

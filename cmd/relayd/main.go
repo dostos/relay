@@ -270,7 +270,7 @@ func cmdControlServe() int {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	sock := core.DesktopBridgeSocketPath()
-	srv := &bridge.Server{SockPath: sock, RelayBin: relayBinary(), Build: coord.Build, Authorize: core.AuthorizeBridgeSource}
+	srv := &bridge.Server{SockPath: sock, RelayBin: relayBinary(), Build: coord.Build, Authorize: core.AuthorizeBridgeSource, AuthorizeRequest: core.AuthorizeBridgeRequest}
 	registry := &core.Registry{}
 	viz := cmuxviz.New()
 	service := &controlbridge.Service{
@@ -373,7 +373,7 @@ func cmdBridge(args []string) int {
 	if v := os.Getenv("RELAY_BRIDGE_LOCAL_SOCK"); v != "" {
 		sock = v
 	}
-	srv := &bridge.Server{SockPath: sock, RelayBin: relayBin, Build: coord.Build, Authorize: core.AuthorizeBridgeSource}
+	srv := &bridge.Server{SockPath: sock, RelayBin: relayBin, Build: coord.Build, Authorize: core.AuthorizeBridgeSource, AuthorizeRequest: core.AuthorizeBridgeRequest}
 	fmt.Fprintf(os.Stderr, "relayd desktop bridge listening on unix:%s\n", sock)
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
