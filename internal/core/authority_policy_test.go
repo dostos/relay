@@ -53,6 +53,8 @@ func TestAuthorityPolicyAllowsApexHierarchyAndPreservesHumanGates(t *testing.T) 
 		{manager, []string{"agent", "start", "home", "codex", "--", "goal"}, true},
 		{child, []string{"agent", "start", "home", "codex", "--parent", apex.ID, "--", "goal"}, false},
 		{apex, []string{"root", "control-plane", "--always-on"}, false},
+		{apex, []string{"host", "bootstrap", "-H", "c1"}, true},
+		{manager, []string{"host", "bootstrap", "-H", "c1"}, false},
 		{apex, []string{"auth", "copy"}, false},
 	} {
 		got, _ := authorizeOperation(reg, tc.actor, tc.args)
@@ -77,6 +79,7 @@ func TestAuthorityOperationParserSeparatesDiscoveryStartLifecycleAndTargets(t *t
 		{[]string{"client", "status"}, authorityDiscovery, ""},
 		{[]string{"client", "update-status"}, authorityDiscovery, ""},
 		{[]string{"client", "update", "--client", "client-mac"}, authorityLifecycle, ""},
+		{[]string{"host", "bootstrap", "-H", "c1"}, authorityRoot, ""},
 		{[]string{"agent", "wait", "ho-child"}, authorityHandoffTarget, "ho-child"},
 		{[]string{"session", "capture", "sess-child"}, authoritySessionTarget, "sess-child"},
 		{[]string{"auth", "login", "-H", "home"}, authorityHumanRequired, ""},

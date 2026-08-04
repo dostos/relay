@@ -103,6 +103,14 @@ func parseAuthorityOperation(args []string) authorityOperation {
 	}
 	op.Verb = strings.TrimSpace(top + " " + sub)
 
+	// Updating Relay's own host-local coordinator is ordinary fleet
+	// administration, but it changes a remote executable and service. Give that
+	// operation to the governing apex without widening credential, policy, or
+	// provider-permission authority.
+	if top == "host" && sub == "bootstrap" {
+		op.Kind = authorityRoot
+		return op
+	}
 	if top == "auth" || top == "host" || top == "policy" || top == "install-cmux-restore" ||
 		(top == "root" && sub == "control-plane") || (top == "viz" && sub == "retire-control") {
 		op.Kind = authorityHumanRequired
