@@ -42,10 +42,15 @@ func PolicyPath() string { return filepath.Join(ConfigRoot(), "policy.yaml") }
 func SessionsPath() string             { return filepath.Join(StateRoot(), "sessions.json") }
 func ProjectionOnlyMarkerPath() string { return filepath.Join(StateRoot(), ".viz-projection-only") }
 func AuthorityDeletionDir() string     { return filepath.Join(StateRoot(), "authority-deletions") }
+func AuthorityReceiptIndexDir() string { return filepath.Join(StateRoot(), "authority-receipts") }
+func CommandReceiptDir() string        { return filepath.Join(StateRoot(), "command-receipts") }
 func DeletedManagerDir() string        { return filepath.Join(StateRoot(), "deleted-managers") }
 func AuthorityReplacementPath() string {
 	return filepath.Join(StateRoot(), "authority-replacement.json")
 }
+func HomeServiceHealthPath() string   { return filepath.Join(StateRoot(), "service-health.json") }
+func HomeServiceLockPath() string     { return filepath.Join(StateRoot(), "service.lock") }
+func HomeClientTokenPath() string     { return filepath.Join(StateRoot(), "home-client.token") }
 func HandoffsDir() string             { return filepath.Join(StateRoot(), "handoffs") }
 func LedgerPath() string              { return filepath.Join(StateRoot(), "handoffs", "ledger.jsonl") }
 func DesktopBridgeSocketPath() string { return filepath.Join(StateRoot(), "desktop-bridge.sock") }
@@ -81,7 +86,7 @@ func sanitizeID(s string) string {
 
 // EnsureStateDirs creates local state directories.
 func EnsureStateDirs() error {
-	for _, d := range []string{StateRoot(), HandoffsDir(), ProfileCacheDir(), PanesDir(), BridgeTokensDir(), BridgeIdentitiesDir(), ParentInboxDir(), ParentWatchDir()} {
+	for _, d := range []string{StateRoot(), HandoffsDir(), ProfileCacheDir(), PanesDir(), BridgeTokensDir(), BridgeIdentitiesDir(), ParentInboxDir(), ParentWatchDir(), AuthorityReceiptIndexDir(), CommandReceiptDir()} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return err
 		}

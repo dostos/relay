@@ -3,6 +3,7 @@ package relayd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -31,6 +32,63 @@ func TestStoreEmitReplay(t *testing.T) {
 		t.Fatalf("after %+v", after)
 	}
 	s.Unsubscribe("sess1", ch2)
+}
+
+func TestStoreRepairsPartialTailBeforeNextSequence(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event, err := store.Emit("sess1", "started", nil); err != nil || event.Seq != 1 {
+		t.Fatalf("first event=%+v err=%v", event, err)
+	}
+	path := filepath.Join(dir, "sess1.jsonl")
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = file.WriteString(`{"ts":"partial"`)
+	_ = file.Close()
+
+	restarted, err := NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := restarted.Emit("sess1", "result", map[string]any{"text": "done"})
+	if err != nil || second.Seq != 2 {
+		t.Fatalf("recovered event=%+v err=%v", second, err)
+	}
+	events, channel, err := restarted.ReplayAndSubscribe("sess1", 0)
+	if err != nil || len(events) != 2 || events[1].Seq != 2 {
+		t.Fatalf("replay=%+v err=%v", events, err)
+	}
+	restarted.Unsubscribe("sess1", channel)
+}
+
+func TestStoreReportsInteriorAndOversizedCorruption(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "interior", raw: "not-json\n{}\n", want: "record 1 is corrupt"},
+		{name: "oversized", raw: strings.Repeat("x", maxEventRecordBytes+1) + "\n", want: "exceeds"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "sess1.jsonl"), []byte(tc.raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store, err := NewStore(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.LastSeq("sess1"); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("corruption error=%v want=%q", err, tc.want)
+			}
+		})
+	}
 }
 
 func TestStoreRejectsTraversal(t *testing.T) {

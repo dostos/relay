@@ -1,0 +1,16 @@
+[Unit]
+Description=Relay authoritative home service
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/relay service run
+Restart=on-failure
+RestartSec=5
+Environment=RELAYD_SOCK=%h/.local/state/relay/relayd.sock
+
+[Install]
+WantedBy=default.target

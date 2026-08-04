@@ -201,6 +201,12 @@ func (a *App) forwardThroughDesktopBridge(args []string) (int, bool) {
 			source = bridge.Source{SessionID: identity.SessionID, HostID: identity.HostID, PersistName: identity.PersistName, Token: identity.Token}
 		}
 	}
+	if sock == "" && !commandNeedsLocalTTY(args) {
+		if identity, err := core.LoadHomeClientIdentity(); err == nil {
+			sock = core.DesktopBridgeSocketPath()
+			source = identity
+		}
+	}
 	if sock == "" || os.Getenv(bridge.LocalInvokeEnv) == "1" {
 		return 0, false
 	}
@@ -225,46 +231,26 @@ func (a *App) forwardThroughDesktopBridge(args []string) (int, bool) {
 	return resp.ExitCode, true
 }
 
+func commandNeedsLocalTTY(args []string) bool {
+	filtered := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg != "--json" {
+			filtered = append(filtered, arg)
+		}
+	}
+	if len(filtered) >= 2 && filtered[0] == "session" && filtered[1] == "attach" {
+		return true
+	}
+	return len(filtered) > 0 && filtered[0] == "resume" && (len(filtered) == 1 || (filtered[1] != "list" && filtered[1] != "reap" && filtered[1] != "prune"))
+}
+
 func ensureDesktopBridge(ctx context.Context) (string, error) {
 	sock := core.DesktopBridgeSocketPath()
 	client := bridge.Client{SockPath: sock}
 	if client.Ping(ctx) == nil {
 		return sock, nil
 	}
-	relayBin := core.RelayBin()
-	relaydBin := filepath.Join(filepath.Dir(relayBin), "relayd")
-	if _, err := os.Stat(relaydBin); err != nil {
-		var lookupErr error
-		relaydBin, lookupErr = exec.LookPath("relayd")
-		if lookupErr != nil {
-			return "", fmt.Errorf("relayd not installed beside relay")
-		}
-	}
-	if err := core.EnsureStateDirs(); err != nil {
-		return "", err
-	}
-	logPath := filepath.Join(core.StateRoot(), "desktop-bridge.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return "", err
-	}
-	cmd := exec.Command(relaydBin, "bridge", "--relay-bin", relayBin)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
-		return "", err
-	}
-	_ = cmd.Process.Release()
-	_ = logFile.Close()
-	for i := 0; i < 40; i++ {
-		if client.Ping(ctx) == nil {
-			return sock, nil
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	return "", fmt.Errorf("desktop relay bridge did not start; see %s", logPath)
+	return "", fmt.Errorf("relay home command boundary is unavailable at %s; start or repair relay service run", sock)
 }
 
 func sourceFromEnvironment(reg *core.Registry) (sessionID, hostID, persistName, repoRef string) {
@@ -288,12 +274,9 @@ func (a *App) applyHandoffSource(ctx context.Context, opts *core.HandoffOpts) (s
 		return "", nil
 	}
 	sessionID, hostID, persistName, repoRef := sourceFromEnvironment(a.Reg)
-	// A bridge-authenticated child may create only a direct child of itself.
-	// It cannot name a grandparent/root and bypass its immediate manager.
-	if sessionID != "" && opts.SourceSessionID != "" && opts.SourceSessionID != sessionID {
-		return "", fmt.Errorf("handoff parent %s bypasses authenticated manager %s", opts.SourceSessionID, sessionID)
-	}
-	if sessionID == "" && opts.SourceSessionID != "" {
+	// The authenticated boundary has already authorized an explicit parent.
+	// Resolve its durable identity here without making a second policy decision.
+	if opts.SourceSessionID != "" {
 		sessionID = opts.SourceSessionID
 		if sess, err := a.Reg.GetSession(sessionID); err == nil {
 			hostID, persistName, repoRef = sess.HostID, sess.Persist.Name, sess.RepoRef
@@ -520,7 +503,7 @@ New machine (ssh config → discover → init):
   relay targets                       List Host aliases from ~/.ssh/config (+ Include)
   relay host discover -H HOST         Inventory + proposed host.yaml (no writes)
   relay host init -H HOST [--apply] [--force]
-                                      Install relay + relayd; write proposal with --apply
+                                      Install relay + compatibility shim; write proposal with --apply
 
 Host profiles (authoritative on each remote ~/.config/relay/host.yaml):
   relay host show -H HOST
@@ -528,7 +511,7 @@ Host profiles (authoritative on each remote ~/.config/relay/host.yaml):
   relay host probe -H HOST
   relay host cache -H HOST
   relay host example -H HOST          Print starter host.yaml
-  relay host bootstrap -H HOST        Install always-on relayd (unix socket; one quiet SSH)
+  relay host bootstrap -H HOST        Install host-local event service (unix socket; one quiet SSH)
 
 Agent auth (claude / cursor-agent / codex / ccs:<profile> / …):
   relay auth status -H HOST [--agent NAME]
@@ -576,6 +559,8 @@ Agent surface (token-efficient; always JSON; NO poll loops):
   relay agent capture ID [-n LINES]
   relay agent done ID [--outcome done|failed|abandoned] [--keep-session]
   relay agent status ID
+	  relay mcp serve                                           # stdio tool server for native agent integrations
+	  relay mcp install cursor                                  # preserve/merge Cursor user MCP inventory
   relay ask [--] QUESTION                                  # declare blocked input explicitly
   relay resolve MESSAGE [--] DECISION                        # the only response handshake
   relay log [CURSOR]                                         # new compact manager context
@@ -599,7 +584,7 @@ Automatic handling policies (desktop-local; unmatched/errors go to manager):
   relay policy add ID --kind KIND [--source RAW_KIND] [--agent NAME] [--host HOST] [--contains TEXT ...] (--reply TEXT | --ack)
   relay policy remove ID
 
-Agent-to-agent messages (relayd channels; any channel name):
+Agent-to-agent messages (durable event channels; any channel name):
   relay msg send -H HOST -c CHANNEL [--kind K] [--from ID] [--text ... | -- ...] [--meta JSON]
   relay msg read -H HOST -c CHANNEL [--from SEQ] [--follow] [--timeout SEC]
   relay msg wait -H HOST -c CHANNEL[:SEQ] [-c CHANNEL2[:SEQ] …] [--timeout SEC]   # fan-in; first wins
@@ -610,7 +595,7 @@ Cleanup (one pass; reap dead sessions + prune tombstones + drop stale panes + GC
   relay gc [-H HOST] [--dry-run] [--channel-ttl DAYS | --no-channel-ttl]
   # Default sweeps every registry host; one probe SSH per host. Unreachable hosts skipped.
 
-Events (via always-on relayd on the host):
+Events (via the host-local Relay event service):
   relay events tail [-f] --handoff ID [--from SEQ]
   relay events emit --handoff ID --kind KIND
 
@@ -2118,18 +2103,7 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		}
 		return a.errOut(a.out(map[string]any{"ok": true, "retirement": gate}))
 	case "watch":
-		if len(args) < 2 || len(args) > 3 || strings.HasPrefix(args[1], "-") || (len(args) == 3 && args[2] != "--detach") {
-			return a.fail(fmt.Errorf("usage: relay parent watch HANDOFF [--detach]"))
-		}
-		handoffID := args[1]
-		if len(args) == 3 {
-			a.startParentWatcher(handoffID)
-			return a.errOut(a.out(map[string]any{"ok": true, "handoff_id": handoffID, "watcher": "started"}))
-		}
-		if err := a.Parents.Watch(ctx, handoffID); err != nil && ctx.Err() == nil {
-			return a.fail(err)
-		}
-		return 0
+		return a.fail(fmt.Errorf("parent watchers are owned by relay service run; use relay service status"))
 	default:
 		return a.fail(fmt.Errorf("unknown parent subcommand %q", args[0]))
 	}
@@ -2686,50 +2660,17 @@ func (a *App) cmdSupervise(ctx context.Context, args []string) int {
 		})
 		return code
 	}
-	if err := sup.Run(ctx); err != nil && ctx.Err() == nil {
-		return a.fail(err)
-	}
-	return 0
+	return a.fail(fmt.Errorf("watcher supervision is owned by relay service run"))
 }
 
 func (a *App) startParentWatcher(handoffID string) {
-	if handoffID == "" || os.Getenv("RELAY_NO_PARENT_WATCH") == "1" {
-		return
-	}
-	bin, err := os.Executable()
-	if err != nil {
-		return
-	}
-	if err := core.EnsureStateDirs(); err != nil {
-		return
-	}
-	logPath := filepath.Join(core.ParentWatchDir(), handoffID+".log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return
-	}
-	cmd := exec.Command(bin, "--json", "parent", "watch", handoffID)
-	cmd.Stdout, cmd.Stderr = logFile, logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if cmd.Start() == nil {
-		_ = cmd.Process.Release()
-	}
-	_ = logFile.Close()
+	// Watchers are goroutines owned and recovered by relay service run. CLI
+	// subprocesses must not create a competing detached watcher lifecycle.
+	_ = handoffID
 }
 
 func (a *App) ensureParentWatcher(handoffID string) {
-	raw, err := os.ReadFile(core.ParentWatchLockPath(handoffID))
-	pid, parseErr := strconv.Atoi(strings.TrimSpace(string(raw)))
-	if err == nil && parseErr == nil && pid > 1 && pid != os.Getpid() {
-		command, _ := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
-		cmdline := string(command)
-		if strings.Contains(cmdline, "relay") && strings.Contains(cmdline, "parent watch") && strings.Contains(cmdline, handoffID) {
-			// Watchers reload the handoff record before routing each event, so
-			// an existing watcher automatically observes a repaired parent edge.
-			return
-		}
-	}
-	a.startParentWatcher(handoffID)
+	_ = handoffID
 }
 
 // cmdSignal is the agent-neutral hook surface. It intentionally executes on
@@ -2809,24 +2750,18 @@ func (a *App) cmdSignal(ctx context.Context, mode string, args []string) int {
 		meta["correlation_id"] = correlation
 	}
 	metaRaw, _ := json.Marshal(meta)
-	relaydBin := filepath.Join(filepath.Dir(core.RelayBin()), "relayd")
-	if _, err := os.Stat(relaydBin); err != nil {
-		relaydBin, err = exec.LookPath("relayd")
-		if err != nil {
-			return a.fail(fmt.Errorf("relayd not installed"))
-		}
-	}
-	cmdArgs := []string{"emit", "-s", session, "--kind", kind}
+	relayBin := core.RelayBin()
+	cmdArgs := []string{"service", "event", "emit", "-s", session, "--kind", kind}
 	if len(meta) > 0 {
 		cmdArgs = append(cmdArgs, "--meta", string(metaRaw))
 	}
-	out, err := exec.CommandContext(ctx, relaydBin, cmdArgs...).Output()
+	out, err := exec.CommandContext(ctx, relayBin, cmdArgs...).Output()
 	if err != nil {
 		return a.fail(err)
 	}
 	var response map[string]any
 	if json.Unmarshal(out, &response) != nil {
-		return a.fail(fmt.Errorf("invalid relayd response"))
+		return a.fail(fmt.Errorf("invalid relay event response"))
 	}
 	if mode == "hook" {
 		return 0
@@ -3746,6 +3681,58 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 		stateOK, stateDetail = false, err.Error()
 	}
 	checks = append(checks, check{"state_dir", stateOK, stateDetail})
+
+	var serviceHealth struct {
+		Build      string `json:"build"`
+		PID        int    `json:"pid"`
+		Ready      bool   `json:"ready"`
+		Live       bool   `json:"live"`
+		Stopping   bool   `json:"stopping"`
+		UpdatedAt  string `json:"updated_at"`
+		Components map[string]struct {
+			Build          string `json:"build"`
+			Ready          bool   `json:"ready"`
+			Live           bool   `json:"live"`
+			DurableEffects bool   `json:"durable_effects"`
+			Error          string `json:"error"`
+		} `json:"components"`
+	}
+	healthRaw, healthErr := os.ReadFile(core.HomeServiceHealthPath())
+	if healthErr == nil {
+		healthErr = json.Unmarshal(healthRaw, &serviceHealth)
+	}
+	processAlive := healthErr == nil && serviceHealth.PID > 0 && syscall.Kill(serviceHealth.PID, 0) == nil
+	healthUpdated, _ := time.Parse(time.RFC3339Nano, serviceHealth.UpdatedAt)
+	healthFresh := !healthUpdated.IsZero() && time.Since(healthUpdated) < 15*time.Second
+	healthOK := healthErr == nil && processAlive && healthFresh && serviceHealth.Live && serviceHealth.Ready && !serviceHealth.Stopping && serviceHealth.Build == coord.Build
+	healthDetail := "unified home service health unavailable"
+	if healthErr != nil {
+		healthDetail = healthErr.Error()
+	} else {
+		healthDetail = fmt.Sprintf("pid=%d build=%s components=%d ready=%t", serviceHealth.PID, serviceHealth.Build, len(serviceHealth.Components), serviceHealth.Ready)
+		for name, component := range serviceHealth.Components {
+			if component.Build != serviceHealth.Build || !component.Ready || !component.Live || !component.DurableEffects {
+				healthOK = false
+				healthDetail += fmt.Sprintf("; %s unhealthy (%s)", name, component.Error)
+			}
+		}
+	}
+	checks = append(checks, check{"home_service", healthOK, healthDetail})
+
+	// A migrated home has exactly one authority owner. Old event/control/
+	// supervisor processes may be healthy individually while still splitting
+	// sockets, builds, and policy, so surface them explicitly.
+	legacyDetail := "none"
+	legacyOK := true
+	if pgrep, err := exec.LookPath("pgrep"); err == nil {
+		out, _ := exec.Command(pgrep, "-af", `relayd serve|relayd control serve|relay supervise`).CombinedOutput()
+		lines := strings.TrimSpace(string(out))
+		if lines != "" {
+			legacyOK = false
+			legacyDetail = strings.ReplaceAll(lines, "\n", "; ")
+		}
+	}
+	checks = append(checks, check{"legacy_authority_processes", legacyOK, legacyDetail})
 
 	// Checks for the failure class that cost hours today: things that look
 	// healthy while doing nothing. Each of these was invisible before.

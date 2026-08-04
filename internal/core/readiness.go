@@ -165,6 +165,7 @@ var securityGates = []struct{ marker, reason string }{
 	{"claude account with subscription", "waiting for account login"},
 	{"anthropic console account", "waiting for account login"},
 	{"sign in with", "waiting for account login"},
+	{"press any key to log in", "waiting for account login"},
 	{"do you trust", "waiting for folder-trust approval"},
 	{"trust this folder", "waiting for folder-trust approval"},
 	{"yes, i trust", "waiting for folder-trust approval"},

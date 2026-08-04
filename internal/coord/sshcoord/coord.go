@@ -24,7 +24,7 @@ func (c *Coord) EventsPath(persistName string) string {
 	return "~/" + coord.EventsRel + "/" + persistName + ".jsonl"
 }
 
-const remoteBin = `"$HOME/.local/bin/relayd"`
+const remoteBin = `"$HOME/.local/bin/relay" service event`
 
 func (c *Coord) Ensure(ctx context.Context, t ports.Transport) error {
 	stdout, stderr, err := t.Run(ctx, "", remoteBin+` ping`)
@@ -79,7 +79,7 @@ func (c *Coord) SensorCommand(session, kind string) (string, error) {
 	if err := shellquote.ValidateEventKind(kind); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("$HOME/.local/bin/relayd emit -s %s --kind %s >/dev/null 2>&1",
+	return fmt.Sprintf("$HOME/.local/bin/relay service event emit -s %s --kind %s >/dev/null 2>&1",
 		shellquote.Quote(session), shellquote.Quote(kind)), nil
 }
 

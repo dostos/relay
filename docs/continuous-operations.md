@@ -54,8 +54,8 @@ was *asked*; make diagnostics fail loudly rather than default to passing.
 
 ## Environment
 
-- `home` runs the apex tmux session, `relayd serve`, and `relay supervise`
-  (both survive reboot; `scripts/home-wake` covers the WSL-at-boot gap).
+- `home` runs the apex tmux session and one `relay service run` authority
+  (it survives reboot; `scripts/home-wake` covers the WSL-at-boot gap).
 - Relay repo is at `~/dev/relay`; Go 1.25 at `~/.local/go/bin` (user-local, no
   root). `go build ./... && go test ./...` both pass there.
 - Verify a change with `./install.sh`, then `relay doctor` (9 checks, exits

@@ -5,7 +5,7 @@ entry on the control host is restricted to Relay's Viz broker. For a service
 named `relay-viz-mac`, the owner-managed entry is:
 
 ```text
-restrict,command="$HOME/.local/bin/relayd viz-broker --service relay-viz-mac" ssh-ed25519 AAAA... relay-viz-mac
+restrict,command="$HOME/.local/bin/relay viz-broker --service relay-viz-mac" ssh-ed25519 AAAA... relay-viz-mac
 ```
 
 `restrict` disables forwarding, PTY allocation, agent forwarding, X11, and
@@ -22,7 +22,7 @@ this entry is an explicit owner permission decision; Relay does not edit
 The owner can perform that explicit enrollment with:
 
 ```bash
-relayd viz authorize --service relay-viz-mac --public-key-file ./viz.pub
+relay viz authorize --service relay-viz-mac --public-key-file ./viz.pub
 ```
 
 The command validates the key fingerprint, locks and atomically updates

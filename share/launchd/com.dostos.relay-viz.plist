@@ -6,9 +6,9 @@
   <string>com.dostos.relay-viz</string>
   <key>ProgramArguments</key>
   <array>
-    <string>REPLACE_INSTALL_DIR/relayd</string>
+    <string>REPLACE_INSTALL_DIR/relay</string>
     <string>viz</string>
-    <string>follow</string>
+    <string>serve</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>

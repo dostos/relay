@@ -3,6 +3,7 @@ package core
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -138,6 +139,7 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 	}
 
 	var launchCmd string
+	nativeGoalDelivery := false
 	agentName := opts.Agent
 	if opts.Command != "" && opts.Goal == "" && opts.Agent == "" {
 		kind = KindJob
@@ -160,7 +162,8 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 			return fail("resolve_agent", nil, err)
 		}
 		agentName = ag.Name
-		launchCmd = ag.LaunchCommand(opts.Goal)
+		nativeGoalDelivery = ag.SupportsNativePrompt()
+		launchCmd = ag.launchScript(opts.Goal)
 		if cref != nil {
 			launchCmd, err = ContainerExec(cref.Runtime, *cref, ag.InnerCommand(), true)
 			if err != nil {
@@ -253,8 +256,9 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 		return fail("record_start", sess, err)
 	}
 
-	// Start work through the holding-shell launch protocol. Agent-composer
-	// delivery is a separate contract used only after readiness is established.
+	// Start work through the holding-shell launch protocol. Supported agents
+	// receive the goal as part of this exact argv; composer delivery remains a
+	// compatibility contract only for unfamiliar CLIs.
 	launcher, ok := h.Persist.(ports.HoldingShellLauncher)
 	if !ok {
 		err := fmt.Errorf("persistence %s cannot acknowledge holding-shell launch", h.Persist.Kind())
@@ -274,13 +278,20 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 		return fail("emit_started", sess, fmt.Errorf("emit started: %w", err))
 	}
 
-	// Inject goal for agent mode after a short readiness wait.
+	// Confirm that the provider accepted its native prompt, or use the legacy
+	// confirmed-composer path for an unfamiliar CLI.
 	if kind == KindAgent && opts.Goal != "" {
-		if err := h.injectAgentGoal(ctx, t, sess, ho, opts.Goal); err != nil {
+		var deliveryErr error
+		if nativeGoalDelivery {
+			deliveryErr = h.confirmNativeAgentGoal(ctx, t, sess, ho)
+		} else {
+			deliveryErr = h.injectAgentGoal(ctx, t, sess, ho, opts.Goal)
+		}
+		if deliveryErr != nil {
 			if ho.Status != StatusNeedsInput {
-				err = h.failDelivery(ctx, ho, sess, err)
+				deliveryErr = h.failDelivery(ctx, ho, sess, deliveryErr)
 			}
-			return nil, ho, err
+			return nil, ho, deliveryErr
 		}
 	}
 
@@ -403,14 +414,24 @@ const terminalCaptureLimit = 1200
 var launchTerminalReceipt = regexp.MustCompile(`\[relay-launch-terminal handoff=([a-zA-Z0-9_-]+) rc=([0-9]+)\]`)
 
 // withLaunchTerminalReceipt leaves a correlated, machine-readable exit receipt
-// in the pane. The holding shell remains alive so Relay can capture the receipt
-// and the final bounded output before teardown.
+// in the pane. The exact payload is base64-decoded into a temporary script and
+// passed to bash as one argv value. This gives the payload one login environment
+// without re-parsing an already-quoted provider command through nested `-lc`
+// strings. The holding shell remains alive so Relay can capture diagnostics.
 func withLaunchTerminalReceipt(command, handoffID string) string {
+	payload := base64.StdEncoding.EncodeToString([]byte(command))
 	receipt := fmt.Sprintf(`printf '\n[relay-launch-terminal handoff=%s rc=%%s]\n' "$relay_launch_rc"`, handoffID)
-	// Run the payload in a child shell so even a direct job containing `exit`
-	// cannot skip the receipt emitted by its supervising shell.
-	script := "bash -lc " + shellQuote(command) + `; relay_launch_rc=$?; ` + receipt + `; exit "$relay_launch_rc"`
-	return "bash -lc " + shellQuote(script)
+	script := `relay_launch_tmp=$(mktemp "${TMPDIR:-/tmp}/relay-launch.XXXXXX") || exit 125
+trap 'rm -f -- "$relay_launch_tmp"' EXIT
+if ! printf '%s' ` + shellQuote(payload) + ` | base64 -d >"$relay_launch_tmp"; then
+  relay_launch_rc=125
+else
+  bash -- "$relay_launch_tmp"
+  relay_launch_rc=$?
+fi
+` + receipt + `
+exit "$relay_launch_rc"`
+	return "bash -ilc " + shellQuote(script)
 }
 
 func (h *HandoffService) collectTerminalDiagnostics(ctx context.Context, ho *Handoff, sess *Session) {
@@ -439,6 +460,7 @@ func (h *HandoffService) collectTerminalDiagnostics(ctx context.Context, ho *Han
 		return
 	}
 	ho.TerminalCapture = redactedTerminalCapture(capture)
+	_ = h.Reg.PutHandoff(ho)
 	_ = AppendLedger(map[string]any{
 		"v": 1, "type": "launch_terminal", "ts": time.Now().UTC().Format(time.RFC3339),
 		"handoff_id": ho.ID, "session_id": sess.ID, "host_id": ho.HostID,
@@ -613,6 +635,16 @@ func waitAgentReady(ctx context.Context, p ports.Persistence, t ports.Transport,
 var agentReadyPollDelay = 2500 * time.Millisecond
 
 func (h *HandoffService) injectAgentGoal(ctx context.Context, t ports.Transport, sess *Session, ho *Handoff, goal string) error {
+	return h.confirmAgentGoal(ctx, t, sess, ho, func() error {
+		return h.Persist.Send(ctx, t, sess.Persist, agentGoalPrompt(goal), true)
+	})
+}
+
+func (h *HandoffService) confirmNativeAgentGoal(ctx context.Context, t ports.Transport, sess *Session, ho *Handoff) error {
+	return h.confirmAgentGoal(ctx, t, sess, ho, nil)
+}
+
+func (h *HandoffService) confirmAgentGoal(ctx context.Context, t ports.Transport, sess *Session, ho *Handoff, deliver func() error) error {
 	readiness := waitAgentReady(ctx, h.Persist, t, sess.Persist, 20*time.Second)
 	switch readiness.State {
 	case AgentBlocked:
@@ -637,8 +669,10 @@ func (h *HandoffService) injectAgentGoal(ctx context.Context, t ports.Transport,
 		_, _ = h.Coord.Emit(ctx, t, sess.Persist.Name, "exit", map[string]any{"text": readiness.Reason})
 		return fmt.Errorf("agent exited before goal delivery: %s", readiness.Reason)
 	default:
-		if err := h.Persist.Send(ctx, t, sess.Persist, agentGoalPrompt(goal), true); err != nil {
-			return err
+		if deliver != nil {
+			if err := deliver(); err != nil {
+				return err
+			}
 		}
 		ho.DeliveryState = EffectAcknowledged
 		ho.DeliveryError = ""
@@ -872,6 +906,10 @@ func (h *HandoffService) Finalize(ctx context.Context, handoffID string, outcome
 		return nil, err
 	}
 	dead, code, _ := h.Persist.DeadStatus(ctx, t, sess.Persist)
+	if ho.TerminalExitCode != nil {
+		code = *ho.TerminalExitCode
+		dead = true
+	}
 	if !dead && outcome == "" {
 		return nil, fmt.Errorf("session still live; pass --outcome done|failed|abandoned to force finalize")
 	}
@@ -946,6 +984,21 @@ func (h *HandoffService) Reconcile(ctx context.Context) (int, error) {
 		}
 		t, err := h.NewTransport(ho.HostID)
 		if err != nil {
+			continue
+		}
+		// A holding tmux shell remains live after its child payload exits. The
+		// correlated terminal receipt, not pane death, is authoritative for that
+		// case (especially direct jobs).
+		h.collectTerminalDiagnostics(ctx, ho, sess)
+		if ho.TerminalExitCode != nil {
+			outcome := OutcomeDone
+			if *ho.TerminalExitCode != 0 {
+				outcome = OutcomeFailed
+			}
+			if _, err := h.Finalize(ctx, ho.ID, outcome, false); err == nil {
+				h.closePaneFor(ctx, ho.SessionID)
+				n++
+			}
 			continue
 		}
 		dead, _, err := h.Persist.DeadStatus(ctx, t, sess.Persist)

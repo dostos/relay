@@ -28,10 +28,12 @@ type BootstrapResult struct {
 	Detail      string `json:"detail,omitempty"`
 }
 
-// BootstrapService installs relay + always-on relayd on one host.
+// BootstrapService installs the primary relay binary and its host-local event
+// coordinator on one host. A relayd pathname is retained only as a symlink to
+// the same executable during the compatibility window.
 type BootstrapService struct {
 	NewTransport TransportFactory
-	// LocalRelayRepo is the checkout containing cmd/relayd (defaults to sibling of cwd or RELAY_REPO).
+	// LocalRelayRepo is the checkout containing cmd/relay (defaults to sibling of cwd or RELAY_REPO).
 	LocalRelayRepo string
 }
 
@@ -57,9 +59,8 @@ func (b *BootstrapService) Bootstrap(ctx context.Context, hostID string) (*Boots
 		return nil, fmt.Errorf("unsupported remote arch %q", remoteArch)
 	}
 
-	// 2) build matching Linux binaries locally. relayd owns host-local events;
-	// relay is also installed so a named remote pane can ask the desktop bridge
-	// to start the next host in a handoff chain.
+	// 2) build the matching primary Linux binary locally. It serves both the
+	// stateless client and the host-local event coordinator.
 	repo := b.LocalRelayRepo
 	if repo == "" {
 		repo = os.Getenv("RELAY_REPO")
@@ -70,7 +71,7 @@ func (b *BootstrapService) Bootstrap(ctx context.Context, hostID string) (*Boots
 			filepath.Join(os.Getenv("HOME"), "dev", "relay"),
 			".",
 		} {
-			if _, err := os.Stat(filepath.Join(c, "cmd", "relayd")); err == nil {
+			if _, err := os.Stat(filepath.Join(c, "cmd", "relay")); err == nil {
 				repo = c
 				break
 			}
@@ -85,7 +86,6 @@ func (b *BootstrapService) Bootstrap(ctx context.Context, hostID string) (*Boots
 	}
 	defer cleanupBuildRepo()
 	tmpBase := filepath.Join(os.TempDir(), fmt.Sprintf("relay-bootstrap-%s-%d", goarch, time.Now().UnixNano()))
-	tmpRelayd := tmpBase + "-relayd"
 	tmpRelay := tmpBase + "-relay"
 	// Stamp the remote with the build of the relay doing the deploying, so
 	// "remote build == local build" means exactly "this host was deployed from
@@ -106,25 +106,14 @@ func (b *BootstrapService) Bootstrap(ctx context.Context, hostID string) (*Boots
 		}
 		return nil
 	}
-	if err := build(tmpRelayd, "./cmd/relayd"); err != nil {
-		return nil, err
-	}
 	if err := build(tmpRelay, "./cmd/relay"); err != nil {
 		return nil, err
 	}
-	defer os.Remove(tmpRelayd)
 	defer os.Remove(tmpRelay)
-	out.Binary = "~/.local/bin/relayd"
+	out.Binary = "~/.local/bin/relay"
 	out.RelayBinary = "~/.local/bin/relay"
 
-	// 3) upload via SSH cat to temporary names (avoids ETXTBSY on relayd).
-	data, err := os.ReadFile(tmpRelayd)
-	if err != nil {
-		return nil, err
-	}
-	if err := t.WriteFile(ctx, "~/.local/bin/relayd.new", data, "755"); err != nil {
-		return nil, fmt.Errorf("upload: %w", err)
-	}
+	// 3) upload via SSH cat to a temporary name (avoids ETXTBSY).
 	relayData, err := os.ReadFile(tmpRelay)
 	if err != nil {
 		return nil, err
@@ -133,16 +122,16 @@ func (b *BootstrapService) Bootstrap(ctx context.Context, hostID string) (*Boots
 		return nil, fmt.Errorf("upload relay: %w", err)
 	}
 
-	// 4) unit + atomic replace + start/restart (still one SSH script)
+	// 4) unit + atomic replace + start/restart (still one SSH script).
 	unit := `[Unit]
-Description=relayd event coordinator (Unix socket only)
+Description=Relay host-local event coordinator
 After=default.target
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/relayd serve
+ExecStart=%h/.local/bin/relay service event run
 Restart=on-failure
 RestartSec=5
 Environment=RELAYD_SOCK=%h/.local/state/relay/relayd.sock
@@ -150,32 +139,34 @@ Environment=RELAYD_SOCK=%h/.local/state/relay/relayd.sock
 [Install]
 WantedBy=default.target
 `
-	_ = t.WriteFile(ctx, "~/.config/systemd/user/relayd.service", []byte(unit), "644")
+	_ = t.WriteFile(ctx, "~/.config/systemd/user/relay-event.service", []byte(unit), "644")
 
 	startScript := `
 set -e
-RELAYD="$HOME/.local/bin/relayd"
+RELAY="$HOME/.local/bin/relay"
 mkdir -p "$HOME/.local/state/relay/events" "$HOME/.config/systemd/user" "$HOME/.local/bin"
-mv -f "$HOME/.local/bin/relayd.new" "$RELAYD"
-chmod 755 "$RELAYD"
-mv -f "$HOME/.local/bin/relay.new" "$HOME/.local/bin/relay"
-chmod 755 "$HOME/.local/bin/relay"
+mv -f "$HOME/.local/bin/relay.new" "$RELAY"
+chmod 755 "$RELAY"
+ln -sfn relay "$HOME/.local/bin/relayd.new"
+mv -Tf "$HOME/.local/bin/relayd.new" "$HOME/.local/bin/relayd"
 if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
   systemctl --user daemon-reload
-  systemctl --user enable relayd.service
-  systemctl --user restart relayd.service
+  systemctl --user disable --now relayd.service >/dev/null 2>&1 || true
+  systemctl --user enable relay-event.service
+  systemctl --user restart relay-event.service
   echo UNIT=systemd
 else
   # stop prior nohup if any, then start once
-  if "$RELAYD" ping >/dev/null 2>&1; then
+  if "$RELAY" service event ping >/dev/null 2>&1; then
     pkill -f '[r]elayd serve' 2>/dev/null || true
+    pkill -f '[r]elay service event run' 2>/dev/null || true
     sleep 0.3
   fi
-  nohup "$RELAYD" serve >/tmp/relayd.log 2>&1 &
+  nohup "$RELAY" service event run >/tmp/relay-event.log 2>&1 &
   sleep 0.5
   echo UNIT=nohup
 fi
-"$RELAYD" ping
+"$RELAY" service event ping
 `
 	stdout, stderr, err = t.Run(ctx, "", startScript)
 	unitLine := firstLinePrefix(stdout, "UNIT=")
@@ -243,7 +234,7 @@ func firstLinePrefix(s, prefix string) string {
 }
 
 func ensurePing(ctx context.Context, t ports.Transport, expectedBuild string) (string, error) {
-	stdout, stderr, err := t.Run(ctx, "", `"$HOME/.local/bin/relayd" ping`)
+	stdout, stderr, err := t.Run(ctx, "", `"$HOME/.local/bin/relay" service event ping`)
 	if err != nil {
 		return "", fmt.Errorf("ping failed: %w (%s)", err, strings.TrimSpace(stderr))
 	}
@@ -255,7 +246,7 @@ func ensurePing(ctx context.Context, t ports.Transport, expectedBuild string) (s
 		return "", fmt.Errorf("unexpected ping output: %s", strings.TrimSpace(stdout+stderr))
 	}
 	if resp.Build == "" || resp.Build != expectedBuild {
-		return "", fmt.Errorf("relayd update did not land: running build %q, expected %q", resp.Build, expectedBuild)
+		return "", fmt.Errorf("relay event service update did not land: running build %q, expected %q", resp.Build, expectedBuild)
 	}
 	return resp.Build, nil
 }

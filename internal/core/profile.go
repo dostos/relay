@@ -228,21 +228,76 @@ func (a *AgentSpec) InnerCommand() string {
 // LaunchCommand builds the remote shell command to start an agent with a goal.
 // Always runs under a login interactive shell so nvm/cargo/~/.local/bin are on PATH.
 func (a *AgentSpec) LaunchCommand(goal string) string {
+	return wrapLoginShell(a.launchScript(goal))
+}
+
+// launchScript returns the exact agent payload before the one login-shell
+// boundary is added. Handoff terminal instrumentation stores this payload in a
+// temporary script, avoiding semantic re-parsing through nested `bash -lc`
+// command strings.
+func (a *AgentSpec) launchScript(goal string) string {
 	inner := a.InnerCommand()
 	if len(a.Args) > 0 {
-		inner = shellJoin(append([]string{inner}, a.Args...))
-	}
-	_ = goal
-	if strings.EqualFold(a.RelayHooks, "off") {
-		return wrapLoginShell(withAutonomousPermissions(*a, inner))
+		inner = strings.TrimSpace(inner) + " " + shellJoin(a.Args)
 	}
 	inner = withAutonomousPermissions(*a, inner)
+	inner = withAgentRelayMCP(*a, inner)
+	if strings.EqualFold(a.RelayHooks, "off") {
+		if a.SupportsNativePrompt() && strings.TrimSpace(goal) != "" {
+			inner += " " + shellQuote(goal)
+		}
+		return inner
+	}
 	inner = withAgentRelayHooks(*a, inner)
+	if a.SupportsNativePrompt() && strings.TrimSpace(goal) != "" {
+		// All supported providers accept an initial positional prompt. Keep it
+		// after provider options so goal delivery is one acknowledged launch
+		// effect instead of a second, UI-dependent composer mutation.
+		inner += " " + shellQuote(goal)
+	}
 	// Every CLI, including agents without a hook API, gets a terminal signal.
 	// Provider hooks add permission/result events; tmux silence remains the
 	// bounded fallback for unsupported CLIs.
 	script := inner + `; relay_agent_rc=$?; "$HOME/.local/bin/relay" signal exit --text "agent exited" --correlation terminal >/dev/null 2>&1 || true; exit $relay_agent_rc`
-	return "bash -ilc " + shellQuote(script)
+	return script
+}
+
+func withAgentRelayMCP(a AgentSpec, inner string) string {
+	fields := strings.Fields(a.InnerCommand())
+	if len(fields) == 0 {
+		return inner
+	}
+	base := strings.ToLower(path.Base(fields[0]))
+	switch {
+	case base == "codex" || a.Name == "codex":
+		commandCfg := `mcp_servers.relay.command="relay"`
+		argsCfg := `mcp_servers.relay.args=["mcp","serve"]`
+		return inner + " -c " + shellQuote(commandCfg) + " -c " + shellQuote(argsCfg)
+	case base == "claude" || a.Name == "claude":
+		config := map[string]any{"mcpServers": map[string]any{"relay": map[string]any{"type": "stdio", "command": "relay", "args": []string{"mcp", "serve"}}}}
+		raw, _ := json.Marshal(config)
+		return inner + " --mcp-config " + shellQuote(string(raw))
+	default:
+		// Cursor loads the explicitly installed ~/.cursor/mcp.json entry. Relay
+		// never passes --approve-mcps, which would approve unrelated servers.
+		return inner
+	}
+}
+
+// SupportsNativePrompt reports whether this configured launch command has a
+// stable initial-prompt argv contract. Profiles wrapping the known provider
+// binaries inherit support from the binary name; unfamiliar CLIs retain the
+// confirmed-composer fallback.
+func (a *AgentSpec) SupportsNativePrompt() bool {
+	if a == nil {
+		return false
+	}
+	fields := strings.Fields(a.InnerCommand())
+	if len(fields) == 0 {
+		return false
+	}
+	base := strings.ToLower(path.Base(fields[0]))
+	return base == "cursor-agent" || base == "codex" || base == "claude" || base == "ccs"
 }
 
 // withAutonomousPermissions gives every managed agent the provider's

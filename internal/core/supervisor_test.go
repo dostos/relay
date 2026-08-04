@@ -246,6 +246,28 @@ func TestRunStopsOnContextCancel(t *testing.T) {
 	}
 }
 
+func TestSupervisorReconcilesTerminalHandoffsWithoutNewEvent(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	reg := &Registry{}
+	service := &ParentService{Reg: reg}
+	called := 0
+	sup := &SupervisorService{
+		Reg: reg, Parents: service,
+		ReconcileHandoffs: func(context.Context) (int, error) {
+			called++
+			return 1, nil
+		},
+	}
+	var events []string
+	sup.OnEvent = func(event, _ string, _ error) { events = append(events, event) }
+	if _, err := sup.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if called != 1 || len(events) != 1 || events[0] != "terminal_handoffs_reconciled" {
+		t.Fatalf("called=%d events=%v", called, events)
+	}
+}
+
 var _ = ports.PersistHandle{}
 
 // A watcher that exits immediately never got to work — usually because another

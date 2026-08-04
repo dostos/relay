@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dostos/relay/internal/bridge"
+	"github.com/dostos/relay/internal/coord"
 	"github.com/dostos/relay/internal/core"
 	"github.com/dostos/relay/internal/ports"
 )
@@ -21,6 +22,30 @@ type projectedPaneViz struct {
 	ports.Viz
 	panes []ports.ProjectedSession
 	err   error
+}
+
+func TestMain(m *testing.M) {
+	root, err := os.MkdirTemp("", "relay-cli-tests-")
+	if err != nil {
+		panic(err)
+	}
+	state, config := filepath.Join(root, "state"), filepath.Join(root, "config")
+	if err := os.MkdirAll(config, 0o700); err != nil {
+		panic(err)
+	}
+	if err := os.WriteFile(filepath.Join(config, "host.yaml"), []byte("version: 1\nhost_id: cli-test\n"), 0o600); err != nil {
+		panic(err)
+	}
+	_ = os.Setenv("RELAY_STATE_DIR", state)
+	_ = os.Setenv("RELAY_CONFIG_DIR", config)
+	for _, name := range []string{bridge.SocketEnv, bridge.LocalInvokeEnv, bridge.SourceSessionEnv, bridge.SourceHostEnv, bridge.SourcePersistEnv, bridge.SourceTokenEnv, "RELAY_SESSION_ID", "RELAY_SESSION_HOST", "RELAY_SESSION_NAME"} {
+		_ = os.Unsetenv(name)
+	}
+	// Individual forwarding tests temporarily clear this with t.Setenv.
+	_ = os.Setenv(bridge.LocalInvokeEnv, "1")
+	code := m.Run()
+	_ = os.RemoveAll(root)
+	os.Exit(code)
 }
 
 func (v projectedPaneViz) ProjectionSessions(context.Context) ([]ports.ProjectedSession, error) {
@@ -123,14 +148,6 @@ func TestProjectedSessionListUsesLiveVizBindings(t *testing.T) {
 	}
 }
 
-func TestMain(m *testing.M) {
-	// Tests run inside relay-managed tmux panes too. Keep App.Run calls local so
-	// test commands cannot leak through the pane's authenticated desktop bridge
-	// into the live control plane.
-	_ = os.Setenv(bridge.LocalInvokeEnv, "1")
-	os.Exit(m.Run())
-}
-
 func captureStdout(t *testing.T, fn func()) string {
 	t.Helper()
 	r, w, err := os.Pipe()
@@ -191,7 +208,62 @@ func TestCurrentParentIDUsesRelaySessionIdentity(t *testing.T) {
 	}
 }
 
-func TestAuthenticatedManagerCannotBypassHierarchy(t *testing.T) {
+func TestOnlyInteractiveCommandsBypassStatelessServiceTransport(t *testing.T) {
+	for _, args := range [][]string{{"session", "attach", "sess-1"}, {"resume"}, {"resume", "--session", "worker"}} {
+		if !commandNeedsLocalTTY(args) {
+			t.Fatalf("interactive command %v was marked forwardable", args)
+		}
+	}
+	for _, args := range [][]string{{"session", "list"}, {"agent", "protocol"}, {"resume", "list", "--probe"}, {"root", "status"}} {
+		if commandNeedsLocalTTY(args) {
+			t.Fatalf("stateless command %v was kept local", args)
+		}
+	}
+}
+
+func TestLocalCLIForwardsAuthenticatedRequestAndConfirmsResponse(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("RELAY_STATE_DIR", root)
+	t.Setenv(bridge.SocketEnv, "")
+	t.Setenv(bridge.LocalInvokeEnv, "")
+	t.Setenv("RELAY_SESSION_ID", "")
+	t.Setenv(bridge.SourceTokenEnv, "")
+	if _, err := core.EnsureHomeClientIdentity(); err != nil {
+		t.Fatal(err)
+	}
+	relayBin := filepath.Join(root, "relay-effect")
+	if err := os.WriteFile(relayBin, []byte("#!/bin/sh\nprintf 'forwarded:%s\\n' \"$1\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	server := &bridge.Server{
+		SockPath: core.DesktopBridgeSocketPath(), RelayBin: relayBin, Build: coord.Build,
+		Authorize: core.AuthorizeBridgeSource, AuthorizeRequest: core.AuthorizeBridgeRequest,
+		ReceiptDir: core.CommandReceiptDir(),
+	}
+	done := make(chan error, 1)
+	go func() { done <- server.Serve() }()
+	t.Cleanup(func() { _ = server.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	client := bridge.Client{SockPath: core.DesktopBridgeSocketPath()}
+	for client.Ping(ctx) != nil {
+		if ctx.Err() != nil {
+			t.Fatal(ctx.Err())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	var code int
+	out := captureStdout(t, func() { code = New().Run([]string{"version"}) })
+	if code != 0 || strings.TrimSpace(out) != "forwarded:version" {
+		t.Fatalf("code=%d output=%q", code, out)
+	}
+	entries, err := os.ReadDir(core.CommandReceiptDir())
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("command receipts=%d err=%v", len(entries), err)
+	}
+}
+
+func TestApplyHandoffSourceResolvesBoundaryAuthorizedParent(t *testing.T) {
 	t.Setenv("RELAY_STATE_DIR", t.TempDir())
 	t.Setenv(bridge.SourceSessionEnv, "sess-manager")
 	now := time.Now().UTC()
@@ -205,8 +277,8 @@ func TestAuthenticatedManagerCannotBypassHierarchy(t *testing.T) {
 		}
 	}
 	opts := core.HandoffOpts{SourceSessionID: "sess-root", Workspace: "workspace:1", Pane: "surface:1"}
-	if _, err := a.applyHandoffSource(context.Background(), &opts); err == nil || !bytes.Contains([]byte(err.Error()), []byte("bypasses authenticated manager")) {
-		t.Fatalf("hierarchy bypass error = %v", err)
+	if _, err := a.applyHandoffSource(context.Background(), &opts); err != nil || opts.SourceHostID != core.LocalHostID || opts.SourcePersistName != "root" {
+		t.Fatalf("authorized parent was not resolved: opts=%+v err=%v", opts, err)
 	}
 
 	opts.SourceSessionID = "sess-manager"

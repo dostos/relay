@@ -1,5 +1,5 @@
-// Package selfupdate performs transactional runtime upgrades of relay and
-// relayd. Bootstrap/service registration remains outside this package.
+// Package selfupdate performs transactional runtime upgrades of the primary
+// relay executable. Bootstrap/service registration remains outside this package.
 package selfupdate
 
 import (
@@ -100,20 +100,18 @@ func Apply(ctx context.Context, plan Plan) (*Result, error) {
 		return nil, err
 	}
 	defer os.RemoveAll(stage)
-	for _, item := range []struct{ name, pkg string }{{"relay", "./cmd/relay"}, {"relayd", "./cmd/relayd"}} {
-		cmd := exec.CommandContext(ctx, "go", "build", "-ldflags", "-X "+buildVariable+"="+build, "-o", filepath.Join(stage, item.name), item.pkg)
-		cmd.Dir = worktree
-		if output, err := cmd.CombinedOutput(); err != nil {
-			return nil, fmt.Errorf("build %s: %w (%s)", item.name, err, strings.TrimSpace(string(output)))
-		}
-		if err := verifyBuild(ctx, filepath.Join(stage, item.name), build); err != nil {
-			return nil, err
-		}
+	cmd := exec.CommandContext(ctx, "go", "build", "-ldflags", "-X "+buildVariable+"="+build, "-o", filepath.Join(stage, "relay"), "./cmd/relay")
+	cmd.Dir = worktree
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("build relay: %w (%s)", err, strings.TrimSpace(string(output)))
+	}
+	if err := verifyBuild(ctx, filepath.Join(stage, "relay"), build); err != nil {
+		return nil, err
 	}
 	if _, err := git(ctx, plan.Repo, "merge", "--ff-only", ref); err != nil {
 		return nil, err
 	}
-	if err := installPair(stage, plan.InstallDir); err != nil {
+	if err := installPrimary(stage, plan.InstallDir); err != nil {
 		return nil, err
 	}
 	return &Result{Build: build}, nil
@@ -140,14 +138,18 @@ func verifyBuild(ctx context.Context, binary, want string) error {
 	return nil
 }
 
-func installPair(stage, installDir string) error {
+func installPrimary(stage, installDir string) error {
 	if err := os.MkdirAll(installDir, 0o755); err != nil {
 		return err
 	}
+	staged := filepath.Join(stage, "relay")
+	if info, err := os.Stat(staged); err != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("staged relay executable required")
+	}
 	names := []string{"relay", "relayd"}
-	var backed, installed []string
+	var backed []string
 	rollback := func() {
-		for _, name := range installed {
+		for _, name := range names {
 			_ = os.Remove(filepath.Join(installDir, name))
 		}
 		for _, name := range backed {
@@ -157,18 +159,28 @@ func installPair(stage, installDir string) error {
 	for _, name := range names {
 		dst, previous := filepath.Join(installDir, name), filepath.Join(installDir, name+".previous")
 		_ = os.Remove(previous)
-		if _, err := os.Stat(dst); err == nil {
+		if _, err := os.Lstat(dst); err == nil {
 			if err := os.Rename(dst, previous); err != nil {
 				rollback()
 				return err
 			}
 			backed = append(backed, name)
 		}
-		if err := os.Rename(filepath.Join(stage, name), dst); err != nil {
-			rollback()
-			return err
-		}
-		installed = append(installed, name)
+	}
+	if err := os.Rename(staged, filepath.Join(installDir, "relay")); err != nil {
+		rollback()
+		return err
+	}
+	compatTmp := filepath.Join(installDir, ".relayd-compat")
+	_ = os.Remove(compatTmp)
+	if err := os.Symlink("relay", compatTmp); err != nil {
+		rollback()
+		return err
+	}
+	if err := os.Rename(compatTmp, filepath.Join(installDir, "relayd")); err != nil {
+		_ = os.Remove(compatTmp)
+		rollback()
+		return err
 	}
 	return nil
 }

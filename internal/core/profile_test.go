@@ -74,17 +74,17 @@ func TestAgentLaunchCCS(t *testing.T) {
 
 func TestAgentLaunchHooksAreGeneralAndProviderAware(t *testing.T) {
 	codex := (&AgentSpec{Name: "codex"}).LaunchCommand("goal")
-	for _, want := range []string{"PermissionRequest", "relay hook --kind result", "relay\" signal exit", "--dangerously-bypass-approvals-and-sandbox"} {
+	for _, want := range []string{"PermissionRequest", "relay hook --kind result", "relay\" signal exit", "--dangerously-bypass-approvals-and-sandbox", "mcp_servers.relay.command", "goal"} {
 		if !strings.Contains(codex, want) {
 			t.Fatalf("codex command missing %q: %s", want, codex)
 		}
 	}
 	claude := (&AgentSpec{Name: "claude"}).LaunchCommand("goal")
-	if !strings.Contains(claude, "--settings") || !strings.Contains(claude, "permission_required") || !strings.Contains(claude, "--dangerously-skip-permissions") {
+	if !strings.Contains(claude, "--settings") || !strings.Contains(claude, "permission_required") || !strings.Contains(claude, "--dangerously-skip-permissions") || !strings.Contains(claude, "--mcp-config") {
 		t.Fatalf("claude hooks missing: %s", claude)
 	}
 	cursor := (&AgentSpec{Name: "cursor-agent"}).LaunchCommand("goal")
-	if !strings.Contains(cursor, "signal exit") || !strings.Contains(cursor, "--force") {
+	if !strings.Contains(cursor, "signal exit") || !strings.Contains(cursor, "--force") || !strings.Contains(cursor, "goal") {
 		t.Fatalf("generic exit wrapper missing: %s", cursor)
 	}
 	off := (&AgentSpec{Name: "codex", RelayHooks: "off"}).LaunchCommand("goal")
@@ -93,6 +93,29 @@ func TestAgentLaunchHooksAreGeneralAndProviderAware(t *testing.T) {
 	}
 	if !strings.Contains(off, "--dangerously-bypass-approvals-and-sandbox") {
 		t.Fatalf("hooks off also disabled autonomous permissions: %s", off)
+	}
+}
+
+func TestKnownAgentsReceiveExactNativeInitialPrompt(t *testing.T) {
+	goal := "quote ' backtick ` dollar $ newline\nsecond"
+	for _, spec := range []AgentSpec{
+		{Name: "cursor-agent"},
+		{Name: "codex"},
+		{Name: "claude"},
+		{Name: "ccs:personal"},
+		{Name: "grok", Command: "/opt/bin/cursor-agent --model fast"},
+	} {
+		if !spec.SupportsNativePrompt() {
+			t.Fatalf("%s did not advertise native prompt support", spec.Name)
+		}
+		payload := spec.launchScript(goal)
+		if !strings.Contains(payload, shellQuote(goal)) {
+			t.Fatalf("%s payload missing exact shell-safe prompt: %s", spec.Name, payload)
+		}
+	}
+	custom := AgentSpec{Name: "custom-agent", Command: "custom-agent"}
+	if custom.SupportsNativePrompt() || strings.Contains(custom.launchScript(goal), shellQuote(goal)) {
+		t.Fatalf("unknown CLI bypassed composer fallback: %s", custom.launchScript(goal))
 	}
 }
 

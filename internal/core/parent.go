@@ -1026,6 +1026,7 @@ func (p *ParentService) deliverMessage(ctx context.Context, parent *Session, ho 
 			if writeErr != nil {
 				err = fmt.Errorf("reserve parent delivery: %w", writeErr)
 			} else if !claimed {
+				cancel()
 				return nil
 			} else {
 				err = p.Sessions.Send(attemptCtx, parent.ID, FormatParentNotice(notice), true)

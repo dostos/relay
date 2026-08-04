@@ -304,6 +304,8 @@ func appendLedgerLocked(record map[string]any) error {
 		return err
 	}
 	defer f.Close()
-	_, err = f.Write(append(b, '\n'))
-	return err
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		return err
+	}
+	return f.Sync()
 }

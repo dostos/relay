@@ -162,6 +162,28 @@ func TestAuthorizeBridgeSource(t *testing.T) {
 	}
 }
 
+func TestHomeClientIdentityAuthenticatesWithoutSyntheticSession(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	identity, err := EnsureHomeClientIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.SessionID != HomeClientSessionID || len(identity.Token) < 32 {
+		t.Fatalf("identity=%+v", identity)
+	}
+	if err := AuthorizeBridgeSource(identity); err != nil {
+		t.Fatal(err)
+	}
+	identity.Token = "wrong"
+	if err := AuthorizeBridgeSource(identity); err == nil {
+		t.Fatal("wrong home token authorized")
+	}
+	info, err := os.Stat(HomeClientTokenPath())
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("home credential mode=%v err=%v", info.Mode().Perm(), err)
+	}
+}
+
 func TestLoadBridgeIdentityForPersist(t *testing.T) {
 	t.Setenv("RELAY_STATE_DIR", t.TempDir())
 	if err := EnsureStateDirs(); err != nil {

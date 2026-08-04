@@ -20,6 +20,16 @@ func TestLoginGateIsBlocked(t *testing.T) {
 	}
 }
 
+func TestCursorPressAnyKeyLoginGateIsBlocked(t *testing.T) {
+	got := ClassifyAgentPane(`
+             Cursor Agent
+             v2026.07.23-e383d2b
+             Press any key to log in...`)
+	if got.State != AgentBlocked || got.Gate == nil || got.Reason != "waiting for account login" {
+		t.Fatalf("Cursor login gate must block, got %+v", got)
+	}
+}
+
 func TestFolderTrustGateIsBlocked(t *testing.T) {
 	got := ClassifyAgentPane(`
    Accessing workspace:

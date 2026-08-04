@@ -25,6 +25,17 @@ func streamEvents(ctx context.Context, c ports.Coord, t ports.Transport, stream 
 		errCh <- c.Subscribe(subCtx, t, stream, fromSeq, follow, pw)
 		_ = pw.Close()
 	}()
+	// A transport may take time to unwind its remote process after cancellation.
+	// Close the local reader immediately so Scanner cannot outlive a bounded
+	// wait's advertised timeout.
+	go func() {
+		select {
+		case <-subCtx.Done():
+			_ = pr.CloseWithError(subCtx.Err())
+		case <-ctx.Done():
+			_ = pr.CloseWithError(ctx.Err())
+		}
+	}()
 	sc := bufio.NewScanner(pr)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
@@ -45,5 +56,12 @@ func streamEvents(ctx context.Context, c ports.Coord, t ports.Transport, stream 
 		}
 	}
 	_ = pr.Close()
-	return <-errCh // subscribe error (nil on clean end; ctx err on cancel)
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-subCtx.Done():
+		return subCtx.Err()
+	}
 }

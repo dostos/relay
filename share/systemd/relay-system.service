@@ -1,0 +1,22 @@
+[Unit]
+Description=Relay authoritative home service
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=REPLACE_USER
+Group=REPLACE_GROUP
+ExecStart=REPLACE_HOME/.local/bin/relay service run
+Environment=HOME=REPLACE_HOME
+Environment=XDG_STATE_HOME=REPLACE_HOME/.local/state
+Environment=XDG_CONFIG_HOME=REPLACE_HOME/.config
+Environment=RELAYD_SOCK=REPLACE_HOME/.local/state/relay/relayd.sock
+Environment=PATH=REPLACE_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -34,7 +34,7 @@ func StatusLocal(sockPath string) (*coord.Response, error) {
 func roundTrip(sockPath string, req coord.Request) (*coord.Response, error) {
 	c, err := Dial(sockPath)
 	if err != nil {
-		return nil, fmt.Errorf("relayd not running (socket %s): %w — run: relayd serve  or  relay host bootstrap", sockPath, err)
+		return nil, fmt.Errorf("relay event service not running (socket %s): %w — run: relay service event run or relay host bootstrap", sockPath, err)
 	}
 	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
@@ -44,14 +44,14 @@ func roundTrip(sockPath string, req coord.Request) (*coord.Response, error) {
 	}
 	sc := bufio.NewScanner(c)
 	if !sc.Scan() {
-		return nil, fmt.Errorf("no response from relayd")
+		return nil, fmt.Errorf("no response from relay event service")
 	}
 	var resp coord.Response
 	if err := json.Unmarshal(sc.Bytes(), &resp); err != nil {
 		return nil, err
 	}
 	if !resp.OK {
-		return &resp, fmt.Errorf("relayd: %s", resp.Error)
+		return &resp, fmt.Errorf("relay event service: %s", resp.Error)
 	}
 	return &resp, nil
 }
@@ -60,7 +60,7 @@ func roundTrip(sockPath string, req coord.Request) (*coord.Response, error) {
 func SubscribeLocal(sockPath, session string, from int64, follow bool, w io.Writer) error {
 	c, err := Dial(sockPath)
 	if err != nil {
-		return fmt.Errorf("relayd not running (socket %s): %w", sockPath, err)
+		return fmt.Errorf("relay event service not running (socket %s): %w", sockPath, err)
 	}
 	defer c.Close()
 	req := coord.Request{Op: "subscribe", Session: session, From: from, Follow: follow}
@@ -80,7 +80,7 @@ func SubscribeLocal(sockPath, session string, from int64, follow bool, w io.Writ
 			if json.Unmarshal(line, &probe) == nil {
 				if ok, has := probe["ok"].(bool); has && !ok {
 					errMsg, _ := probe["error"].(string)
-					return fmt.Errorf("relayd: %s", errMsg)
+					return fmt.Errorf("relay event service: %s", errMsg)
 				}
 			}
 		}

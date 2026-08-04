@@ -2,7 +2,9 @@ package core
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -53,6 +55,38 @@ func TestLaunchTerminalReceiptAcrossAgentCLIsAndJob(t *testing.T) {
 	}
 }
 
+func TestLaunchTerminalReceiptPreservesExactProviderPayloads(t *testing.T) {
+	for _, tc := range []struct {
+		spec  AgentSpec
+		wants []string
+	}{
+		{AgentSpec{Name: "cursor-agent", Command: "cursor-agent --model fast", Args: []string{"--print"}}, []string{"cursor-agent --model fast", "--print", "--force", "signal exit"}},
+		{AgentSpec{Name: "codex"}, []string{"--dangerously-bypass-approvals-and-sandbox", "hooks.PermissionRequest", "hooks.Stop", "signal exit"}},
+		{AgentSpec{Name: "claude", Args: []string{"--permission-mode", "bypassPermissions"}}, []string{"--permission-mode", "bypassPermissions", "--settings", "PermissionRequest", "Stop", "signal exit"}},
+	} {
+		spec := tc.spec
+		payload := spec.launchScript("goal containing 'quotes' and `backticks`")
+		wrapped := withLaunchTerminalReceipt(payload, "ho-exact")
+		encoded := base64.StdEncoding.EncodeToString([]byte(payload))
+		if !strings.Contains(wrapped, shellQuote(encoded)) {
+			t.Fatalf("%s payload was re-quoted instead of encoded exactly: %s", spec.Name, wrapped)
+		}
+		if strings.Count(wrapped, "bash -ilc") != 1 || strings.Contains(wrapped, "bash -lc ") {
+			t.Fatalf("%s launch regained nested login shells: %s", spec.Name, wrapped)
+		}
+		for _, want := range []string{"relay-launch-terminal handoff=ho-exact", "base64 -d", `bash -- "$relay_launch_tmp"`} {
+			if !strings.Contains(wrapped, want) {
+				t.Fatalf("%s wrapper missing %q: %s", spec.Name, want, wrapped)
+			}
+		}
+		for _, want := range tc.wants {
+			if !strings.Contains(payload, want) {
+				t.Fatalf("%s exact payload missing %q: %s", spec.Name, want, payload)
+			}
+		}
+	}
+}
+
 func TestCollectTerminalDiagnosticsBeforeCleanup(t *testing.T) {
 	t.Setenv("RELAY_STATE_DIR", t.TempDir())
 	reg := &Registry{}
@@ -71,6 +105,47 @@ func TestCollectTerminalDiagnosticsBeforeCleanup(t *testing.T) {
 	}
 	if !strings.Contains(stored.TerminalCapture, "provider error") || !persist.destroyed {
 		t.Fatalf("capture/cleanup ordering lost: %+v destroyed=%t", stored, persist.destroyed)
+	}
+}
+
+func TestReconcileFinalizesLiveHoldingShellFromTerminalReceipt(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		code   int
+		status HandoffStatus
+	}{
+		{name: "success", code: 0, status: StatusDone},
+		{name: "failure", code: 127, status: StatusFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("RELAY_STATE_DIR", t.TempDir())
+			reg := &Registry{}
+			now := time.Now().UTC()
+			sess := &Session{ID: "sess-job", HostID: "self", Persist: ports.PersistHandle{Kind: "tmux", Name: "job"}, CreatedAt: now}
+			ho := &Handoff{ID: "ho-job", SessionID: sess.ID, HostID: "self", Kind: KindJob, Status: StatusRunning, CreatedAt: now}
+			if err := reg.PutSession(sess); err != nil {
+				t.Fatal(err)
+			}
+			if err := reg.PutHandoff(ho); err != nil {
+				t.Fatal(err)
+			}
+			persist := &gatePersistence{capture: fmt.Sprintf("job output\n[relay-launch-terminal handoff=ho-job rc=%d]\n$ ", tc.code)}
+			transport := func(string) (ports.Transport, error) { return &fakeTransport{id: "self"}, nil }
+			sessions := &SessionService{Reg: reg, Persist: persist, NewTransport: transport}
+			service := &HandoffService{Reg: reg, Persist: persist, Sessions: sessions, NewTransport: transport}
+
+			finalized, err := service.Reconcile(context.Background())
+			if err != nil || finalized != 1 {
+				t.Fatalf("reconcile finalized=%d err=%v", finalized, err)
+			}
+			stored, err := reg.GetHandoff(ho.ID)
+			if err != nil || stored.Status != tc.status || stored.ExitCode == nil || *stored.ExitCode != tc.code || stored.TerminalExitCode == nil || *stored.TerminalExitCode != tc.code {
+				t.Fatalf("terminal handoff=%+v err=%v", stored, err)
+			}
+			if !persist.destroyed {
+				t.Fatal("terminal holding shell was not cleaned up")
+			}
+		})
 	}
 }
 
@@ -249,6 +324,29 @@ func TestGoalDeliveryRequiresComposerSubmissionEffect(t *testing.T) {
 				t.Fatalf("handoff = %+v, err=%v", stored, getErr)
 			}
 		})
+	}
+}
+
+func TestNativeGoalDeliveryNeverMutatesComposer(t *testing.T) {
+	oldDelay := agentReadyPollDelay
+	agentReadyPollDelay = 0
+	t.Cleanup(func() { agentReadyPollDelay = oldDelay })
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	reg := &Registry{}
+	now := time.Now().UTC()
+	sess := &Session{ID: "sess-native", HostID: "self", Persist: ports.PersistHandle{Kind: "tmux", Name: "native"}, CreatedAt: now}
+	ho := &Handoff{ID: "ho-native", SessionID: sess.ID, HostID: "self", Kind: KindAgent, Status: StatusRunning, LaunchState: EffectAcknowledged, DeliveryState: EffectPending, CreatedAt: now}
+	if err := reg.PutHandoff(ho); err != nil {
+		t.Fatal(err)
+	}
+	persist := &gatePersistence{capture: "Cursor Agent\nGenerating response\n❯ "}
+	service := &HandoffService{Reg: reg, Coord: newFakeCoord(), Persist: persist}
+	if err := service.confirmNativeAgentGoal(context.Background(), &fakeTransport{id: "self"}, sess, ho); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := reg.GetHandoff(ho.ID)
+	if err != nil || stored.DeliveryState != EffectAcknowledged || len(persist.sent) != 0 {
+		t.Fatalf("handoff=%+v sent=%v err=%v", stored, persist.sent, err)
 	}
 }
 

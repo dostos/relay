@@ -3,7 +3,9 @@ package core
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -17,6 +19,8 @@ import (
 	"github.com/dostos/relay/internal/ports"
 	"github.com/dostos/relay/internal/shellquote"
 )
+
+const HomeClientSessionID = "human-local"
 
 // BridgeRemoteSocket is the owner-only stream-local endpoint exposed inside a
 // relay tmux session. The SSH attach maps it to the desktop bridge socket.
@@ -157,6 +161,13 @@ func forgetBridgeTokenChecked(sessionID string) error {
 // AuthorizeBridgeSource binds a forwarded request to the unguessable token
 // injected into its originating tmux session.
 func AuthorizeBridgeSource(source bridge.Source) error {
+	if source.SessionID == HomeClientSessionID {
+		raw, err := os.ReadFile(HomeClientTokenPath())
+		if err != nil || subtle.ConstantTimeCompare([]byte(strings.TrimSpace(string(raw))), []byte(source.Token)) != 1 {
+			return fmt.Errorf("relay home client identity rejected")
+		}
+		return nil
+	}
 	if source.SessionID == "" || source.Token == "" {
 		return fmt.Errorf("relay bridge source identity missing")
 	}
@@ -168,6 +179,63 @@ func AuthorizeBridgeSource(source bridge.Source) error {
 		return fmt.Errorf("relay bridge source session is not active locally")
 	}
 	return nil
+}
+
+// EnsureHomeClientIdentity creates the owner-only credential used by local
+// stateless CLI requests. Unix socket permissions plus this token bind the
+// request to the same OS account without inventing a hierarchy session.
+func EnsureHomeClientIdentity() (bridge.Source, error) {
+	if err := EnsureStateDirs(); err != nil {
+		return bridge.Source{}, err
+	}
+	if identity, err := LoadHomeClientIdentity(); err == nil {
+		return identity, nil
+	} else if _, statErr := os.Lstat(HomeClientTokenPath()); statErr == nil {
+		return bridge.Source{}, err
+	} else if !os.IsNotExist(statErr) {
+		return bridge.Source{}, statErr
+	}
+	random := make([]byte, 32)
+	if _, err := rand.Read(random); err != nil {
+		return bridge.Source{}, err
+	}
+	token := base64.RawURLEncoding.EncodeToString(random)
+	file, err := os.OpenFile(HomeClientTokenPath(), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if os.IsExist(err) {
+		return LoadHomeClientIdentity()
+	}
+	if err != nil {
+		return bridge.Source{}, err
+	}
+	if _, err := file.WriteString(token + "\n"); err != nil {
+		_ = file.Close()
+		return bridge.Source{}, err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return bridge.Source{}, err
+	}
+	if err := file.Close(); err != nil {
+		return bridge.Source{}, err
+	}
+	return bridge.Source{SessionID: HomeClientSessionID, HostID: LocalHostID, Token: token}, nil
+}
+
+func LoadHomeClientIdentity() (bridge.Source, error) {
+	path := HomeClientTokenPath()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return bridge.Source{}, err
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+		return bridge.Source{}, fmt.Errorf("invalid home client credential at %s", path)
+	}
+	token := strings.TrimSpace(string(raw))
+	if len(token) < 32 {
+		return bridge.Source{}, fmt.Errorf("invalid home client credential at %s", path)
+	}
+	return bridge.Source{SessionID: HomeClientSessionID, HostID: LocalHostID, Token: token}, nil
 }
 
 // AppendSessionStart adds the durable node snapshot used by relay history.

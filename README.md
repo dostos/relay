@@ -1,18 +1,14 @@
 # relay
 
-**Durable remote agent panes for [cmux](https://cmux.com)** — plus a small CLI that agents can drive without poll loops.
+**Durable remote agent panes for [cmux](https://cmux.com)** — with one authoritative home service and a small stateless CLI that agents can drive without poll loops.
 
-`relay` attaches long-lived remote work (SSH + tmux + optional `relayd`) into cmux workspaces, marks those tabs with a teal **◆ RELAY** badge, and restores them after cmux quit / Mac reboot via cmux Vault.
+`relay` attaches long-lived remote work (SSH + tmux) into cmux workspaces, marks those tabs with a teal **◆ RELAY** badge, and restores them after cmux quit / Mac reboot via cmux Vault. The same installed binary runs the home authority (`relay service run`), optional presentation client (`relay viz serve`), and host-local event edge (`relay service event run`).
 
 <p align="center">
   <img src="docs/images/cmux-relay-hero.jpg" alt="cmux with relay-managed split panes and teal ◆ RELAY workspace badge" width="920" />
 </p>
 
 <p align="center"><em>Illustrative UI (anonymized hosts). Real tabs look like <code>◆ RELAY · train</code> with a matching sidebar pill.</em></p>
-
-<p align="center">
-  <img src="docs/images/architecture.svg" alt="cmux ↔ relay CLI ↔ tmux + relayd" width="920" />
-</p>
 
 ## Why
 
@@ -142,10 +138,12 @@ Relay stays model-free throughout. It owns enrollment, rule resolution, and the
 audit; the judgment lives in the portable role at
 [`share/roles/relay-conductor.md`](share/roles/relay-conductor.md).
 
-For goal-driven delegation, the vendor-neutral
-[`relay-goal-handoff`](skills/relay-goal-handoff/SKILL.md) skill infers the
-immediate hierarchy edge, chooses job versus agent and an appropriate CLI from
-task fit and remaining usage, then yields ownership without micromanagement.
+For goal-driven delegation, `relay agent protocol` is the authoritative native
+contract. The repository's vendor-neutral
+[`relay-goal-handoff`](skills/relay-goal-handoff/SKILL.md) is an optional human
+and manager reference for goal shaping and CLI selection; installation does
+not inject it into any agent runtime, and Relay correctness never depends on
+the skill being loaded.
 
 **Governance runs where the control plane runs.** The registry, the parent
 inboxes, and the watcher processes all live on the machine that started the
@@ -159,22 +157,24 @@ the machine's availability changes. Relay deliberately does not infer this
 policy from a running process or socket. See
 [`docs/superpowers/specs/2026-08-01-relay-autonomous-D-control-plane-locality.md`](docs/superpowers/specs/2026-08-01-relay-autonomous-D-control-plane-locality.md).
 
-### Keeping watchers alive
+### Home service and watcher health
 
-Each live handoff needs a watcher process to route its escalations. A handoff
-whose watcher has died looks exactly like a quiet one — nothing routes, and
-nothing says so. `relay supervise` owns that lifecycle: one long-lived process
-that reconciles live handoffs against running watchers every 30s and adopts
-anything unwatched.
+The always-on home authority independently supervises the event coordinator,
+authenticated command boundary/forwarders, and watcher reconciler in one
+process. A component failure restarts only that component, but aggregate health
+stays red until all components are live, ready, on the same build, and able to
+make durable effects.
 
 ```bash
-relay supervise --check    # {"live":1,"ok":true,"unwatched":[]}; exit 1 if any are unwatched
-relay supervise            # the reconciler itself; run it under launchd
+relay service run          # service-manager entrypoint
+relay service status       # per-component health receipt
+relay doctor               # also flags old split authority processes
 ```
 
-Install it with `share/launchd/com.dostos.relay-supervisor.plist` (replace the
-two `REPLACE_*` placeholders). `install.sh` then restarts that one process on
-upgrade instead of recycling every watcher individually.
+Use `share/systemd/relay.service` on the authoritative host. The old
+`relayd.service`, `relay-control.service`, and `relay-supervisor.service` are
+migration inputs, not peers: only one authority may own the canonical sockets
+and state. See [`docs/unified-service.md`](docs/unified-service.md).
 
 Escalation is vertical, but peers often need to coordinate without asking
 anyone to decide anything. The children of one manager share a **board** — a
@@ -272,12 +272,13 @@ scoped Git roots clean with no commits ahead of upstream, and an explicit
 
 ### 3) Bring a new machine online
 
-Discover SSH aliases, probe agent CLIs, propose `host.yaml`, bootstrap `relayd`:
+Discover SSH aliases, probe agent CLIs, propose `host.yaml`, and bootstrap the
+host-local event role from the primary binary:
 
 ```bash
 relay targets --json
 relay host discover -H host-a --json
-relay host init -H host-a --apply   # installs relay + relayd on the host
+relay host init -H host-a --apply   # installs relay + compatibility symlink
 ```
 
 ### 4) Orchestrator loop (no poll loops)
@@ -285,6 +286,20 @@ relay host init -H host-a --apply   # installs relay + relayd on the host
 `relay agent` is the self-describing agent protocol. Run `relay agent protocol`
 for its compact rules, then follow JSON `next` / `argv` only — never
 `events tail -f` in a tight loop and never attach an agent to a session.
+
+Managed Codex and Claude launches receive Relay as an invocation-local MCP
+stdio tool and receive their initial goal through the provider's native prompt
+argument. Cursor reads its user MCP inventory; register Relay without replacing
+other servers, then approve that one server explicitly:
+
+```bash
+relay mcp install cursor
+cursor-agent mcp enable relay
+```
+
+The MCP adapter exposes one `relay` tool whose `argv` is sent through the same
+authenticated home boundary as the CLI. It contains no parallel policy or
+runtime-specific orchestration instructions.
 
 ## Install
 
@@ -340,7 +355,7 @@ relay viz restore                 # optional manual path
 | **control bridge** | Unix-socket daemon on the control host; serializes authenticated remote requests |
 | **cmux client** | Optional visualization endpoint; executes cmux operations but owns no agent lifecycle |
 | **tmux** (remote) | Durable process surface |
-| **relayd** (remote) | Always-on event bus over a **Unix socket only** (no TCP listen) |
+| **relay service event** (remote) | Always-on event bus over a **Unix socket only** (no TCP listen) |
 
 Host profiles (`~/.config/relay/host.yaml` on each remote) list agent CLIs and `path_map`. Connection coords stay in your SSH config — relay only uses Host aliases.
 
@@ -354,7 +369,7 @@ pane's dedicated SSH connection.
 
 An always-on control host can request visualization without moving its registry
 or watchers to the Mac. Home sends only session ID, SSH target, and tmux name to
-the optional Mac `relayd viz` service through a durable local queue. The Mac
+the optional Mac `relay viz serve` service through a durable local queue. The Mac
 owns SSH attachment and placement policy, and consumes that queue using its own
 outbound SSH connection. Configure home's `~/.config/relay/viz.json`:
 
@@ -390,16 +405,16 @@ can still pin a client-local identity for a host key.
 }
 ```
 
-`relay viz update` appends a durable `update_relayd` signal. The Mac refuses it
-when its checkout is dirty or not on the configured branch. Otherwise relayd
-fetches the configured ref, builds both binaries in a detached staging
-worktree, verifies their stamped build, fast-forwards the checkout, and swaps
-the pair on the destination filesystem with rollback copies. It then
+`relay viz update` appends a durable compatibility `update_relayd` signal. The Mac refuses it
+when its checkout is dirty or not on the configured branch. Otherwise Relay
+fetches the configured ref, builds the primary binary in a detached staging
+worktree, verifies its stamped build, fast-forwards the checkout, and atomically
+swaps it plus the compatibility symlink with rollback copies. It then
 acknowledges with the installed commit in `result`, advances its cursor, and
 lets launchd restart the follower.
 After the home bridge has been verified for local and worker sessions,
 `relay viz retire-control` durably asks the Mac to boot out and unregister the
-legacy supervisor and stop only a verified `relayd bridge` socket owner. The
+legacy supervisor and stop only a verified legacy bridge socket owner. The
 Viz follower and cmux restoration remain installed, and the Mac acknowledges
 the exact retirement result before advancing its cursor.
 `install.sh` is only for initial binary/service bootstrap. Both outbound control and target attachment are
@@ -421,7 +436,7 @@ relay agent start|wait|send|capture|done    # orchestrator API
 relay parent register|inbox|reply|ack       # durable parent communication
 relay board post|query|watch                # manager-scoped peer coordination
 relay root adopt|enroll|status|digest       # always-on apex (autonomous mode)
-relay supervise [--check]                   # keep one watcher per live handoff
+relay service run|status                    # unified authority and component health
 relay parent status|retire                  # guarded local-pane cleanup
 relay history                               # source → destination lineage
 relay pane list                             # owned surface/workspace/pane + parent + liveness

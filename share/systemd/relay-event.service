@@ -1,0 +1,15 @@
+[Unit]
+Description=Relay host-local event coordinator
+After=default.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/relay service event run
+Restart=on-failure
+RestartSec=5
+Environment=RELAYD_SOCK=%h/.local/state/relay/relayd.sock
+
+[Install]
+WantedBy=default.target

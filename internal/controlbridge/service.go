@@ -22,6 +22,7 @@ type Service struct {
 	BridgeSocket string
 	Stderr       *os.File
 	AckSync      func(context.Context) error
+	Ready        func()
 
 	mu      sync.Mutex
 	tunnels map[string]*tunnel
@@ -40,6 +41,9 @@ func (s *Service) Run(ctx context.Context) error {
 	defer s.stopAll()
 	if err := s.reconcile(ctx); err != nil {
 		return err
+	}
+	if s.Ready != nil {
+		s.Ready()
 	}
 	for {
 		select {

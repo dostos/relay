@@ -35,6 +35,9 @@ type SupervisorService struct {
 	// supervisor process starts, so binary upgrades cannot leave old hook
 	// semantics installed indefinitely.
 	RepairSensors func(context.Context, string) error
+	// ReconcileHandoffs discovers correlated terminal receipts and dead remote
+	// handles even when no event arrives to wake a blocking watcher.
+	ReconcileHandoffs func(context.Context) (int, error)
 
 	mu      sync.Mutex
 	running map[string]struct{}
@@ -144,6 +147,13 @@ func (s *SupervisorService) NeedsWatch() ([]*Handoff, error) {
 // handoff flock means a duplicate would fail anyway, and a standalone
 // `relay parent watch` keeps working alongside the supervisor.
 func (s *SupervisorService) Reconcile(ctx context.Context) (int, error) {
+	if s.ReconcileHandoffs != nil {
+		if finalized, err := s.ReconcileHandoffs(ctx); err != nil {
+			s.emit("terminal_reconcile_error", "", err)
+		} else if finalized > 0 {
+			s.emit("terminal_handoffs_reconciled", "", nil)
+		}
+	}
 	if s.RepairSensors != nil {
 		sessions, err := s.Reg.ListSessions()
 		if err != nil {

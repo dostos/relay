@@ -177,7 +177,7 @@ func (v *Viz) controlSSHArgs(remoteCommand string) ([]string, error) {
 func (v *Viz) remoteRelayd(command string) string {
 	bin := v.Control.Relayd
 	if bin == "" {
-		bin = ".local/bin/relayd"
+		bin = ".local/bin/relay"
 	}
 	if strings.HasPrefix(bin, "/") {
 		return shellquote.Quote(bin) + " " + command

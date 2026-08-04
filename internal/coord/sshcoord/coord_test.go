@@ -11,7 +11,7 @@ func TestSensorCommandValidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(cmd, "relayd emit") || !strings.Contains(cmd, "'sess1'") || !strings.Contains(cmd, "'exit'") {
+	if !strings.Contains(cmd, "relay service event emit") || !strings.Contains(cmd, "'sess1'") || !strings.Contains(cmd, "'exit'") {
 		t.Fatalf("unexpected cmd %q", cmd)
 	}
 	if !strings.Contains(cmd, ">/dev/null 2>&1") {
