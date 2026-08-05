@@ -648,7 +648,7 @@ func (h *HandoffService) confirmAgentGoal(ctx context.Context, t ports.Transport
 	readiness := waitAgentReady(ctx, h.Persist, t, sess.Persist, 20*time.Second)
 	switch readiness.State {
 	case AgentBlocked:
-		if readiness.Gate != nil && sess.RemoteCWD != "" {
+		if readiness.Gate != nil && readiness.Gate.Directory == "" && sess.RemoteCWD != "" {
 			readiness.Gate.Directory = sess.RemoteCWD
 		}
 		ho.Status = StatusNeedsInput

@@ -49,6 +49,23 @@ func TestFolderTrustGateIsBlocked(t *testing.T) {
 	}
 }
 
+func TestFolderTrustWinsOverTrailingGenericConfirmation(t *testing.T) {
+	got := ClassifyAgentPane(`
+   Accessing workspace:
+   /home/jingyulee/gh/dostos-workspace
+   Quick safety check: Is this a project you created or one you trust?
+   Claude Code'll be able to read, edit, and execute files here.
+   ❯ 1. Yes, I trust this folder
+     2. No, exit
+   Enter to confirm · Esc to cancel`)
+	if got.State != AgentBlocked || got.Reason != "waiting for folder-trust approval" || got.Gate == nil {
+		t.Fatalf("specific trust gate lost to generic confirmation: %+v", got)
+	}
+	if got.Gate.Directory != "/home/jingyulee/gh/dostos-workspace" || !got.Gate.DirectoryObserved || len(got.Gate.Choices) != 2 {
+		t.Fatalf("trust decision facts = %+v", got.Gate)
+	}
+}
+
 func TestRepeatedCodexTrustFramePreservesExactDecision(t *testing.T) {
 	frame := `
   Welcome to Codex, OpenAI's command-line coding agent

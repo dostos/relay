@@ -967,6 +967,94 @@ func TestBlockedSecurityGateIgnoresAutoReplyPolicy(t *testing.T) {
 	}
 }
 
+func TestAgentParentAcceptsDirectChildWorkspaceTrust(t *testing.T) {
+	service, notifier, reg := newParentTestService(t)
+	persist := &gatePersistence{
+		capture: `Accessing workspace:
+/home/jingyulee/gh/dostos-workspace
+Quick safety check: Is this a project you created or one you trust?
+Claude Code'll be able to read, edit, and execute files here.
+❯ 1. Yes, I trust this folder
+  2. No, exit
+Enter to confirm · Esc to cancel`,
+		afterChoice: "Claude ready\n› ",
+	}
+	service.Sessions.Persist = persist
+	now := time.Now().UTC()
+	parent := &Session{ID: "sess-parent", HostID: "home", RemoteCWD: "~/dev/relay", Persist: ports.PersistHandle{Kind: "tmux", Name: "manager"}, Labels: map[string]string{"agent": "codex", "role": "handoff"}, CreatedAt: now}
+	child := &Session{ID: "sess-child", HostID: "c1", RemoteCWD: "~/gh/dostos-workspace", Persist: ports.PersistHandle{Kind: "tmux", Name: "worker"}, Labels: map[string]string{"agent": "claude", "role": "handoff"}, SourceSessionID: parent.ID, CreatedByHandoffID: "ho-gate", CreatedAt: now}
+	ho := &Handoff{ID: "ho-gate", SessionID: child.ID, HostID: child.HostID, Kind: KindAgent, Agent: "claude", Status: StatusRunning, LaunchState: EffectAcknowledged, DeliveryState: EffectPending, Goal: "run the canary", RemoteCWD: child.RemoteCWD, SourceSessionID: parent.ID, CreatedAt: now}
+	for _, sess := range []*Session{parent, child} {
+		if err := reg.PutSession(sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := reg.PutHandoff(ho); err != nil {
+		t.Fatal(err)
+	}
+
+	msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "idle"})
+	if err != nil || msg == nil || msg.State != ParentMessageReplied || msg.Reply != "approve" || !msg.AutoHandled || msg.PolicyID != agentChildWorkspaceTrustPolicyID {
+		t.Fatalf("workspace trust result = %+v err=%v", msg, err)
+	}
+	if msg.Gate == nil || !msg.Gate.DirectoryObserved || len(persist.choices) != 1 || persist.choices[0] != 0 {
+		t.Fatalf("workspace trust decision = gate %+v choices %v", msg.Gate, persist.choices)
+	}
+	if len(persist.sent) != 1 || !strings.Contains(persist.sent[0], "run the canary") || len(notifier.notices) != 0 {
+		t.Fatalf("goal delivery=%v manager notices=%d", persist.sent, len(notifier.notices))
+	}
+	stored, err := reg.GetHandoff(ho.ID)
+	if err != nil || stored.DeliveryState != EffectAcknowledged || stored.PendingGate != nil {
+		t.Fatalf("handoff after trust = %+v err=%v", stored, err)
+	}
+}
+
+func TestAgentParentWorkspaceTrustRequiresObservedMatchingDirectChild(t *testing.T) {
+	for _, tc := range []struct {
+		name, capture, childCWD, childParent, createdBy string
+	}{
+		{name: "different workspace", capture: "You are in /srv/other\nDo you trust the contents of this directory?\n› 1. Yes, continue\n  2. No, quit", childCWD: "/srv/project", childParent: "sess-parent", createdBy: "ho-gate"},
+		{name: "directory inferred", capture: "Do you trust the contents of this directory?\n› 1. Yes, continue\n  2. No, quit", childCWD: "/srv/project", childParent: "sess-parent", createdBy: "ho-gate"},
+		{name: "not direct child", capture: "You are in /srv/project\nDo you trust the contents of this directory?\n› 1. Yes, continue\n  2. No, quit", childCWD: "/srv/project", childParent: "sess-other", createdBy: "ho-other"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service, _, reg := newParentTestService(t)
+			persist := &gatePersistence{capture: tc.capture, afterChoice: "ready\n› "}
+			service.Sessions.Persist = persist
+			now := time.Now().UTC()
+			parent := &Session{ID: "sess-parent", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: LocalPersistKind, Name: "manager"}, Labels: map[string]string{"agent": "codex", "role": ParentRole}, CreatedAt: now}
+			child := &Session{ID: "sess-child", HostID: "c1", RemoteCWD: tc.childCWD, Persist: ports.PersistHandle{Kind: "tmux", Name: "worker"}, SourceSessionID: tc.childParent, CreatedByHandoffID: tc.createdBy, CreatedAt: now}
+			_ = reg.PutSession(parent)
+			_ = reg.PutSession(child)
+			ho := &Handoff{ID: "ho-gate", SessionID: child.ID, HostID: child.HostID, Kind: KindAgent, Status: StatusRunning, DeliveryState: EffectPending, SourceSessionID: parent.ID, CreatedAt: now}
+			_ = reg.PutHandoff(ho)
+
+			msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 1, Kind: "idle"})
+			if err != nil || msg == nil || msg.State != ParentMessagePending || msg.AutoHandled || len(persist.choices) != 0 {
+				t.Fatalf("unsafe trust auto-resolved: msg=%+v choices=%v err=%v", msg, persist.choices, err)
+			}
+		})
+	}
+}
+
+func TestSameRemoteWorkspace(t *testing.T) {
+	for _, tc := range []struct {
+		observed, declared string
+		want               bool
+	}{
+		{"/home/jingyu/gh/relay", "~/gh/relay", true},
+		{"/Users/jingyu/gh/relay", "~/gh/relay", true},
+		{"/srv/relay", "/srv/relay/.", true},
+		{"/home/jingyu/gh/other", "~/gh/relay", false},
+		{"/tmp/gh/relay", "~/gh/relay", false},
+		{"/home/alice/relay", "/home/bob/relay", false},
+	} {
+		if got := sameRemoteWorkspace(tc.observed, tc.declared); got != tc.want {
+			t.Fatalf("sameRemoteWorkspace(%q, %q) = %v, want %v", tc.observed, tc.declared, got, tc.want)
+		}
+	}
+}
+
 func TestResolveGateDecisionRequiresExplicitUnambiguousChoice(t *testing.T) {
 	gate := &SecurityGate{Choices: []GateChoice{{Index: 1, Label: "Yes, continue"}, {Index: 2, Label: "No, quit"}}}
 	for _, tc := range []struct {

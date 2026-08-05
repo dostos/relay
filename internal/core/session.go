@@ -666,7 +666,7 @@ func (s *SessionService) ResolveGateChoice(ctx context.Context, id string, expec
 	if readiness.State != AgentBlocked || readiness.Gate == nil {
 		return fmt.Errorf("security gate is no longer visibly blocked; sent no keys")
 	}
-	if sess.RemoteCWD != "" {
+	if readiness.Gate.Directory == "" && sess.RemoteCWD != "" {
 		readiness.Gate.Directory = sess.RemoteCWD
 	}
 	if expected == nil || formatSecurityGate(readiness.Gate) != formatSecurityGate(expected) {

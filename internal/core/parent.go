@@ -1576,6 +1576,9 @@ func (p *ParentService) routeChildEvent(ctx context.Context, ho *Handoff, ev coo
 }
 
 func (p *ParentService) applyPolicy(ctx context.Context, ho *Handoff, ev coord.Event, msg *ParentMessage) (*ParentMessage, bool) {
+	if handled, decided := p.applyAgentChildWorkspaceTrust(ctx, ho, msg); decided {
+		return handled, true
+	}
 	if p.Policies == nil || msg == nil {
 		return msg, false
 	}
@@ -1627,6 +1630,98 @@ func (p *ParentService) applyPolicy(ctx context.Context, ho *Handoff, ev coord.E
 	handled.PolicyID, handled.PolicyAction, handled.AutoHandled = decision.RuleID, decision.Action, true
 	_ = writeParentMessage(handled, false)
 	return handled, true
+}
+
+const agentChildWorkspaceTrustPolicyID = "builtin.agent-child-workspace-trust"
+
+// applyAgentChildWorkspaceTrust accepts the one authority boundary already
+// implied by a parent launching a direct child into a declared workspace. It
+// deliberately does not cover tool permissions, login/authentication, theme
+// selection, descendant gates that skipped their manager, or a prompt whose
+// directory was inferred rather than observed in the child pane.
+func (p *ParentService) applyAgentChildWorkspaceTrust(ctx context.Context, ho *Handoff, msg *ParentMessage) (*ParentMessage, bool) {
+	if p == nil || p.Reg == nil || msg == nil || ho == nil || msg.Kind != "permission_required" || msg.Gate == nil || ho.Kind != KindAgent {
+		return msg, false
+	}
+	gate := msg.Gate
+	if !strings.HasPrefix(gate.Reason, "waiting for folder-trust approval") || !gate.DirectoryObserved || len(gate.Choices) == 0 {
+		return msg, false
+	}
+	if ho.SourceSessionID == "" || msg.ParentSessionID != ho.SourceSessionID {
+		return msg, false
+	}
+	parent, err := p.Reg.GetSession(ho.SourceSessionID)
+	if err != nil || parent == nil || (parent.Labels["agent"] == "" && parent.Labels[ApexLabel] != "true") {
+		return msg, false
+	}
+	child, err := p.Reg.GetSession(ho.SessionID)
+	if err != nil || child == nil || child.ID != msg.ChildSessionID || child.SourceSessionID != parent.ID || child.CreatedByHandoffID != ho.ID {
+		return msg, false
+	}
+	if !sameRemoteWorkspace(gate.Directory, child.RemoteCWD) {
+		return msg, false
+	}
+	if _, approved, decisionErr := resolveGateDecision(gate, "approve"); decisionErr != nil || !approved {
+		return msg, false
+	}
+
+	msg.PolicyID, msg.PolicyAction = agentChildWorkspaceTrustPolicyID, "reply"
+	_ = writeParentMessage(msg, false)
+	handled, err := p.Reply(ctx, msg.ID, "approve")
+	if err != nil {
+		msg.PolicyError = compactText(err.Error())
+		_ = writeParentMessage(msg, false)
+		return msg, false
+	}
+	handled.PolicyID, handled.PolicyAction, handled.AutoHandled = agentChildWorkspaceTrustPolicyID, "reply", true
+	_ = writeParentMessage(handled, false)
+	return handled, true
+}
+
+// sameRemoteWorkspace compares a prompt path with the child's declared remote
+// cwd without expanding '~' on the relay host. Absolute paths must match
+// exactly; the only accepted shorthand equivalence is ~/x to a conventional
+// Unix or macOS user home path ending in /x.
+func sameRemoteWorkspace(observed, declared string) bool {
+	clean := func(value string) string {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return ""
+		}
+		return filepath.Clean(value)
+	}
+	observed, declared = clean(observed), clean(declared)
+	if observed == "" || declared == "" {
+		return false
+	}
+	if observed == declared {
+		return true
+	}
+	homeRelative := func(value string) (string, bool) {
+		if value == "~" {
+			return "", true
+		}
+		if strings.HasPrefix(value, "~/") {
+			return strings.TrimPrefix(value, "~/"), true
+		}
+		return "", false
+	}
+	absoluteHomeRelative := func(value string) (string, bool) {
+		parts := strings.Split(strings.TrimPrefix(value, "/"), "/")
+		if len(parts) < 2 || (parts[0] != "home" && parts[0] != "Users") || parts[1] == "" {
+			return "", false
+		}
+		return strings.Join(parts[2:], "/"), true
+	}
+	if relative, ok := homeRelative(declared); ok {
+		actual, absolute := absoluteHomeRelative(observed)
+		return absolute && actual == relative
+	}
+	if relative, ok := homeRelative(observed); ok {
+		actual, absolute := absoluteHomeRelative(declared)
+		return absolute && actual == relative
+	}
+	return false
 }
 
 func FormatParentNotice(n ParentNotice) string {

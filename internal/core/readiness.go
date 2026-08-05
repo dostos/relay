@@ -46,13 +46,15 @@ type GateChoice struct {
 	Selected bool   `json:"selected,omitempty"`
 }
 
-// SecurityGate is the exact decision surface observed in the pane. It records
-// facts, not policy: Relay never chooses one of these options itself.
+// SecurityGate is the exact decision surface observed in the pane. This parser
+// records facts, not policy; a downstream authority rule may choose only after
+// adding lineage and workspace facts.
 type SecurityGate struct {
-	Reason    string       `json:"reason"`
-	Directory string       `json:"directory,omitempty"`
-	Subject   string       `json:"subject,omitempty"`
-	Choices   []GateChoice `json:"choices,omitempty"`
+	Reason            string       `json:"reason"`
+	Directory         string       `json:"directory,omitempty"`
+	DirectoryObserved bool         `json:"directory_observed,omitempty"`
+	Subject           string       `json:"subject,omitempty"`
+	Choices           []GateChoice `json:"choices,omitempty"`
 }
 
 var numberedGateChoice = regexp.MustCompile(`^\s*([›❯>]?)[[:space:]]*([0-9]+)\.[[:space:]]+(.+?)\s*$`)
@@ -67,8 +69,10 @@ func parseSecurityGate(lines []string, reason string) *SecurityGate {
 		lower := strings.ToLower(content)
 		if strings.HasPrefix(lower, "you are in ") {
 			gate.Directory = strings.TrimSpace(content[len("You are in "):])
+			gate.DirectoryObserved = gate.Directory != ""
 		} else if strings.HasPrefix(lower, "accessing workspace:") && i+1 < len(lines) {
 			gate.Directory = strings.TrimSpace(lines[i+1])
+			gate.DirectoryObserved = gate.Directory != ""
 		}
 		if match := numberedGateChoice.FindStringSubmatch(line); len(match) == 4 {
 			idx := 0
@@ -156,10 +160,9 @@ func promptLine(line, marker string) bool {
 	return marker == "pre-approves" && strings.Contains(lower, "folder pre-approves")
 }
 
-// securityGates are prompts that grant something. They must be surfaced to the
-// human, never auto-answered — several of them hand an unattended agent broad
-// authority (folder trust silently activates a repo's pre-approved tool
-// permissions, which can include git push).
+// securityGates are prompts that grant something. Classification records only
+// the exact decision surface; policy is applied later with lineage and
+// workspace facts that are not available here.
 var securityGates = []struct{ marker, reason string }{
 	{"select login method", "waiting for account login"},
 	{"claude account with subscription", "waiting for account login"},
@@ -216,9 +219,11 @@ func ClassifyAgentPane(capture string) AgentReadiness {
 
 	// Otherwise a gate still wins over anything else in the tail: treating a
 	// pending security prompt as merely "absent" would invite an automation to
-	// relaunch on top of a decision the human has not made.
-	for i := len(lines) - 1; i >= 0; i-- {
-		for _, gate := range securityGates {
+	// relaunch on top of a decision the human has not made. Gate type takes
+	// precedence over line recency so a generic trailing "Enter to confirm"
+	// cannot erase the specific login, trust, or theme decision above it.
+	for _, gate := range securityGates {
+		for i := len(lines) - 1; i >= 0; i-- {
 			if !promptLine(lines[i], gate.marker) {
 				continue
 			}
