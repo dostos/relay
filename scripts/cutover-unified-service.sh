@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Perform the explicitly authorized system-unit cutover. Run via sudo; this
-# script never accepts or handles the owner's credential itself.
+# Perform the explicitly authorized first cutover or unified-service upgrade.
+# Run via sudo; this script never accepts or handles the owner's credential.
 set -euo pipefail
 
 if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
@@ -27,6 +27,8 @@ STATE_ROOT="$RELAY_HOME/.local/state/relay"
 PROPOSAL="$STATE_ROOT/relay-system.service.proposed"
 TARGET=/etc/systemd/system/relay.service
 RELAY_BIN="$RELAY_HOME/.local/bin/relay"
+PREVIOUS_RELAY_BIN="$RELAY_BIN.previous"
+UNIT_BACKUP="$STATE_ROOT/relay-system.service.previous"
 LEGACY_UNITS=(relayd.service relay-control.service relay-supervisor.service)
 
 owner_relay() {
@@ -44,10 +46,6 @@ owner_relay() {
   echo "relay: missing regular proposal $PROPOSAL" >&2
   exit 2
 }
-[[ ! -e "$TARGET" && ! -L "$TARGET" ]] || {
-  echo "relay: refusing to overwrite existing $TARGET" >&2
-  exit 2
-}
 
 if ! cmp -s "$PROPOSAL" <(
   sed \
@@ -60,25 +58,79 @@ if ! cmp -s "$PROPOSAL" <(
   exit 2
 fi
 
-for unit in "${LEGACY_UNITS[@]}"; do
-  systemctl is-active --quiet "$unit" || {
-    echo "relay: expected active rollback unit $unit" >&2
+MODE=cutover
+if [[ -e "$TARGET" || -L "$TARGET" ]]; then
+  [[ -f "$TARGET" && ! -L "$TARGET" ]] || {
+    echo "relay: refusing non-regular existing unit $TARGET" >&2
     exit 2
   }
-done
+  # An existing unit is upgradeable only when it is demonstrably Relay's unit
+  # for this exact owner. This permits idempotent upgrades without turning the
+  # script into a generic systemd-unit overwrite primitive.
+  grep -Fxq 'Description=Relay authoritative home service' "$TARGET" &&
+    grep -Fxq "User=$RELAY_USER" "$TARGET" &&
+    grep -Fxq "Group=$RELAY_GROUP" "$TARGET" &&
+    grep -Fxq "ExecStart=$RELAY_BIN service run" "$TARGET" || {
+      echo "relay: refusing to overwrite unrecognized existing $TARGET" >&2
+      exit 2
+    }
+  MODE=upgrade
+fi
+
+REPO_COMMIT="$(runuser -u "$RELAY_USER" -- git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || true)"
+INSTALLED_BUILD="$(RELAY_BRIDGE_LOCAL_INVOKE=1 owner_relay build 2>/dev/null || true)"
+if [[ -z "$REPO_COMMIT" || ( "$INSTALLED_BUILD" != "$REPO_COMMIT" && "$INSTALLED_BUILD" != "$REPO_COMMIT"-dirty.* ) ]]; then
+  echo "relay: installed build $INSTALLED_BUILD does not match repository $REPO_COMMIT" >&2
+  echo "relay: run $REPO_ROOT/install.sh as $RELAY_USER, then retry this command" >&2
+  exit 2
+fi
+
+if [[ "$MODE" == cutover ]]; then
+  for unit in "${LEGACY_UNITS[@]}"; do
+    systemctl is-active --quiet "$unit" || {
+      echo "relay: expected active rollback unit $unit" >&2
+      exit 2
+    }
+  done
+else
+  systemctl is-active --quiet relay.service || {
+    echo "relay: existing relay.service is not active" >&2
+    exit 2
+  }
+  for unit in "${LEGACY_UNITS[@]}"; do
+    if systemctl is-active --quiet "$unit"; then
+      echo "relay: refusing upgrade while legacy unit remains active: $unit" >&2
+      exit 2
+    fi
+  done
+  [[ -f "$PREVIOUS_RELAY_BIN" && ! -L "$PREVIOUS_RELAY_BIN" ]] || {
+    echo "relay: missing rollback binary $PREVIOUS_RELAY_BIN (run install.sh first)" >&2
+    exit 2
+  }
+  install -o "$RELAY_USER" -g "$RELAY_GROUP" -m 0600 "$TARGET" "$UNIT_BACKUP"
+fi
 
 rollback_needed=1
 rollback() {
   rc=$?
   trap - EXIT
   if (( rollback_needed )); then
-    echo "relay: cutover failed; restoring compatibility services" >&2
-    systemctl disable --now relay.service >/dev/null 2>&1 || true
-    if [[ -e "$TARGET" || -L "$TARGET" ]]; then
-      unlink -- "$TARGET"
+    if [[ "$MODE" == upgrade ]]; then
+      echo "relay: upgrade failed; restoring previous unified binary and unit" >&2
+      systemctl stop relay.service >/dev/null 2>&1 || true
+      install -o "$RELAY_USER" -g "$RELAY_GROUP" -m 0755 "$PREVIOUS_RELAY_BIN" "$RELAY_BIN" || true
+      install -m 0644 "$UNIT_BACKUP" "$TARGET" || true
+      systemctl daemon-reload || true
+      systemctl start relay.service || true
+    else
+      echo "relay: cutover failed; restoring compatibility services" >&2
+      systemctl disable --now relay.service >/dev/null 2>&1 || true
+      if [[ -e "$TARGET" || -L "$TARGET" ]]; then
+        unlink -- "$TARGET"
+      fi
+      systemctl daemon-reload || true
+      systemctl start "${LEGACY_UNITS[@]}" || true
     fi
-    systemctl daemon-reload || true
-    systemctl start "${LEGACY_UNITS[@]}" || true
   fi
   exit "$rc"
 }
@@ -87,8 +139,12 @@ trap rollback EXIT
 install -m 0644 "$PROPOSAL" "$TARGET"
 systemd-analyze verify "$TARGET"
 systemctl daemon-reload
-systemctl stop "${LEGACY_UNITS[@]}"
-systemctl enable --now relay.service
+if [[ "$MODE" == upgrade ]]; then
+  systemctl restart relay.service
+else
+  systemctl stop "${LEGACY_UNITS[@]}"
+  systemctl enable --now relay.service
+fi
 
 healthy=0
 status_output=""
