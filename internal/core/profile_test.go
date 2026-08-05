@@ -70,6 +70,11 @@ func TestAgentLaunchCCS(t *testing.T) {
 	if !strings.Contains(cmd, "bash -ilc") || !strings.Contains(cmd, "ccs personal") {
 		t.Fatalf("got %q", cmd)
 	}
+	for _, want := range []string{"--mcp-config", `"relay"`, `"mcp","serve"`, "--settings", "permission_required", "--dangerously-skip-permissions"} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("ccs command missing %q: %s", want, cmd)
+		}
+	}
 }
 
 func TestAgentLaunchHooksAreGeneralAndProviderAware(t *testing.T) {

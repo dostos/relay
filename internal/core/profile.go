@@ -278,7 +278,7 @@ func withAgentRelayMCP(a AgentSpec, inner string) string {
 		// an event for the handoff that invoked it.
 		envCfg := `mcp_servers.relay.env_vars=["RELAY_SESSION_ID","RELAY_SESSION_HOST","RELAY_SESSION_NAME","RELAY_BRIDGE_SOCK","RELAY_SOURCE_TOKEN","TMUX_PANE"]`
 		return inner + " -c " + shellQuote(commandCfg) + " -c " + shellQuote(argsCfg) + " -c " + shellQuote(envCfg)
-	case base == "claude" || a.Name == "claude":
+	case base == "claude" || a.Name == "claude" || base == "ccs" || strings.HasPrefix(a.Name, "ccs:"):
 		config := map[string]any{"mcpServers": map[string]any{"relay": map[string]any{"type": "stdio", "command": "relay", "args": []string{"mcp", "serve"}}}}
 		raw, _ := json.Marshal(config)
 		return inner + " --mcp-config " + shellQuote(string(raw))
@@ -329,7 +329,7 @@ func withAutonomousPermissions(a AgentSpec, inner string) string {
 		if !hasArg("--dangerously-bypass-approvals-and-sandbox", "--ask-for-approval", "-a") {
 			inner += " --dangerously-bypass-approvals-and-sandbox"
 		}
-	case base == "claude" || a.Name == "claude":
+	case base == "claude" || a.Name == "claude" || base == "ccs" || strings.HasPrefix(a.Name, "ccs:"):
 		if !hasArg("--dangerously-skip-permissions", "--permission-mode") {
 			inner += " --dangerously-skip-permissions"
 		}
@@ -346,7 +346,7 @@ func withAgentRelayHooks(a AgentSpec, inner string) string {
 		permissionCfg := `hooks.PermissionRequest=[{hooks=[{type="command",command='''` + permission + `''',timeout=120000}]}]`
 		resultCfg := `hooks.Stop=[{hooks=[{type="command",command='''` + result + `''',timeout=120000}]}]`
 		return inner + " -c " + shellQuote(permissionCfg) + " -c " + shellQuote(resultCfg)
-	case base == "claude" || a.Name == "claude":
+	case base == "claude" || a.Name == "claude" || base == "ccs" || strings.HasPrefix(a.Name, "ccs:"):
 		settings := map[string]any{
 			"hooks": map[string]any{
 				"PermissionRequest": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": permission, "timeout": 120}}}},
