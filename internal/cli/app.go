@@ -207,6 +207,25 @@ func (a *App) forwardThroughDesktopBridge(args []string) (int, bool) {
 			source = identity
 		}
 	}
+	if sock == "" && os.Getenv(bridge.LocalInvokeEnv) != "1" && core.ProjectionOnly() && !projectionClientCommandStaysLocal(args) {
+		forwarder, ok := a.Viz.(interface {
+			ForwardAuthorityCommand(context.Context, []string) (int, string, string, error)
+		})
+		if !ok {
+			return 0, false
+		}
+		code, stdout, stderr, err := forwarder.ForwardAuthorityCommand(context.Background(), args)
+		if stdout != "" {
+			fmt.Fprint(os.Stdout, stdout)
+		}
+		if stderr != "" {
+			fmt.Fprint(os.Stderr, stderr)
+		}
+		if err != nil {
+			return a.fail(err), true
+		}
+		return code, true
+	}
 	if sock == "" || os.Getenv(bridge.LocalInvokeEnv) == "1" {
 		return 0, false
 	}
@@ -229,6 +248,32 @@ func (a *App) forwardThroughDesktopBridge(args []string) (int, bool) {
 		ui.Warn(resp.Error)
 	}
 	return resp.ExitCode, true
+}
+
+func projectionClientCommandStaysLocal(args []string) bool {
+	filtered := make([]string, 0, len(args))
+	for _, arg := range args {
+		if arg != "--json" {
+			filtered = append(filtered, arg)
+		}
+	}
+	if len(filtered) == 0 {
+		return true
+	}
+	switch filtered[0] {
+	case "help", "-h", "--help", "version", "-V", "--version", "build", "targets", "doctor", "install-cmux-restore":
+		return true
+	case "resume":
+		return true
+	case "session", "sess":
+		return len(filtered) == 1 || filtered[1] == "list" || filtered[1] == "attach"
+	case "viz", "pane":
+		return len(filtered) == 1 || filtered[1] != "retire-control"
+	case "agent":
+		return len(filtered) > 1 && filtered[1] == "protocol"
+	default:
+		return false
+	}
 }
 
 func commandNeedsLocalTTY(args []string) bool {
@@ -1422,9 +1467,23 @@ func (a *App) cmdHandoff(ctx context.Context, args []string) int {
 	}
 	switch args[0] {
 	case "list":
+		full := false
+		for _, arg := range args[1:] {
+			if arg != "--full" {
+				return a.fail(fmt.Errorf("usage: relay handoff list [--full]"))
+			}
+			full = true
+		}
 		list, err := a.Reg.ListHandoffs()
 		if err != nil {
 			return a.fail(err)
+		}
+		if !full {
+			summaries := make([]handoffListSummary, 0, len(list))
+			for _, handoff := range list {
+				summaries = append(summaries, summarizeHandoff(handoff))
+			}
+			return a.errOut(a.out(summaries))
 		}
 		return a.errOut(a.out(list))
 	case "get":
@@ -1555,6 +1614,42 @@ func (a *App) cmdHandoff(ctx context.Context, args []string) int {
 		a.startParentWatcher(b.HandoffID)
 	}
 	return 0
+}
+
+type handoffListSummary struct {
+	ID                string             `json:"id"`
+	SessionID         string             `json:"session_id"`
+	HostID            string             `json:"host_id"`
+	Kind              core.HandoffKind   `json:"kind"`
+	Status            core.HandoffStatus `json:"status"`
+	LaunchState       core.EffectState   `json:"launch_state,omitempty"`
+	DeliveryState     core.EffectState   `json:"delivery_state,omitempty"`
+	PresentationState core.EffectState   `json:"presentation_state,omitempty"`
+	Name              string             `json:"name,omitempty"`
+	Agent             string             `json:"agent,omitempty"`
+	RepoRef           string             `json:"repo_ref,omitempty"`
+	SourceSessionID   string             `json:"source_session_id,omitempty"`
+	Outcome           string             `json:"outcome,omitempty"`
+	FailureStage      string             `json:"failure_stage,omitempty"`
+	FailureError      string             `json:"failure_error,omitempty"`
+	CreatedAt         time.Time          `json:"created_at"`
+	UpdatedAt         time.Time          `json:"updated_at"`
+	EndedAt           *time.Time         `json:"ended_at,omitempty"`
+}
+
+func summarizeHandoff(handoff *core.Handoff) handoffListSummary {
+	if handoff == nil {
+		return handoffListSummary{}
+	}
+	return handoffListSummary{
+		ID: handoff.ID, SessionID: handoff.SessionID, HostID: handoff.HostID,
+		Kind: handoff.Kind, Status: handoff.Status, LaunchState: handoff.LaunchState,
+		DeliveryState: handoff.DeliveryState, PresentationState: handoff.PresentationState,
+		Name: handoff.Name, Agent: handoff.Agent, RepoRef: handoff.RepoRef,
+		SourceSessionID: handoff.SourceSessionID, Outcome: handoff.Outcome,
+		FailureStage: handoff.FailureStage, FailureError: handoff.FailureError,
+		CreatedAt: handoff.CreatedAt, UpdatedAt: handoff.UpdatedAt, EndedAt: handoff.EndedAt,
+	}
 }
 
 // cmdGC is the one-shot "clean up when done" sweep: reap dead sessions, prune
@@ -3653,6 +3748,7 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 		return a.fail(err)
 	}
 	var checks []check
+	projectionOnly := core.ProjectionOnly()
 	if _, err := exec.LookPath("ssh"); err != nil {
 		checks = append(checks, check{"ssh", false, err.Error()})
 	} else {
@@ -3674,7 +3770,14 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 	// agent's control path — still reported ok.
 	bridgeOK := false
 	bridgeDetail := "not running; remote agents cannot reach this control plane"
-	if status, err := (bridge.Client{SockPath: core.DesktopBridgeSocketPath()}).Status(ctx); err == nil {
+	status, bridgeErr := (bridge.Client{SockPath: core.DesktopBridgeSocketPath()}).Status(ctx)
+	if projectionOnly {
+		bridgeOK = bridgeErr != nil
+		bridgeDetail = "legacy bridge retired; authority commands use home transport"
+		if bridgeErr == nil {
+			bridgeDetail = "legacy desktop bridge still running build " + status.Build
+		}
+	} else if bridgeErr == nil {
 		if status.Build == coord.Build {
 			bridgeOK = true
 			bridgeDetail = "running build " + status.Build
@@ -3708,10 +3811,41 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 		} `json:"components"`
 	}
 	healthRaw, healthErr := os.ReadFile(core.HomeServiceHealthPath())
+	remoteHealth := false
+	if projectionOnly {
+		if inspector, ok := a.Viz.(interface{ ProjectionHealth() (bool, string) }); ok {
+			ok, detail := inspector.ProjectionHealth()
+			checks = append(checks, check{"viz_follower", ok, detail})
+		}
+		forwarder, ok := a.Viz.(interface {
+			ForwardAuthorityCommand(context.Context, []string) (int, string, string, error)
+		})
+		if !ok {
+			healthErr = fmt.Errorf("visualization adapter has no authority command transport")
+		} else {
+			code, stdout, stderr, err := forwarder.ForwardAuthorityCommand(ctx, []string{"service", "status"})
+			switch {
+			case err != nil:
+				healthErr = err
+			case code != 0:
+				healthErr = fmt.Errorf("remote service status exited %d: %s", code, strings.TrimSpace(stderr))
+			default:
+				var status struct {
+					OK     bool            `json:"ok"`
+					Health json.RawMessage `json:"health"`
+				}
+				if err := json.Unmarshal([]byte(stdout), &status); err != nil || !status.OK || len(status.Health) == 0 {
+					healthErr = fmt.Errorf("invalid remote service status")
+				} else {
+					healthRaw, healthErr, remoteHealth = status.Health, nil, true
+				}
+			}
+		}
+	}
 	if healthErr == nil {
 		healthErr = json.Unmarshal(healthRaw, &serviceHealth)
 	}
-	processAlive := healthErr == nil && serviceHealth.PID > 0 && syscall.Kill(serviceHealth.PID, 0) == nil
+	processAlive := healthErr == nil && serviceHealth.PID > 0 && (remoteHealth || syscall.Kill(serviceHealth.PID, 0) == nil)
 	healthUpdated, _ := time.Parse(time.RFC3339Nano, serviceHealth.UpdatedAt)
 	healthFresh := !healthUpdated.IsZero() && time.Since(healthUpdated) < 15*time.Second
 	healthOK := healthErr == nil && processAlive && healthFresh && serviceHealth.Live && serviceHealth.Ready && !serviceHealth.Stopping && serviceHealth.Build == coord.Build
@@ -3733,20 +3867,43 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 	// supervisor processes may be healthy individually while still splitting
 	// sockets, builds, and policy, so surface them explicitly.
 	legacyDetail := "none"
-	legacyOK := true
-	if pgrep, err := exec.LookPath("pgrep"); err == nil {
-		out, _ := exec.Command(pgrep, "-af", `relayd serve|relayd control serve|relay supervise`).CombinedOutput()
-		lines := strings.TrimSpace(string(out))
-		if lines != "" {
-			legacyOK = false
-			legacyDetail = strings.ReplaceAll(lines, "\n", "; ")
-		}
+	legacyProcesses, legacyErr := legacyAuthorityProcesses()
+	legacyOK := legacyErr == nil && len(legacyProcesses) == 0
+	if legacyErr != nil {
+		legacyDetail = legacyErr.Error()
+	} else if len(legacyProcesses) > 0 {
+		legacyDetail = strings.Join(legacyProcesses, "; ")
 	}
 	checks = append(checks, check{"legacy_authority_processes", legacyOK, legacyDetail})
 
 	// Checks for the failure class that cost hours today: things that look
 	// healthy while doing nothing. Each of these was invisible before.
-	if a.Roots != nil && a.Reg != nil {
+	if projectionOnly {
+		forwarder, ok := a.Viz.(interface {
+			ForwardAuthorityCommand(context.Context, []string) (int, string, string, error)
+		})
+		authorityOK, authorityDetail := false, "authority command transport unavailable"
+		if ok {
+			code, stdout, stderr, err := forwarder.ForwardAuthorityCommand(ctx, []string{"root", "status"})
+			switch {
+			case err != nil:
+				authorityDetail = err.Error()
+			case code != 0:
+				authorityDetail = fmt.Sprintf("root status exited %d: %s", code, strings.TrimSpace(stderr))
+			default:
+				var result struct {
+					OK bool `json:"ok"`
+				}
+				if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+					authorityDetail = "invalid root status response: " + err.Error()
+				} else {
+					authorityOK = result.OK
+					authorityDetail = "authenticated home command boundary reachable"
+				}
+			}
+		}
+		checks = append(checks, check{"authority_command", authorityOK, authorityDetail})
+	} else if a.Roots != nil && a.Reg != nil {
 		sup := &core.SupervisorService{Reg: a.Reg, Parents: a.Parents}
 		if unwatched, err := sup.Unwatched(); err == nil {
 			ids := make([]string, 0, len(unwatched))
@@ -3860,6 +4017,39 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 			"transport": "ssh", "persistence": "tmux", "viz": "cmux", "coord": "relayd",
 		}})
 	return code
+}
+
+func legacyAuthorityProcesses() ([]string, error) {
+	out, err := exec.Command("ps", "-axo", "pid=,comm=,args=").Output()
+	if err != nil {
+		return nil, err
+	}
+	var matches []string
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		command := filepath.Base(fields[1])
+		argv := fields[2:]
+		if isLegacyAuthorityProcess(command, argv) {
+			matches = append(matches, strings.TrimSpace(line))
+		}
+	}
+	return matches, nil
+}
+
+func isLegacyAuthorityProcess(command string, argv []string) bool {
+	if len(argv) == 0 {
+		return false
+	}
+	// argv[0] is the executable as rendered by ps. Matching the executable's
+	// comm field and exact argument positions avoids concurrent doctor/pgrep
+	// command lines being misreported as live legacy services.
+	if command == "relayd" {
+		return len(argv) >= 2 && argv[1] == "serve" || len(argv) >= 3 && argv[1] == "control" && argv[2] == "serve"
+	}
+	return command == "relay" && len(argv) >= 2 && argv[1] == "supervise"
 }
 
 func staleQueuedPresentations(sessions []*core.Session, now time.Time, after time.Duration) []string {

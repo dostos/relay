@@ -183,14 +183,13 @@ func authoritySnapshot() ([]ports.Presentation, error) {
 		if session == nil || session.ID == "" || session.HostID == "" || session.Persist.Name == "" {
 			return nil, fmt.Errorf("session registry contains incomplete visualization identity")
 		}
-		target, err := core.ResolveTarget(session.HostID)
-		if err != nil {
+		if err := core.ValidateTargetAlias(session.HostID); err != nil {
 			return nil, err
 		}
 		items = append(items, ports.Presentation{
 			SessionID: session.ID, ParentSessionID: session.SourceSessionID,
 			Target: session.HostID, TmuxName: session.Persist.Name,
-			SSHHost: target.Hostname, SSHUser: target.User, SSHPort: target.Port,
+			SSHHost:            session.HostID,
 			ProjectionRevision: queuedProjectionRevision(session.VizSurfaceRef),
 		})
 	}
@@ -259,11 +258,10 @@ func authorityResume(persistName string) (*ports.ResumeResolution, error) {
 	if matched == nil {
 		return nil, fmt.Errorf("session %q is absent from the authoritative registry", persistName)
 	}
-	target, err := core.ResolveTarget(matched.HostID)
-	if err != nil {
+	if err := core.ValidateTargetAlias(matched.HostID); err != nil {
 		return nil, err
 	}
-	return &ports.ResumeResolution{SessionID: matched.ID, Target: matched.HostID, TmuxName: matched.Persist.Name, SSHHost: target.Hostname, SSHUser: target.User, SSHPort: target.Port}, nil
+	return &ports.ResumeResolution{SessionID: matched.ID, Target: matched.HostID, TmuxName: matched.Persist.Name, SSHHost: matched.HostID}, nil
 }
 
 func authorityTarget(sessionID string) (*ports.ResumeTarget, error) {
@@ -274,9 +272,8 @@ func authorityTarget(sessionID string) (*ports.ResumeTarget, error) {
 	if err != nil {
 		return nil, err
 	}
-	target, err := core.ResolveTarget(session.HostID)
-	if err != nil {
+	if err := core.ValidateTargetAlias(session.HostID); err != nil {
 		return nil, err
 	}
-	return &ports.ResumeTarget{Host: target.Hostname, User: target.User, Port: target.Port}, nil
+	return &ports.ResumeTarget{Host: session.HostID}, nil
 }

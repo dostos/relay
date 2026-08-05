@@ -29,7 +29,9 @@ Viz is a projection consumer. It fetches a fresh authoritative snapshot,
 reconciles local cmux surfaces, resumes from a durable cursor, rejects stale or
 duplicate acknowledgements, and returns idempotent receipts. Starting Viz
 retires local authority state and creates the projection-only role marker; it
-cannot mutate the home registry.
+cannot mutate the home registry. Stateless authority commands on that client
+use the `command.host` OpenSSH alias from `viz.json` and execute against the
+home command boundary; the restricted Viz control key is never widened.
 
 ## Installation and migration
 

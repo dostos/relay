@@ -39,7 +39,8 @@ func TestBootstrapGoBinaryRejectsNonExecutableUserInstall(t *testing.T) {
 	if err := os.WriteFile(path, []byte("not executable\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := bootstrapGoBinary(); err == nil {
+	got, err := bootstrapGoBinary()
+	if err == nil && got == path {
 		t.Fatal("non-executable compiler accepted")
 	}
 }

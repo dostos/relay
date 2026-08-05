@@ -24,6 +24,31 @@ type projectedPaneViz struct {
 	err   error
 }
 
+type authorityForwardViz struct{ ports.Viz }
+
+func (authorityForwardViz) ForwardAuthorityCommand(context.Context, []string) (int, string, string, error) {
+	return 0, "forwarded-from-home\n", "", nil
+}
+
+type projectionDoctorViz struct{ projectedPaneViz }
+
+func (projectionDoctorViz) Available(context.Context) bool { return true }
+
+func (projectionDoctorViz) ForwardAuthorityCommand(_ context.Context, args []string) (int, string, string, error) {
+	if len(args) == 2 && args[0] == "service" && args[1] == "status" {
+		raw, _ := json.Marshal(map[string]any{
+			"build": coord.Build, "pid": 42, "ready": true, "live": true,
+			"updated_at": time.Now().UTC().Format(time.RFC3339Nano),
+			"components": map[string]any{
+				"command_boundary": map[string]any{"build": coord.Build, "ready": true, "live": true, "durable_effects": true},
+			},
+		})
+		wrapped, _ := json.Marshal(map[string]any{"ok": true, "health": json.RawMessage(raw)})
+		return 0, string(wrapped), "", nil
+	}
+	return 0, `{"ok":true}`, "", nil
+}
+
 func TestMain(m *testing.M) {
 	root, err := os.MkdirTemp("", "relay-cli-tests-")
 	if err != nil {
@@ -222,7 +247,11 @@ func TestOnlyInteractiveCommandsBypassStatelessServiceTransport(t *testing.T) {
 }
 
 func TestLocalCLIForwardsAuthenticatedRequestAndConfirmsResponse(t *testing.T) {
-	root := t.TempDir()
+	root, err := os.MkdirTemp("/tmp", "relay-cli-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	t.Setenv("RELAY_STATE_DIR", root)
 	t.Setenv(bridge.SocketEnv, "")
 	t.Setenv(bridge.LocalInvokeEnv, "")
@@ -247,6 +276,11 @@ func TestLocalCLIForwardsAuthenticatedRequestAndConfirmsResponse(t *testing.T) {
 	defer cancel()
 	client := bridge.Client{SockPath: core.DesktopBridgeSocketPath()}
 	for client.Ping(ctx) != nil {
+		select {
+		case serveErr := <-done:
+			t.Fatalf("bridge server: %v", serveErr)
+		default:
+		}
 		if ctx.Err() != nil {
 			t.Fatal(ctx.Err())
 		}
@@ -260,6 +294,78 @@ func TestLocalCLIForwardsAuthenticatedRequestAndConfirmsResponse(t *testing.T) {
 	entries, err := os.ReadDir(core.CommandReceiptDir())
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("command receipts=%d err=%v", len(entries), err)
+	}
+}
+
+func TestProjectionClientForwardsAuthorityCommandToHome(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("RELAY_STATE_DIR", state)
+	t.Setenv(bridge.SocketEnv, "")
+	t.Setenv(bridge.LocalInvokeEnv, "")
+	if err := os.WriteFile(filepath.Join(state, ".viz-projection-only"), []byte("projection only\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := New()
+	a.Viz = authorityForwardViz{}
+	out := captureStdout(t, func() {
+		if code := a.Run([]string{"handoff", "list"}); code != 0 {
+			t.Fatalf("handoff list code=%d", code)
+		}
+	})
+	if out != "forwarded-from-home\n" {
+		t.Fatalf("forwarded output=%q", out)
+	}
+}
+
+func TestProjectionClientKeepsLocalInventoryCommandsLocal(t *testing.T) {
+	for _, args := range [][]string{{"targets"}, {"doctor"}, {"session", "list"}, {"resume", "list"}, {"viz", "list"}, {"agent", "protocol"}} {
+		if !projectionClientCommandStaysLocal(args) {
+			t.Fatalf("command %v should stay on visualization client", args)
+		}
+	}
+	if projectionClientCommandStaysLocal([]string{"handoff", "list"}) {
+		t.Fatal("authority command was kept on visualization client")
+	}
+}
+
+func TestProjectionClientDoctorChecksHomeWithoutLocalAuthority(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("RELAY_STATE_DIR", state)
+	if err := os.WriteFile(filepath.Join(state, ".viz-projection-only"), []byte("projection only\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := New()
+	a.Viz = projectionDoctorViz{}
+	a.CompactJSON = true
+	out := captureStdout(t, func() {
+		if code := a.Run([]string{"doctor"}); code != 0 {
+			t.Fatalf("doctor code=%d", code)
+		}
+	})
+	var result struct {
+		Failed int `json:"failed"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil || result.Failed != 0 || !strings.Contains(out, `"authority_command"`) {
+		t.Fatalf("projection doctor output=%q", out)
+	}
+}
+
+func TestLegacyAuthorityProcessDetectionIgnoresDiagnosticCommands(t *testing.T) {
+	tests := []struct {
+		command string
+		argv    []string
+		want    bool
+	}{
+		{"relayd", []string{"/home/me/.local/bin/relayd", "serve"}, true},
+		{"relayd", []string{"relayd", "control", "serve"}, true},
+		{"relay", []string{"relay", "supervise"}, true},
+		{"pgrep", []string{"pgrep", "-af", "relayd serve|relay supervise"}, false},
+		{"relay", []string{"relay", "doctor", "-H", "c1"}, false},
+	}
+	for _, test := range tests {
+		if got := isLegacyAuthorityProcess(test.command, test.argv); got != test.want {
+			t.Fatalf("command=%s argv=%v got=%v want=%v", test.command, test.argv, got, test.want)
+		}
 	}
 }
 
@@ -422,6 +528,32 @@ func TestAgentRestartRejectsUnknownFlagsBeforeLaunch(t *testing.T) {
 	})
 	if !bytes.Contains([]byte(out), []byte("unknown flag")) {
 		t.Fatalf("restart error=%q", out)
+	}
+}
+
+func TestHandoffListOmitsLargePayloadsUnlessFull(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	now := time.Now().UTC()
+	a := New()
+	largeGoal := strings.Repeat("large-goal-", 1000)
+	if err := a.Reg.PutHandoff(&core.Handoff{ID: "ho-large", HostID: "c3", Kind: core.KindAgent, Status: core.StatusRunning, Goal: largeGoal, Command: largeGoal, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	summary := captureStdout(t, func() {
+		if code := a.Run([]string{"handoff", "list"}); code != 0 {
+			t.Fatalf("handoff list code=%d", code)
+		}
+	})
+	if !strings.Contains(summary, "ho-large") || strings.Contains(summary, "large-goal-") {
+		t.Fatalf("handoff summary=%q", summary)
+	}
+	full := captureStdout(t, func() {
+		if code := a.Run([]string{"handoff", "list", "--full"}); code != 0 {
+			t.Fatalf("full handoff list code=%d", code)
+		}
+	})
+	if !strings.Contains(full, "large-goal-") {
+		t.Fatal("full handoff list omitted goal")
 	}
 }
 

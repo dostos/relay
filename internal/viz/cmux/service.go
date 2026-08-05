@@ -72,11 +72,14 @@ func (v *Viz) withAuthorityTarget(req ports.Presentation) (ports.Presentation, e
 		req.SSHHost, req.SSHUser, req.SSHPort = mapped.Host, mapped.User, mapped.Port
 		return req, nil
 	}
-	target, err := core.ResolveTarget(req.Target)
-	if err != nil {
-		return req, err
+	// Preserve the alias so the visualization client applies its own generated
+	// per-vantage route, including ProxyJump. Flattening authority-side routes
+	// into host/port coordinates makes proxy-only workers unreachable from Mac.
+	if !vizTargetRE.MatchString(req.Target) {
+		return req, fmt.Errorf("invalid visualization target %q", req.Target)
 	}
-	req.SSHHost, req.SSHUser, req.SSHPort = target.Hostname, target.User, target.Port
+	req.SSHHost = req.Target
+	req.SSHUser, req.SSHPort = "", 0
 	return req, nil
 }
 
@@ -122,6 +125,39 @@ func (v *Viz) QueueControlRetirement() (int64, error) {
 
 func (v *Viz) cursorPath() string {
 	return filepath.Join(core.StateRoot(), "viz", "service-"+v.ServiceID+".cursor")
+}
+
+// ProjectionHealth proves the follower process owns its durable lock and has
+// consumed through the revision captured in the latest authority snapshot.
+// A responsive cmux binary alone cannot prove that projection events land.
+func (v *Viz) ProjectionHealth() (bool, string) {
+	if v.ServiceID == "" || v.Control == nil {
+		return false, "visualization follower is not configured"
+	}
+	lock, err := os.OpenFile(v.cursorPath()+".follow.lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return false, err.Error()
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		return false, "visualization follower lock is unowned"
+	} else if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
+		return false, "inspect visualization follower lock: " + err.Error()
+	}
+	raw, err := os.ReadFile(v.authoritySnapshotPath())
+	if err != nil {
+		return false, "authority snapshot unavailable: " + err.Error()
+	}
+	snapshot, err := decodeAuthoritySnapshot(raw)
+	if err != nil {
+		return false, err.Error()
+	}
+	cursor := v.loadCursor()
+	if cursor < snapshot.Revision {
+		return false, fmt.Sprintf("projection cursor %d is behind snapshot revision %d", cursor, snapshot.Revision)
+	}
+	return true, fmt.Sprintf("running; cursor=%d snapshot=%d", cursor, snapshot.Revision)
 }
 
 func (v *Viz) loadCursor() int64 {
@@ -172,6 +208,54 @@ func (v *Viz) controlSSHArgs(remoteCommand string) ([]string, error) {
 		target = v.Control.User + "@" + target
 	}
 	return append(args, target, remoteCommand), nil
+}
+
+// ForwardAuthorityCommand runs one stateless CLI command on the authoritative
+// home host. Visualization clients intentionally have no local registry, so
+// authority operations must not fall through to local command handlers.
+func (v *Viz) ForwardAuthorityCommand(ctx context.Context, argv []string) (int, string, string, error) {
+	if v.Command == nil || !vizTargetRE.MatchString(v.Command.Host) ||
+		(v.Command.User != "" && !vizTargetRE.MatchString(v.Command.User)) ||
+		v.Command.Port < 0 || v.Command.Port > 65535 ||
+		strings.ContainsAny(v.Command.Identity, "\r\n\x00") {
+		return 1, "", "", fmt.Errorf("valid authority command target required")
+	}
+	args := []string{
+		"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=8",
+	}
+	if v.Command.Identity != "" {
+		args = append(args, "-o", "IdentitiesOnly=yes", "-i", expandServicePath(v.Command.Identity))
+	}
+	if v.Command.Port > 0 {
+		args = append(args, "-p", strconv.Itoa(v.Command.Port))
+	}
+	target := v.Command.Host
+	if v.Command.User != "" {
+		target = v.Command.User + "@" + target
+	}
+	bin := v.Command.Relayd
+	if bin == "" {
+		bin = ".local/bin/relay"
+	}
+	remote := `"$HOME"/` + shellquote.Quote(strings.TrimPrefix(bin, "~/"))
+	if strings.HasPrefix(bin, "/") {
+		remote = shellquote.Quote(bin)
+	}
+	for _, arg := range argv {
+		remote += " " + shellquote.Quote(arg)
+	}
+	args = append(args, target, remote)
+	var stdout, stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	if err == nil {
+		return 0, stdout.String(), stderr.String(), nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		return exitErr.ExitCode(), stdout.String(), stderr.String(), nil
+	}
+	return 1, stdout.String(), stderr.String(), err
 }
 
 func (v *Viz) remoteRelayd(command string) string {
@@ -502,6 +586,9 @@ func (v *Viz) handleCoveredProjection(ctx context.Context, event coord.Event, sn
 	}
 	if current == nil {
 		if originalOp == string(ports.ProjectionDelete) {
+			if sessionID == "" {
+				return "", true, false, nil
+			}
 			result, err := v.handleServiceEvent(ctx, event)
 			return result, true, false, err
 		}

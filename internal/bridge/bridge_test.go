@@ -13,6 +13,16 @@ import (
 	"time"
 )
 
+func shortSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "relay-bridge-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func TestRequestReceiptReturnsOneEffectAcrossRetries(t *testing.T) {
 	root := t.TempDir()
 	effects := filepath.Join(root, "effects")
@@ -48,7 +58,7 @@ func TestPendingRequestReceiptPreventsAmbiguousReplay(t *testing.T) {
 }
 
 func TestCancelledDeliveryResumesFromCompletedReceiptWithoutRepeatingEffect(t *testing.T) {
-	root := t.TempDir()
+	root := shortSocketDir(t)
 	effects := filepath.Join(root, "effects")
 	sock := filepath.Join(root, "bridge.sock")
 	server := &Server{SockPath: sock, RelayBin: "/bin/sh", ReceiptDir: filepath.Join(root, "receipts")}
@@ -147,7 +157,7 @@ func TestClientLifecycleReachesAuthorityBoundary(t *testing.T) {
 }
 
 func TestServerInvoke(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "bridge.sock")
+	sock := filepath.Join(shortSocketDir(t), "bridge.sock")
 	srv := &Server{SockPath: sock, RelayBin: "/bin/echo", Build: "test-build"}
 	done := make(chan error, 1)
 	go func() { done <- srv.Serve() }()
@@ -178,7 +188,7 @@ func TestServerInvoke(t *testing.T) {
 }
 
 func TestServerPreventsConcurrentSocketOwnership(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "bridge.sock")
+	sock := filepath.Join(shortSocketDir(t), "bridge.sock")
 	first := &Server{SockPath: sock, RelayBin: "/bin/echo"}
 	done := make(chan error, 1)
 	go func() { done <- first.Serve() }()
@@ -202,7 +212,7 @@ func TestServerPreventsConcurrentSocketOwnership(t *testing.T) {
 }
 
 func TestServerSurvivesMalformedPartialAndOversizedRequests(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "bridge.sock")
+	sock := filepath.Join(shortSocketDir(t), "bridge.sock")
 	server := &Server{SockPath: sock, RelayBin: "/bin/echo"}
 	go func() { _ = server.Serve() }()
 	t.Cleanup(func() { _ = server.Close() })

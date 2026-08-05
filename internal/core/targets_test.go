@@ -99,3 +99,18 @@ func TestUsableHostAlias(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateTargetAliasAcceptsProxyRoutedHostWithoutFlattening(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := "Host hamburg\n  HostName 10.0.0.1\n  ProxyJump home-relay\n"
+	if err := os.WriteFile(filepath.Join(home, ".ssh", "config"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateTargetAlias("hamburg"); err != nil {
+		t.Fatal(err)
+	}
+}

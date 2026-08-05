@@ -14,6 +14,13 @@ import (
 var ErrSessionNotFound = errors.New("session not found")
 var ErrProjectionOnlyAuthority = errors.New("local relay is visualization-only; authoritative registry is unavailable")
 
+// ProjectionOnly reports whether durable authority has been retired from this
+// visualization client to the home service.
+func ProjectionOnly() bool {
+	_, err := os.Lstat(ProjectionOnlyMarkerPath())
+	return err == nil
+}
+
 // Registry is the local durable store for sessions and handoffs.
 type Registry struct {
 	mu   sync.Mutex

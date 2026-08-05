@@ -27,6 +27,7 @@ type Viz struct {
 	Bin       string
 	ServiceID string
 	Control   *targetConfig
+	Command   *targetConfig
 	Update    *updateConfig
 	Targets   map[string]targetConfig
 
@@ -38,6 +39,7 @@ type config struct {
 	Bin       string                  `json:"bin,omitempty"`
 	ServiceID string                  `json:"service_id,omitempty"`
 	Control   *targetConfig           `json:"control,omitempty"`
+	Command   *targetConfig           `json:"command,omitempty"`
 	Update    *updateConfig           `json:"update,omitempty"`
 	Targets   map[string]targetConfig `json:"targets,omitempty"`
 }
@@ -109,7 +111,7 @@ func New() *Viz {
 			bin = "cmux"
 		}
 	}
-	return &Viz{Bin: bin, ServiceID: cfg.ServiceID, Control: cfg.Control, Update: cfg.Update, Targets: cfg.Targets, bindings: map[string]binding{}}
+	return &Viz{Bin: bin, ServiceID: cfg.ServiceID, Control: cfg.Control, Command: cfg.Command, Update: cfg.Update, Targets: cfg.Targets, bindings: map[string]binding{}}
 }
 
 func (v *Viz) Kind() string { return "cmux" }

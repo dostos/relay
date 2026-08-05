@@ -16,6 +16,7 @@ import (
 
 func TestServiceRestartsFailedComponentWithoutCancellingHealthySibling(t *testing.T) {
 	root := t.TempDir()
+	t.Setenv("RELAY_STATE_DIR", root)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var flakyRuns atomic.Int32
@@ -56,6 +57,7 @@ func TestServiceRestartsFailedComponentWithoutCancellingHealthySibling(t *testin
 
 func TestServiceReportsDurableEffectFailureAsUnready(t *testing.T) {
 	root := t.TempDir()
+	t.Setenv("RELAY_STATE_DIR", root)
 	ctx, cancel := context.WithCancel(context.Background())
 	service := &Service{
 		HealthPath: filepath.Join(root, "health.json"), LockPath: filepath.Join(root, "service.lock"),
@@ -83,6 +85,7 @@ func TestServiceReportsDurableEffectFailureAsUnready(t *testing.T) {
 
 func TestServiceShutdownIsReverseDependencyOrder(t *testing.T) {
 	root := t.TempDir()
+	t.Setenv("RELAY_STATE_DIR", root)
 	ctx, cancel := context.WithCancel(context.Background())
 	var mu sync.Mutex
 	var stopped []string
@@ -124,6 +127,7 @@ func TestServiceShutdownIsReverseDependencyOrder(t *testing.T) {
 
 func TestServicePreventsConcurrentAuthorityOwner(t *testing.T) {
 	root := t.TempDir()
+	t.Setenv("RELAY_STATE_DIR", root)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	component := Component{Name: "only", Run: func(ctx context.Context, ready func(bool)) error {
@@ -148,7 +152,11 @@ func TestServicePreventsConcurrentAuthorityOwner(t *testing.T) {
 }
 
 func TestEventCoordinatorCursorSurvivesComponentRestart(t *testing.T) {
-	root := t.TempDir()
+	root, err := os.MkdirTemp("/tmp", "relay-home-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	sock := filepath.Join(root, "relayd.sock")
 	t.Setenv("RELAY_STATE_DIR", root)
 	t.Setenv("RELAYD_SOCK", sock)

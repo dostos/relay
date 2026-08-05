@@ -397,6 +397,9 @@ can still pin a client-local identity for a host key.
     "user": "dostos",
     "port": 2222
   },
+  "command": {
+    "host": "home-relay"
+  },
   "update": {
     "repo": "~/dev/relay",
     "remote": "origin",
@@ -404,6 +407,12 @@ can still pin a client-local identity for a host key.
   }
 }
 ```
+
+`command.host` is an OpenSSH alias for ordinary stateless CLI requests from a
+projection-only desktop. The alias keeps credentials and per-vantage routes in
+the desktop's SSH config; it must reach the authoritative account without an
+interactive prompt. The separate `control` identity remains restricted to the
+Viz event protocol.
 
 `relay viz update` appends a durable compatibility `update_relayd` signal. The Mac refuses it
 when its checkout is dirty or not on the configured branch. Otherwise Relay

@@ -2,13 +2,24 @@ package relayd
 
 import (
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
+func shortSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "relay-coord-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func TestSecondServerCannotUnlinkLiveSocket(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSocketDir(t)
 	sock := filepath.Join(dir, "relayd.sock")
 	store, err := NewStore(filepath.Join(dir, "events"))
 	if err != nil {
@@ -44,7 +55,7 @@ func TestSecondServerCannotUnlinkLiveSocket(t *testing.T) {
 }
 
 func TestCloseIsSafeWhileServerIsAccepting(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSocketDir(t)
 	sock := filepath.Join(dir, "relayd.sock")
 	store, err := NewStore(filepath.Join(dir, "events"))
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -29,6 +30,14 @@ func TestVizServiceUsesRelayManagedReconnect(t *testing.T) {
 	}
 	if strings.Contains(command, "tmux attach") || strings.HasPrefix(command, "ssh ") {
 		t.Fatalf("viz bypassed Relay persistence: %q", command)
+	}
+}
+
+func TestAuthorityProjectionPreservesClientRoutedAlias(t *testing.T) {
+	v := &Viz{}
+	got, err := v.withAuthorityTarget(ports.Presentation{SessionID: "sess-1", Target: "hamburg", TmuxName: "worker"})
+	if err != nil || got.SSHHost != "hamburg" || got.SSHUser != "" || got.SSHPort != 0 {
+		t.Fatalf("projection target=%+v err=%v", got, err)
 	}
 }
 
@@ -128,6 +137,15 @@ func TestCoveredProjectionSkipsRetiredHistoricalSession(t *testing.T) {
 	_, handled, _, err = v.handleCoveredProjection(context.Background(), coord.Event{Seq: 51, Kind: "update_relayd"}, ports.AuthoritySnapshot{V: 1, Revision: 52})
 	if err != nil || handled {
 		t.Fatalf("lifecycle event was swallowed by snapshot watermark: handled=%v err=%v", handled, err)
+	}
+}
+
+func TestCoveredProjectionSkipsMalformedHistoricalDelete(t *testing.T) {
+	v := &Viz{}
+	event := coord.Event{Seq: 50, Kind: "project", Meta: map[string]any{"op": "delete", "session_id": ""}}
+	result, handled, receipt, err := v.handleCoveredProjection(context.Background(), event, ports.AuthoritySnapshot{V: 1, Revision: 52})
+	if err != nil || !handled || receipt || result != "" {
+		t.Fatalf("malformed covered delete result=%q handled=%v receipt=%v err=%v", result, handled, receipt, err)
 	}
 }
 
@@ -461,6 +479,46 @@ func TestNewLoadsRemoteVizConfig(t *testing.T) {
 	v := New()
 	if v.ServiceID != "mac" || v.Control == nil || v.Control.Host != "home" || v.Control.Port != 2222 {
 		t.Fatalf("viz config = %+v", v)
+	}
+}
+
+func TestProjectionClientForwardsAuthorityCommandThroughSSHConfigAlias(t *testing.T) {
+	binDir := t.TempDir()
+	ssh := filepath.Join(binDir, "ssh")
+	if err := os.WriteFile(ssh, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\"\nprintf 'remote-error\\n' >&2\nexit 7\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	v := &Viz{Command: &targetConfig{Host: "home-relay"}}
+	code, stdout, stderr, err := v.ForwardAuthorityCommand(context.Background(), []string{"handoff", "show", "goal with spaces"})
+	if err != nil || code != 7 || !strings.Contains(stdout, "home-relay") || !strings.Contains(stdout, "goal with spaces") || stderr != "remote-error\n" {
+		t.Fatalf("code=%d stdout=%q stderr=%q err=%v", code, stdout, stderr, err)
+	}
+}
+
+func TestProjectionHealthRequiresOwnedFollowerAndCaughtUpCursor(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	v := &Viz{ServiceID: "mac", Control: &targetConfig{Host: "home"}}
+	if err := saveBytes(v.authoritySnapshotPath(), []byte(`{"v":1,"revision":9,"items":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveSequence(v.cursorPath(), 9); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := v.ProjectionHealth(); ok {
+		t.Fatal("unowned follower lock reported healthy")
+	}
+	lock, err := os.OpenFile(v.cursorPath()+".follow.lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	if ok, detail := v.ProjectionHealth(); !ok || !strings.Contains(detail, "cursor=9") {
+		t.Fatalf("projection health ok=%v detail=%q", ok, detail)
 	}
 }
 

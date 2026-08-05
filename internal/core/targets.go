@@ -87,6 +87,25 @@ func ResolveTarget(hostID string) (*Target, error) {
 	return nil, fmt.Errorf("SSH target %q is absent from authority config", hostID)
 }
 
+// ValidateTargetAlias confirms that an exact SSH alias is present without
+// flattening its route. Visualization clients must resolve ProxyJump and key
+// policy from their own per-vantage SSH config.
+func ValidateTargetAlias(hostID string) error {
+	if !usableHostAlias(hostID) {
+		return fmt.Errorf("invalid SSH target alias %q", hostID)
+	}
+	targets, err := ListTargets()
+	if err != nil {
+		return err
+	}
+	for _, target := range targets {
+		if target.HostID == hostID {
+			return nil
+		}
+	}
+	return fmt.Errorf("SSH target %q is absent from authority config", hostID)
+}
+
 func resolveEffectiveSSHTarget(alias string) (*Target, error) {
 	out, err := exec.Command("ssh", "-G", "--", alias).Output()
 	if err != nil {
