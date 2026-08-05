@@ -2026,7 +2026,10 @@ func (p *ParentService) Ack(messageID string) (*ParentMessage, error) {
 		return msg, nil
 	}
 	if msg.Kind == "permission_required" {
-		return nil, fmt.Errorf("permission decision %s requires explicit relay resolve", msg.ID)
+		ho, getErr := p.Reg.GetHandoff(msg.HandoffID)
+		if getErr != nil || !handoffTerminal(ho) {
+			return nil, fmt.Errorf("permission decision %s requires explicit relay resolve", msg.ID)
+		}
 	}
 	now := time.Now().UTC()
 	msg.State, msg.AckedAt = ParentMessageAcked, &now

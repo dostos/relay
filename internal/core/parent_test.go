@@ -869,15 +869,16 @@ func TestSweepTerminalOnlyAcknowledgesFinishedChildren(t *testing.T) {
 	for _, msg := range []*ParentMessage{
 		{V: 1, ID: "pm-done-1", ParentSessionID: parent.ID, ChildSessionID: terminal.SessionID, HandoffID: terminal.ID, Kind: "idle", State: ParentMessagePending, CreatedAt: now},
 		{V: 1, ID: "pm-done-2", ParentSessionID: parent.ID, ChildSessionID: terminal.SessionID, HandoffID: terminal.ID, Kind: "result", State: ParentMessagePending, CreatedAt: now.Add(time.Second)},
-		{V: 1, ID: "pm-live", ParentSessionID: parent.ID, ChildSessionID: live.SessionID, HandoffID: live.ID, Kind: "ask", State: ParentMessagePending, CreatedAt: now.Add(2 * time.Second)},
-		{V: 1, ID: "pm-unknown", ParentSessionID: parent.ID, ChildSessionID: "sess-missing", HandoffID: "ho-missing", Kind: "idle", State: ParentMessagePending, CreatedAt: now.Add(3 * time.Second)},
+		{V: 1, ID: "pm-done-gate", ParentSessionID: parent.ID, ChildSessionID: terminal.SessionID, HandoffID: terminal.ID, Kind: "permission_required", State: ParentMessagePending, CreatedAt: now.Add(2 * time.Second)},
+		{V: 1, ID: "pm-live", ParentSessionID: parent.ID, ChildSessionID: live.SessionID, HandoffID: live.ID, Kind: "ask", State: ParentMessagePending, CreatedAt: now.Add(3 * time.Second)},
+		{V: 1, ID: "pm-unknown", ParentSessionID: parent.ID, ChildSessionID: "sess-missing", HandoffID: "ho-missing", Kind: "idle", State: ParentMessagePending, CreatedAt: now.Add(4 * time.Second)},
 	} {
 		if err := writeParentMessage(msg, true); err != nil {
 			t.Fatal(err)
 		}
 	}
 	acked, byHandoff, err := service.SweepTerminal(parent.ID)
-	if err != nil || acked != 2 || byHandoff[terminal.ID] != 2 {
+	if err != nil || acked != 3 || byHandoff[terminal.ID] != 3 {
 		t.Fatalf("acked=%d by_handoff=%v err=%v", acked, byHandoff, err)
 	}
 	pending, _ := service.ListMessages(parent.ID, true)
