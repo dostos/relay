@@ -149,6 +149,37 @@ func TestReconcileFinalizesLiveHoldingShellFromTerminalReceipt(t *testing.T) {
 	}
 }
 
+func TestFinalizeClosesPrelaunchHandoffWithoutSession(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	reg := &Registry{}
+	now := time.Now().UTC()
+	ho := &Handoff{
+		ID:        "ho-prelaunch",
+		HostID:    "c1",
+		Status:    StatusPending,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := reg.PutHandoff(ho); err != nil {
+		t.Fatal(err)
+	}
+	service := &HandoffService{Reg: reg}
+
+	if _, err := service.Finalize(context.Background(), ho.ID, "", false); err == nil || !strings.Contains(err.Error(), "has no session") {
+		t.Fatalf("missing explicit outcome error = %v", err)
+	}
+	got, err := service.Finalize(context.Background(), ho.ID, OutcomeAbandoned, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusAbandoned || got.Outcome != string(OutcomeAbandoned) || got.EndedAt == nil {
+		t.Fatalf("finalized handoff = %+v", got)
+	}
+	if _, err := service.Finalize(context.Background(), ho.ID, OutcomeAbandoned, false); err != nil {
+		t.Fatalf("idempotent finalize: %v", err)
+	}
+}
+
 func TestTerminalCaptureIsBoundedAndRedacted(t *testing.T) {
 	if got := redactedTerminalCapture("Authorization: Bearer abc"); got != "sensitive terminal output redacted" {
 		t.Fatalf("credential leaked: %q", got)

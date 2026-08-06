@@ -886,6 +886,40 @@ func (h *HandoffService) Finalize(ctx context.Context, handoffID string, outcome
 	if ho.Outcome != "" && (ho.Status == StatusDone || ho.Status == StatusFailed || ho.Status == StatusAbandoned) {
 		return ho, nil
 	}
+	// A launch can be interrupted after its durable handoff record is created
+	// but before a session exists. There is no remote resource to inspect or
+	// tear down in that state, so an explicit outcome is sufficient to close
+	// the orphan. Do not extend this to a non-empty missing SessionID: that is
+	// registry inconsistency and must remain visible rather than being guessed
+	// terminal.
+	if ho.SessionID == "" {
+		if outcome == "" {
+			return nil, fmt.Errorf("handoff has no session; pass --outcome done|failed|abandoned to force finalize")
+		}
+		switch outcome {
+		case OutcomeDone:
+			ho.Status = StatusDone
+		case OutcomeFailed:
+			ho.Status = StatusFailed
+		case OutcomeAbandoned:
+			ho.Status = StatusAbandoned
+		default:
+			return nil, fmt.Errorf("invalid outcome %q: want done, failed, or abandoned", outcome)
+		}
+		now := time.Now().UTC()
+		ho.Outcome = string(outcome)
+		ho.EndedAt = &now
+		ho.UpdatedAt = now
+		if err := h.Reg.PutHandoff(ho); err != nil {
+			return nil, err
+		}
+		_ = AppendLedger(map[string]any{
+			"v": 1, "type": "end", "ts": now.Format(time.RFC3339),
+			"handoff_id": ho.ID, "session_id": "", "host_id": ho.HostID,
+			"outcome": string(outcome),
+		})
+		return ho, nil
+	}
 	sess, err := h.Sessions.Get(ho.SessionID)
 	if err != nil {
 		// Already terminal from events but session registry cleared — still stamp outcome.
