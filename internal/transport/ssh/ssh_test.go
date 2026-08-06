@@ -1,7 +1,11 @@
 package ssh
 
 import (
+	"context"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -67,5 +71,68 @@ func TestReverseSocketCleanupCommandQuotesExactPath(t *testing.T) {
 	}
 	if got != "rm -f -- '/tmp/relay-bridge-sess-a.sock'" {
 		t.Fatalf("cleanup = %q", got)
+	}
+}
+
+func TestControlOptionsMakeTheMasterMortal(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	opts, err := controlOpts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(opts, " ")
+	// With ControlMaster=auto the master inherits the options of whichever
+	// launch creates it first, so keepalives must live on the shared options
+	// or a master can be born unable to notice a dead peer.
+	for _, want := range []string{"ServerAliveInterval=", "ServerAliveCountMax=", "TCPKeepAlive=yes"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("shared control options missing %q: %s", want, joined)
+		}
+	}
+}
+
+func TestResolvedControlPathIsCachedPerEndpoint(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	tr := New("relay-test-invalid-host")
+	tr.controlPathCache = "/tmp/relay-cached-socket"
+
+	got, err := tr.resolvedControlPath(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "/tmp/relay-cached-socket" {
+		t.Fatalf("cached control path not reused: %q", got)
+	}
+}
+
+func TestWedgedControlSocketIsRemovedWhenMasterWillNotAnswer(t *testing.T) {
+	if _, err := exec.LookPath("ssh"); err != nil {
+		t.Skip("ssh not available")
+	}
+	t.Setenv("HOME", t.TempDir())
+	sock := filepath.Join(t.TempDir(), "wedged-master")
+	if err := os.WriteFile(sock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tr := New("relay-test-invalid-host")
+	tr.controlPathCache = sock
+
+	tr.ensureLiveControlMaster(context.Background())
+
+	if _, err := os.Stat(sock); !os.IsNotExist(err) {
+		t.Fatalf("wedged control socket survived: stat err = %v", err)
+	}
+}
+
+func TestLiveControlMasterCheckIsSkippedWhenNoSocketExists(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	missing := filepath.Join(t.TempDir(), "absent")
+	tr := New("relay-test-invalid-host")
+	tr.controlPathCache = missing
+
+	tr.ensureLiveControlMaster(context.Background())
+
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("probe must not create a socket path: %v", err)
 	}
 }
