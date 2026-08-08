@@ -8,7 +8,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -536,9 +538,81 @@ func probeAgentCatalog(ctx context.Context, t ports.Transport) []AgentDetect {
 				}
 				continue
 			}
+			if s.Name == "codex" {
+				for _, sel := range listCodexMultiAuthAccounts(ctx, t) {
+					as := AgentSpec{
+						Name:     "codex:" + sel,
+						Command:  "codex-multi-auth-codex",
+						Args:     []string{"--account", sel},
+						UsageKey: "codex",
+					}
+					out = append(out, AgentDetect{
+						Name:          as.Name,
+						Present:       true,
+						Authed:        probeOneAgent(ctx, t, as).Authed,
+						SuggestedSpec: &as,
+					})
+				}
+			}
 			d.SuggestedSpec = &s
 		}
 		out = append(out, d)
+	}
+	return out
+}
+
+var codexAccountEmailRe = regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)
+
+// listCodexMultiAuthAccounts returns selectors for discover-suggested codex:*
+// agents (email when present in the list label, else 1-based index). Never calls switch.
+func listCodexMultiAuthAccounts(ctx context.Context, t ports.Transport) []string {
+	stdout, _, _ := t.Run(ctx, "", loginShellRun(`
+if command -v codex-multi-auth >/dev/null 2>&1; then
+  codex-multi-auth list --json 2>/dev/null || true
+fi
+`))
+	return parseCodexMultiAuthListJSON(stdout)
+}
+
+func parseCodexMultiAuthListJSON(stdout string) []string {
+	stdout = strings.TrimSpace(stdout)
+	if stdout == "" {
+		return nil
+	}
+	// Remote scripts may wrap noise around JSON; take the outermost object.
+	start := strings.Index(stdout, "{")
+	end := strings.LastIndex(stdout, "}")
+	if start < 0 || end <= start {
+		return nil
+	}
+	var root struct {
+		Accounts []struct {
+			Index   int    `json:"index"`
+			Label   string `json:"label"`
+			Enabled *bool  `json:"enabled"`
+		} `json:"accounts"`
+	}
+	if err := json.Unmarshal([]byte(stdout[start:end+1]), &root); err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, row := range root.Accounts {
+		if row.Enabled != nil && !*row.Enabled {
+			continue
+		}
+		sel := strings.TrimSpace(codexAccountEmailRe.FindString(row.Label))
+		if sel == "" {
+			if row.Index < 0 {
+				continue
+			}
+			sel = strconv.Itoa(row.Index + 1)
+		}
+		if seen[sel] {
+			continue
+		}
+		seen[sel] = true
+		out = append(out, sel)
 	}
 	return out
 }
@@ -627,7 +701,7 @@ func probeOneAgent(ctx context.Context, t ports.Transport, a AgentSpec) ProbeRes
 			!strings.Contains(low, "oauth session expired") &&
 			!strings.Contains(low, "not logged") &&
 			!strings.Contains(low, "e301")
-	case a.Name == "codex" || bin == "codex":
+	case isCodexFamily(a) || bin == "codex" || bin == "codex-multi-auth-codex" || bin == "mcodex":
 		o, _, _ := t.Run(ctx, "", loginShellRun(`codex login status 2>&1 | head -c 300`))
 		detail = strings.TrimSpace(o)
 		low := strings.ToLower(detail)
@@ -659,6 +733,9 @@ func agentBinName(a AgentSpec) string {
 	}
 	if strings.HasPrefix(a.Name, "ccs:") {
 		return "ccs"
+	}
+	if strings.HasPrefix(a.Name, "codex:") {
+		return "codex-multi-auth-codex"
 	}
 	return path.Base(bin)
 }

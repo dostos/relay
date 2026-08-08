@@ -172,6 +172,7 @@ func TestLoginCommandPerAgent(t *testing.T) {
 		{"claude", "claude auth login"},
 		{"cursor-agent", "cursor-agent login"},
 		{"codex", "codex login"},
+		{"codex:1", "codex-multi-auth login"},
 		{"ccs:personal", "ccs auth create personal --force"},
 		{"ccs:hcs", "ccs auth create hcs --force"},
 	}
