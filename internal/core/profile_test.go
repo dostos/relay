@@ -101,6 +101,35 @@ func TestAgentLaunchHooksAreGeneralAndProviderAware(t *testing.T) {
 	}
 }
 
+func TestCodexMultiAuthFamilyGetsCodexLaunchPolicy(t *testing.T) {
+	goal := "do the thing"
+	specs := []AgentSpec{
+		{Name: "codex:1", Command: "codex-multi-auth-codex", Args: []string{"--account", "1"}},
+		{Name: "codex:dostos10@gmail.com", Command: "codex-multi-auth-codex", Args: []string{"--account", "dostos10@gmail.com"}},
+	}
+	for _, spec := range specs {
+		if !spec.SupportsNativePrompt() {
+			t.Fatalf("%s: expected native prompt support", spec.Name)
+		}
+		payload := spec.launchScript(goal)
+		if !strings.Contains(payload, "codex-multi-auth-codex") {
+			t.Fatalf("%s: missing wrapper binary: %s", spec.Name, payload)
+		}
+		if !strings.Contains(payload, "--account") {
+			t.Fatalf("%s: missing --account arg: %s", spec.Name, payload)
+		}
+		if !strings.Contains(payload, "--dangerously-bypass-approvals-and-sandbox") {
+			t.Fatalf("%s: missing autonomous permissions: %s", spec.Name, payload)
+		}
+		if !strings.Contains(payload, `mcp_servers.relay.command="relay"`) {
+			t.Fatalf("%s: missing Relay MCP injection: %s", spec.Name, payload)
+		}
+		if !strings.Contains(payload, shellQuote(goal)) {
+			t.Fatalf("%s: missing shell-safe goal: %s", spec.Name, payload)
+		}
+	}
+}
+
 func TestKnownAgentsReceiveExactNativeInitialPrompt(t *testing.T) {
 	goal := "quote ' backtick ` dollar $ newline\nsecond"
 	for _, spec := range []AgentSpec{

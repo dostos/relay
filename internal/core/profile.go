@@ -262,6 +262,20 @@ func (a *AgentSpec) launchScript(goal string) string {
 	return script
 }
 
+// isCodexFamily reports whether this agent is the official Codex CLI or a
+// codex-multi-auth wrapper / account agent (codex:1, codex-multi-auth-codex, …).
+func isCodexFamily(a AgentSpec) bool {
+	if a.Name == "codex" || strings.HasPrefix(a.Name, "codex:") {
+		return true
+	}
+	fields := strings.Fields(a.InnerCommand())
+	if len(fields) == 0 {
+		return false
+	}
+	base := strings.ToLower(path.Base(fields[0]))
+	return base == "codex" || base == "codex-multi-auth-codex" || base == "mcodex"
+}
+
 func withAgentRelayMCP(a AgentSpec, inner string) string {
 	fields := strings.Fields(a.InnerCommand())
 	if len(fields) == 0 {
@@ -269,7 +283,7 @@ func withAgentRelayMCP(a AgentSpec, inner string) string {
 	}
 	base := strings.ToLower(path.Base(fields[0]))
 	switch {
-	case base == "codex" || a.Name == "codex":
+	case isCodexFamily(a):
 		commandCfg := `mcp_servers.relay.command="relay"`
 		argsCfg := `mcp_servers.relay.args=["mcp","serve"]`
 		// Codex deliberately filters the environment of stdio MCP servers.
@@ -297,12 +311,15 @@ func (a *AgentSpec) SupportsNativePrompt() bool {
 	if a == nil {
 		return false
 	}
+	if isCodexFamily(*a) {
+		return true
+	}
 	fields := strings.Fields(a.InnerCommand())
 	if len(fields) == 0 {
 		return false
 	}
 	base := strings.ToLower(path.Base(fields[0]))
-	return base == "cursor-agent" || base == "codex" || base == "claude" || base == "ccs"
+	return base == "cursor-agent" || base == "claude" || base == "ccs"
 }
 
 // withAutonomousPermissions gives every managed agent the provider's
@@ -325,7 +342,7 @@ func withAutonomousPermissions(a AgentSpec, inner string) string {
 		if !hasArg("--force", "-f", "--yolo") {
 			inner += " --force"
 		}
-	case base == "codex" || a.Name == "codex":
+	case isCodexFamily(a):
 		if !hasArg("--dangerously-bypass-approvals-and-sandbox", "--ask-for-approval", "-a") {
 			inner += " --dangerously-bypass-approvals-and-sandbox"
 		}
@@ -342,7 +359,7 @@ func withAgentRelayHooks(a AgentSpec, inner string) string {
 	permission := `$HOME/.local/bin/relay hook --kind permission_required`
 	result := `$HOME/.local/bin/relay hook --kind result`
 	switch {
-	case base == "codex" || a.Name == "codex":
+	case isCodexFamily(a):
 		permissionCfg := `hooks.PermissionRequest=[{hooks=[{type="command",command='''` + permission + `''',timeout=120000}]}]`
 		resultCfg := `hooks.Stop=[{hooks=[{type="command",command='''` + result + `''',timeout=120000}]}]`
 		return inner + " -c " + shellQuote(permissionCfg) + " -c " + shellQuote(resultCfg)
