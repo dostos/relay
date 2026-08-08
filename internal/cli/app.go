@@ -38,6 +38,7 @@ type App struct {
 	Auth        *core.AuthService
 	Bootstrap   *core.BootstrapService
 	Discover    *core.DiscoverService
+	Ensure      *core.EnsureService
 	Reg         *core.Registry
 	Coord       ports.Coord
 	Msg         *core.MsgService
@@ -109,6 +110,10 @@ func New() *App {
 		Discover: &core.DiscoverService{
 			NewTransport: tf,
 			Coord:        coord,
+			Profiles:     profiles,
+		},
+		Ensure: &core.EnsureService{
+			NewTransport: tf,
 			Profiles:     profiles,
 		},
 		Reg:      reg,
@@ -271,6 +276,10 @@ func projectionClientCommandStaysLocal(args []string) bool {
 		return len(filtered) == 1 || filtered[1] != "retire-control"
 	case "agent":
 		return len(filtered) > 1 && filtered[1] == "protocol"
+	case "host":
+		// ensure must run in the client binary (SSH from this vantage + current
+		// account-agent logic). Forwarding to an older desktop bridge loses the command.
+		return len(filtered) > 1 && filtered[1] == "ensure"
 	default:
 		return false
 	}
@@ -549,6 +558,7 @@ New machine (ssh config → discover → init):
   relay host discover -H HOST         Inventory + proposed host.yaml (no writes)
   relay host init -H HOST [--apply] [--force]
                                       Install relay + compatibility shim; write proposal with --apply
+  relay host ensure -H HOST [--apply] Deps + propose/merge ccs:*/codex:* agents + auth help
 
 Host profiles (authoritative on each remote ~/.config/relay/host.yaml):
   relay host show -H HOST
@@ -980,6 +990,73 @@ func (a *App) cmdHost(ctx context.Context, args []string) int {
 		if res.DryRun && res.Discover != nil && res.Discover.ProposalYAML != "" {
 			ui.Note("proposal → " + core.RemoteHostProfilePath())
 			fmt.Print(res.Discover.ProposalYAML)
+		}
+		if res.Next != "" {
+			fmt.Printf("  next        %s\n", res.Next)
+		}
+		if !res.OK {
+			return 1
+		}
+		return 0
+	case "ensure":
+		if host == "" {
+			return a.fail(fmt.Errorf("-H HOST required"))
+		}
+		opts := core.EnsureOptions{}
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case "--apply":
+				opts.Apply = true
+			default:
+				return a.fail(rejectUnknownFlag(rest[i]))
+			}
+		}
+		if a.Ensure == nil {
+			return a.fail(fmt.Errorf("ensure service unavailable"))
+		}
+		res, err := a.Ensure.Ensure(ctx, host, opts)
+		if err != nil {
+			return a.fail(err)
+		}
+		if a.JSON {
+			return a.errOut(a.out(res))
+		}
+		fmt.Printf("host %s\n", res.HostID)
+		fmt.Printf("  dry_run     %v\n", res.DryRun)
+		fmt.Printf("  applied     %v\n", res.Applied)
+		fmt.Printf("  profile     %v\n", res.WroteProfile)
+		if res.Detail != "" {
+			fmt.Printf("  detail      %s\n", res.Detail)
+		}
+		for _, d := range res.Deps {
+			mark := "missing"
+			if d.Present {
+				mark = "ok"
+			}
+			line := fmt.Sprintf("  dep %-28s %s", d.Name, mark)
+			if d.Hint != "" && !d.Present {
+				line += " — " + d.Hint
+			}
+			fmt.Println(line)
+		}
+		if len(res.ProposedAgents) > 0 {
+			ui.Note("proposed account agents (not written until --apply)")
+			for _, ag := range res.ProposedAgents {
+				fmt.Printf("  + %s\n", ag.Name)
+			}
+		}
+		if len(res.SkippedAgents) > 0 {
+			fmt.Printf("  skipped     %d already present\n", len(res.SkippedAgents))
+		}
+		for _, row := range res.Auth {
+			auth := "unauthed"
+			if row.Authed {
+				auth = "authed"
+			}
+			if !row.Present {
+				auth = "missing"
+			}
+			fmt.Printf("  auth %-24s %s\n", row.Agent, auth)
 		}
 		if res.Next != "" {
 			fmt.Printf("  next        %s\n", res.Next)

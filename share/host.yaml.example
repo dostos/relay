@@ -12,6 +12,16 @@ agents:
     command: codex
   - name: ccs:personal
     command: ccs personal
+  - name: ccs:hcs
+    command: ccs hcs
+  - name: codex:1
+    command: codex-multi-auth-codex
+    args: ["--account", "1"]
+    usage_key: codex
+  - name: codex:2
+    command: codex-multi-auth-codex
+    args: ["--account", "2"]
+    usage_key: codex
 
 path_map:
   - match: relay

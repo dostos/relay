@@ -74,6 +74,15 @@ func SpecForAgent(profile *HostProfile, name string) (AgentSpec, error) {
 	if strings.HasPrefix(name, "ccs:") {
 		return AgentSpec{Name: name, Command: "ccs " + strings.TrimPrefix(name, "ccs:")}, nil
 	}
+	if strings.HasPrefix(name, "codex:") {
+		sel := strings.TrimPrefix(name, "codex:")
+		return AgentSpec{
+			Name:     name,
+			Command:  "codex-multi-auth-codex",
+			Args:     []string{"--account", sel},
+			UsageKey: "codex",
+		}, nil
+	}
 	switch name {
 	case "claude", "cursor-agent", "codex", "ccs":
 		return AgentSpec{Name: name, Command: name}, nil
@@ -95,6 +104,8 @@ func LoginCommand(spec AgentSpec) string {
 		return wrapLoginShell("claude auth login")
 	case name == "cursor-agent" || strings.Contains(agentBinName(spec), "cursor"):
 		return wrapLoginShell("cursor-agent login")
+	case strings.HasPrefix(name, "codex:") || agentBinName(spec) == "codex-multi-auth-codex" || agentBinName(spec) == "mcodex":
+		return wrapLoginShell("codex-multi-auth login")
 	case name == "codex" || agentBinName(spec) == "codex":
 		return wrapLoginShell("codex login")
 	default:
@@ -138,13 +149,25 @@ func (s *AuthService) Status(ctx context.Context, hostID, agentFilter string) ([
 		specs = []AgentSpec{spec}
 	} else if profile != nil && len(profile.Agents) > 0 {
 		specs = append(specs, profile.Agents...)
-		// Also surface discovered CCS accounts not yet in host.yaml.
+		// Also surface discovered CCS / multi-auth accounts not yet in host.yaml.
 		for _, prof := range listCCSProfiles(ctx, t) {
 			name := "ccs:" + prof
 			if hasAgent(specs, name) {
 				continue
 			}
 			specs = append(specs, AgentSpec{Name: name, Command: "ccs " + prof})
+		}
+		for _, sel := range listCodexMultiAuthAccounts(ctx, t) {
+			name := "codex:" + sel
+			if hasAgent(specs, name) {
+				continue
+			}
+			specs = append(specs, AgentSpec{
+				Name:     name,
+				Command:  "codex-multi-auth-codex",
+				Args:     []string{"--account", sel},
+				UsageKey: "codex",
+			})
 		}
 	} else {
 		for _, d := range probeAgentCatalog(ctx, t) {

@@ -318,13 +318,16 @@ func TestProjectionClientForwardsAuthorityCommandToHome(t *testing.T) {
 }
 
 func TestProjectionClientKeepsLocalInventoryCommandsLocal(t *testing.T) {
-	for _, args := range [][]string{{"targets"}, {"doctor"}, {"session", "list"}, {"resume", "list"}, {"viz", "list"}, {"agent", "protocol"}} {
+	for _, args := range [][]string{{"targets"}, {"doctor"}, {"session", "list"}, {"resume", "list"}, {"viz", "list"}, {"agent", "protocol"}, {"host", "ensure"}, {"host", "ensure", "-H", "local"}} {
 		if !projectionClientCommandStaysLocal(args) {
 			t.Fatalf("command %v should stay on visualization client", args)
 		}
 	}
 	if projectionClientCommandStaysLocal([]string{"handoff", "list"}) {
 		t.Fatal("authority command was kept on visualization client")
+	}
+	if projectionClientCommandStaysLocal([]string{"host", "discover", "-H", "local"}) {
+		t.Fatal("host discover should still forward through the desktop bridge")
 	}
 }
 
