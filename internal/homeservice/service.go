@@ -316,6 +316,24 @@ func runEventCoordinator(ctx context.Context, ready func(bool)) error {
 }
 
 func runCommandBoundary(ctx context.Context, ready func(bool)) error {
+	return serveCommandBoundary(ctx, ready, true)
+}
+
+// runCommandBoundaryOnly serves the authenticated command boundary WITHOUT the
+// cmux control loop.
+//
+// The control loop's job is to push this socket out to remote tmux sessions
+// over ssh -R and to sync cmux acknowledgements. A host that owns the authority
+// but has neither cmux nor a reason to open ssh tunnels — a container, for
+// instance — needs the boundary and must not start the tunnels: they would be
+// unnecessary ssh churn on the fleet, and the ack sync would fail forever
+// against a cmux that is not there. Same socket, same authorization, one
+// component instead of two.
+func runCommandBoundaryOnly(ctx context.Context, ready func(bool)) error {
+	return serveCommandBoundary(ctx, ready, false)
+}
+
+func serveCommandBoundary(ctx context.Context, ready func(bool), withControl bool) error {
 	sock := core.DesktopBridgeSocketPath()
 	if _, err := core.EnsureHomeClientIdentity(); err != nil {
 		return err
@@ -328,6 +346,16 @@ func runCommandBoundary(ctx context.Context, ready func(bool)) error {
 	if err := waitReady(componentCtx, func() error { return bridge.Client{SockPath: sock}.Ping(componentCtx) }); err != nil {
 		_ = server.Close()
 		return err
+	}
+	if !withControl {
+		ready(true)
+		select {
+		case <-componentCtx.Done():
+			_ = server.Close()
+			return nil
+		case err := <-bridgeErr:
+			return err
+		}
 	}
 	controlReady := make(chan struct{}, 1)
 	app := cli.New()

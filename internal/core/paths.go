@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -53,7 +54,19 @@ func HomeServiceLockPath() string     { return filepath.Join(StateRoot(), "servi
 func HomeClientTokenPath() string     { return filepath.Join(StateRoot(), "home-client.token") }
 func HandoffsDir() string             { return filepath.Join(StateRoot(), "handoffs") }
 func LedgerPath() string              { return filepath.Join(StateRoot(), "handoffs", "ledger.jsonl") }
-func DesktopBridgeSocketPath() string { return filepath.Join(StateRoot(), "desktop-bridge.sock") }
+// DesktopBridgeSocketPath is where the authenticated command boundary listens,
+// and where a client dials it. RELAY_BRIDGE_SOCK overrides both ends together
+// on purpose: they must agree, and the default derives from StateRoot, which a
+// second process (another container, another account) cannot necessarily see.
+// Relay already injects this variable into remote sessions as the client-side
+// endpoint; honouring it on the server side is what lets the authority publish
+// that endpoint somewhere a co-located holder can actually reach.
+func DesktopBridgeSocketPath() string {
+	if v := strings.TrimSpace(os.Getenv("RELAY_BRIDGE_SOCK")); v != "" {
+		return v
+	}
+	return filepath.Join(StateRoot(), "desktop-bridge.sock")
+}
 func BridgeTokensDir() string         { return filepath.Join(StateRoot(), "bridge-tokens") }
 func BridgeIdentitiesDir() string     { return filepath.Join(StateRoot(), "bridge-identities") }
 func ParentInboxDir() string          { return filepath.Join(StateRoot(), "parent-inbox") }

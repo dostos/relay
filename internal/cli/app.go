@@ -625,6 +625,9 @@ Agent surface (token-efficient; always JSON; NO poll loops):
 
 Long-lived goal orchestration (durable compact inbox + guarded local-pane cleanup):
   relay parent register [--surface REF] [--name NAME] [--repo DIR ...] [--wake inject|notify]
+  relay parent register --headless --name NAME [--repo DIR ...] [--ttl 15m] [--print-identity]
+                                               # a root that is a service, not a pane
+  relay parent heartbeat PARENT                # renew a headless root's declared liveness
   relay parent bind PARENT [--surface REF]     # preserve identity after cmux restart
   relay parent link PARENT HANDOFF             # adopt an already-running goal
   relay parent move PARENT HANDOFF             # explicitly repair a wrong parent edge
@@ -1962,7 +1965,7 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 	a.JSON = true
 	a.CompactJSON = true
 	if a.Parents == nil || len(args) == 0 {
-		return a.fail(fmt.Errorf("usage: relay parent register|link|list|inbox|sweep|reply|ack|state|status|retire …"))
+		return a.fail(fmt.Errorf("usage: relay parent register|heartbeat|link|list|inbox|sweep|reply|ack|state|status|retire …"))
 	}
 	switch args[0] {
 	case "send":
@@ -1999,10 +2002,38 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 			return a.fail(err)
 		}
 		return a.errOut(a.out(map[string]any{"ok": true, "parent_session_id": managerID, "child_session_id": args[1], "submitted": receipt.Submitted, "delivery": receipt.Delivery, "event_stream": receipt.EventStream, "handoff_id": receipt.HandoffID}))
+	case "heartbeat":
+		if len(args) != 2 || strings.HasPrefix(args[1], "-") {
+			return a.fail(fmt.Errorf("usage: relay parent heartbeat PARENT"))
+		}
+		if err := authorizeParentCaller(args[1]); err != nil {
+			return a.fail(err)
+		}
+		sess, err := a.Parents.Heartbeat(args[1])
+		if err != nil {
+			return a.fail(err)
+		}
+		health := core.HeadlessHealth(sess, time.Now().UTC())
+		return a.errOut(a.out(map[string]any{"ok": true, "parent_session_id": sess.ID, "headless": health}))
 	case "register":
 		var opts core.RegisterParentOpts
+		printIdentity := false
 		for i := 1; i < len(args); i++ {
 			switch args[i] {
+			case "--headless":
+				opts.Headless = true
+			case "--print-identity":
+				printIdentity = true
+			case "--ttl":
+				i++
+				if i >= len(args) {
+					return a.fail(fmt.Errorf("--ttl requires a duration, e.g. 15m"))
+				}
+				ttl, err := time.ParseDuration(args[i])
+				if err != nil || ttl <= 0 {
+					return a.fail(fmt.Errorf("invalid --ttl %q", args[i]))
+				}
+				opts.TTL = ttl
 			case "--surface":
 				i++
 				if i < len(args) {
@@ -2027,11 +2058,29 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 				return a.fail(rejectUnknownFlag(args[i]))
 			}
 		}
+		if printIdentity && !opts.Headless {
+			return a.fail(fmt.Errorf("--print-identity is a headless-root bootstrap: a pane parent already carries its identity in the pane"))
+		}
 		sess, created, err := a.Parents.RegisterLocal(ctx, opts)
 		if err != nil {
 			return a.fail(err)
 		}
-		return a.errOut(a.out(map[string]any{"ok": true, "created": created, "session": sess}))
+		result := map[string]any{"ok": true, "created": created, "session": sess}
+		if opts.Headless {
+			result["headless"] = core.HeadlessHealth(sess, time.Now().UTC())
+			// The holder process is not this process. Handing back the bridge
+			// identity is what lets a service in another container operate the
+			// root it was just registered as, rather than needing the human's
+			// credential. Emitted only on request so it never lands in a log.
+			if printIdentity {
+				identity, identityErr := core.EnsureHeadlessBridgeIdentity(sess.ID)
+				if identityErr != nil {
+					return a.fail(identityErr)
+				}
+				result["identity"] = identity
+			}
+		}
+		return a.errOut(a.out(result))
 	case "bind":
 		if len(args) < 2 || strings.HasPrefix(args[1], "-") {
 			return a.fail(fmt.Errorf("usage: relay parent bind PARENT [--surface REF]"))
@@ -2084,12 +2133,25 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 			return a.fail(err)
 		}
 		out := make([]*core.Session, 0)
+		health := map[string]core.HeadlessStatus{}
+		now := time.Now().UTC()
 		for _, sess := range list {
-			if sess.HostID == core.LocalHostID && sess.Persist.Kind == core.LocalPersistKind && sess.Labels["role"] == core.ParentRole {
-				out = append(out, sess)
+			if !core.IsLocalParentSession(sess) {
+				continue
+			}
+			out = append(out, sess)
+			if core.IsHeadlessParent(sess) {
+				health[sess.ID] = core.HeadlessHealth(sess, now)
 			}
 		}
-		return a.errOut(a.out(map[string]any{"ok": true, "parents": out}))
+		result := map[string]any{"ok": true, "parents": out}
+		if len(health) > 0 {
+			// A headless root's liveness is not visible in its record, so listing
+			// one without its heartbeat state invites reading "registered" as
+			// "answering".
+			result["headless"] = health
+		}
+		return a.errOut(a.out(result))
 	case "inbox":
 		if len(args) < 2 || strings.HasPrefix(args[1], "-") {
 			return a.fail(fmt.Errorf("usage: relay parent inbox PARENT [--all]"))
@@ -2107,6 +2169,10 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		if err := authorizeParentCaller(parentID); err != nil {
 			return a.fail(err)
 		}
+		// Working the inbox IS the liveness evidence for a headless root: a
+		// service that is still draining its escalations is, by construction,
+		// still running. This keeps the common case heartbeat-free.
+		a.Parents.TouchHeadless(parentID)
 		msgs, err := a.Parents.ListMessages(parentID, !all)
 		if err != nil {
 			return a.fail(err)
@@ -2204,6 +2270,7 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		if err := authorizeParentCaller(candidate.ParentSessionID); err != nil {
 			return a.fail(err)
 		}
+		a.Parents.TouchHeadless(candidate.ParentSessionID)
 		msg, err := a.Parents.Reply(ctx, messageID, text)
 		if err != nil {
 			return a.fail(err)
@@ -2224,6 +2291,7 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		if err := authorizeParentCaller(candidate.ParentSessionID); err != nil {
 			return a.fail(err)
 		}
+		a.Parents.TouchHeadless(candidate.ParentSessionID)
 		msg, err := a.Parents.Ack(messageID)
 		if err != nil {
 			return a.fail(err)

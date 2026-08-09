@@ -15,7 +15,7 @@ import (
 
 func Command(args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: relay service run|status|event")
+		fmt.Fprintln(os.Stderr, "usage: relay service run|status|event|boundary")
 		return 2
 	}
 	switch args[0] {
@@ -53,7 +53,20 @@ func Command(args []string) int {
 	case "event":
 		return eventCommand(args[1:])
 	case "boundary":
-		return compatibilityComponentCommand("boundary", args[1:], runCommandBoundary)
+		// --no-control serves the authenticated boundary alone: no cmux ack sync
+		// and no ssh -R tunnels. That is the shape an authority-owning container
+		// needs, and the shape a desktop must NOT use.
+		rest := args[1:]
+		if len(rest) == 2 && rest[0] == "run" && rest[1] == "--no-control" {
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			if err := runCommandBoundaryOnly(ctx, func(bool) {}); err != nil && ctx.Err() == nil {
+				fmt.Fprintln(os.Stderr, err)
+				return 1
+			}
+			return 0
+		}
+		return compatibilityComponentCommand("boundary", rest, runCommandBoundary)
 	case "watcher":
 		return compatibilityComponentCommand("watcher", args[1:], runWatcherReconciler)
 	default:
