@@ -180,7 +180,23 @@ func authoritySnapshot() ([]ports.Presentation, error) {
 	}
 	items := make([]ports.Presentation, 0, len(sessions))
 	for _, session := range sessions {
-		if session == nil || session.ID == "" || session.HostID == "" || session.Persist.Name == "" {
+		// A headless root is a service, not a pane. It has no tmux to present
+		// and no SSH target to reach -- its HostID is "local", meaningful only
+		// inside the process that registered it. Including it here made
+		// ValidateTargetAlias fail, and because that failure aborts the whole
+		// snapshot, ONE unpresentable session froze the view of every viz
+		// client: the Mac's `relay viz serve` crash-looped on
+		//   SSH target "local" is absent from authority config
+		// so its local snapshot was never replaced and its dashboard kept
+		// showing sessions that had been destroyed hours earlier.
+		// Observed 2026-08-09 within minutes of the first headless root.
+		if session == nil {
+			return nil, fmt.Errorf("session registry contains incomplete visualization identity")
+		}
+		if core.IsHeadlessParent(session) {
+			continue
+		}
+		if session.ID == "" || session.HostID == "" || session.Persist.Name == "" {
 			return nil, fmt.Errorf("session registry contains incomplete visualization identity")
 		}
 		if err := core.ValidateTargetAlias(session.HostID); err != nil {
