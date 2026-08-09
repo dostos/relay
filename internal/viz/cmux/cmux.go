@@ -1053,7 +1053,83 @@ func (v *Viz) surfaceForPersist(ctx context.Context, persistName string) string 
 			return ref
 		}
 	}
-	return ""
+	// Fallback: a surface relay itself titled, whose resume binding is gone.
+	//
+	// The checkpoint above is the authoritative match, but it lives in cmux's
+	// resume binding, and that can be lost while the pane keeps running (cmux
+	// upgrade, a cleared binding, a restore that drops it). When it is, relay
+	// cannot see its OWN pane: the reclaim above finds nothing, so it opens a
+	// second pane for a session that is already on screen. Observed 2026-08-09
+	// with beholder2 -- its surface had resume_binding: null, and every
+	// reconcile rebuilt it in whatever workspace happened to be nearby.
+	//
+	// The title is relay's own mark and is 1:1 with the persist name, so it is
+	// a safe secondary key. Surfaces that DO carry a checkpoint are excluded:
+	// those already answered authoritatively above, and stealing one would
+	// bind this session to another's pane -- worse than a duplicate.
+	return unboundTitleMatch(v.surfaceTitles(ctx), refs, persistName)
+}
+
+// unboundTitleMatch picks the surface relay titled for persistName that no
+// checkpoint already claims. Pure so the reclaim rule is testable without cmux.
+func unboundTitleMatch(titles map[string]string, checkpointed map[string]bool, persistName string) string {
+	want := brandTitle(persistName)
+	if persistName == "" || want == "" {
+		return ""
+	}
+	candidates := make([]string, 0, 1)
+	for ref, title := range titles {
+		if checkpointed[ref] {
+			continue
+		}
+		if strings.TrimSpace(title) == want {
+			candidates = append(candidates, ref)
+		}
+	}
+	if len(candidates) != 1 {
+		// Zero: nothing to reclaim. More than one: ambiguous, and guessing
+		// could adopt the wrong pane -- let the caller open a fresh one, which
+		// is recoverable, rather than silently binding to a stranger.
+		return ""
+	}
+	return candidates[0]
+}
+
+// surfaceTitles maps surface ref -> title from the same tree call listSurfaces
+// uses. Titles are what relay brands its own panes with.
+func (v *Viz) surfaceTitles(ctx context.Context) map[string]string {
+	out, err := v.run(ctx, "tree", "--all", "--json")
+	if err != nil {
+		return nil
+	}
+	var root struct {
+		Windows []struct {
+			Workspaces []struct {
+				Panes []struct {
+					Surfaces []struct {
+						Ref   string `json:"ref"`
+						Title string `json:"title"`
+					} `json:"surfaces"`
+				} `json:"panes"`
+			} `json:"workspaces"`
+		} `json:"windows"`
+	}
+	if json.Unmarshal([]byte(out), &root) != nil {
+		return nil
+	}
+	titles := map[string]string{}
+	for _, w := range root.Windows {
+		for _, ws := range w.Workspaces {
+			for _, p := range ws.Panes {
+				for _, s := range p.Surfaces {
+					if s.Ref != "" && s.Title != "" {
+						titles[s.Ref] = s.Title
+					}
+				}
+			}
+		}
+	}
+	return titles
 }
 
 func (v *Viz) focusSurface(ctx context.Context, b binding) error {

@@ -847,3 +847,53 @@ func TestVizClientArchivesLocalAuthorityButKeepsProjectionState(t *testing.T) {
 		t.Fatalf("empty recreated directories caused another retirement: %v", archives)
 	}
 }
+
+// A relay pane whose cmux resume binding is gone is invisible to the
+// checkpoint reclaim, so relay opened a SECOND pane for a session already on
+// screen. Observed 2026-08-09: beholder2's surface had resume_binding: null,
+// and every reconcile rebuilt it in whatever workspace was nearby (its madrid
+// sibling's, or simply the focused one). The title is relay's own mark and is
+// 1:1 with the persist name, so it is a safe secondary key.
+func TestUnboundTitleMatchReclaimsRelaysOwnOrphanedPane(t *testing.T) {
+	titles := map[string]string{
+		"surface:399": "◆ RELAY · beholder2",
+		"surface:365": "◆ RELAY · beholder",
+		"surface:900": "some editor",
+	}
+	if got := unboundTitleMatch(titles, map[string]bool{}, "beholder2"); got != "surface:399" {
+		t.Fatalf("expected to reclaim surface:399, got %q", got)
+	}
+}
+
+func TestUnboundTitleMatchNeverStealsACheckpointedSurface(t *testing.T) {
+	// A surface carrying a checkpoint already answered authoritatively; taking
+	// it here would bind this session to another session's pane -- worse than
+	// the duplicate this fallback exists to prevent.
+	titles := map[string]string{"surface:399": "◆ RELAY · beholder2"}
+	checkpointed := map[string]bool{"surface:399": true}
+	if got := unboundTitleMatch(titles, checkpointed, "beholder2"); got != "" {
+		t.Fatalf("stole a checkpointed surface: %q", got)
+	}
+}
+
+func TestUnboundTitleMatchRefusesWhenAmbiguous(t *testing.T) {
+	// Two panes with the same relay title: guessing could adopt the wrong one.
+	// Opening a fresh pane is recoverable; a wrong binding is not obvious.
+	titles := map[string]string{
+		"surface:1": "◆ RELAY · beholder2",
+		"surface:2": "◆ RELAY · beholder2",
+	}
+	if got := unboundTitleMatch(titles, map[string]bool{}, "beholder2"); got != "" {
+		t.Fatalf("guessed between ambiguous candidates: %q", got)
+	}
+}
+
+func TestUnboundTitleMatchIgnoresNonRelaySurfacesAndEmptyNames(t *testing.T) {
+	titles := map[string]string{"surface:900": "beholder2"} // no relay brand
+	if got := unboundTitleMatch(titles, map[string]bool{}, "beholder2"); got != "" {
+		t.Fatalf("matched a surface relay does not own: %q", got)
+	}
+	if got := unboundTitleMatch(titles, map[string]bool{}, ""); got != "" {
+		t.Fatalf("matched on an empty persist name: %q", got)
+	}
+}
