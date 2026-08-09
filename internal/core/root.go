@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Autonomous mode is not a flag — it is a shape. A subtree is governed when it
@@ -204,8 +205,17 @@ func (r *RootService) Adopt(sessionID string) (*Session, error) {
 		return nil, fmt.Errorf("apex already designated (%s); run: relay root release %s", existing.ID, existing.ID)
 	}
 	// An apex whose agent is inert is worse than no apex: escalations arrive
-	// into a pane that will never answer them, and nothing says so.
-	if r.Sessions != nil {
+	// into a pane that will never answer them, and nothing says so. A headless
+	// root has no pane to classify, so the same question is asked of the only
+	// evidence it has — its declared heartbeat.
+	if IsHeadlessParent(sess) {
+		health := HeadlessHealth(sess, time.Now().UTC())
+		if health.State != HeadlessFresh {
+			return nil, fmt.Errorf(
+				"headless root %s is %s (%s); start its service and let it heartbeat before adopting it as the apex",
+				sess.ID, health.State, health.Reason)
+		}
+	} else if r.Sessions != nil {
 		ready := r.AgentReadinessFor(context.Background(), r.Sessions, sess.ID)
 		switch ready.State {
 		case AgentBlocked:

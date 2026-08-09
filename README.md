@@ -93,6 +93,40 @@ relay resolve pm-… -- approve         # the only decision handshake
 relay log 0                            # optional compact delta; save returned cursor
 ```
 
+### Headless roots
+
+A manager does not have to be a pane. A coordinator that runs as a long-lived
+service — a container, a daemon — registers as a **headless root**:
+
+```bash
+relay parent register --headless --name Apex --ttl 15m   # idempotent; re-run on every start
+relay parent heartbeat sess-…                            # renew declared liveness
+relay parent inbox sess-…                                # also renews it
+```
+
+Two things differ from a pane parent, and only two:
+
+* **Delivery is the durable inbox.** There is no composer to type into, so an
+  envelope is delivered the moment it is durably written, recorded as
+  `headless_inbox_confirmed`. `--wake inject|notify` need a surface, so they
+  degrade to the inbox and the registration says which mode was asked for.
+* **Liveness is declared, not observed.** Relay classifies a pane by looking at
+  it; it cannot look at a service. So a headless root is live only while its
+  heartbeat is inside the declared TTL. Past that it is treated exactly like an
+  absent pane: delivery reports the target unavailable, attention envelopes fail
+  over to an ancestor, and an envelope with nowhere to go stays **pending and
+  visible** rather than being marked delivered into a service nobody is running.
+  `relay parent list` reports every headless root's heartbeat state alongside it.
+
+The holder process usually lives somewhere other than the authority host. It
+operates the root through the ordinary authenticated command boundary, using an
+identity issued at registration (`--print-identity`) and confined by the same
+lineage policy as any other manager. Where that boundary listens is
+`RELAY_BRIDGE_SOCK`, honoured by both the server and the client so an authority
+can publish it somewhere a co-located holder can actually reach; a host that
+owns the authority but has no cmux and no reason to open ssh tunnels serves it
+with `relay service boundary run --no-control`.
+
 This is a durable control plane for **long-lived, goal-based handoff and
 orchestration**, not a transcript or chat bus. Correlated control envelopes
 survive agent exits, SSH reconnects, nested relays, and cmux restarts until the
@@ -443,6 +477,8 @@ relay HOST NAME                             # named tmux in current cmux pane
 relay session … / session adopt             # durable tmux
 relay agent start|wait|send|capture|done    # orchestrator API
 relay parent register|inbox|reply|ack       # durable parent communication
+relay parent register --headless --name N   # a root that is a service, not a pane
+relay parent heartbeat PARENT               # renew a headless root's liveness
 relay board post|query|watch                # manager-scoped peer coordination
 relay root adopt|enroll|status|digest       # always-on apex (autonomous mode)
 relay service run|status                    # unified authority and component health

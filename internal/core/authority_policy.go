@@ -264,7 +264,10 @@ func authorizeOperation(reg *Registry, actor *Session, args []string) (bool, str
 		}
 		// Commands naming a manager session are confined to that manager or a
 		// governing ancestor. Message commands resolve their durable inbox owner.
-		if map[string]bool{"inbox": true, "log": true, "sweep": true, "status": true, "retire": true, "state": true, "active": true, "idle": true, "complete": true}[args[1]] {
+		// heartbeat names the manager it renews, so it is confined the same way
+		// inbox is: a headless root may prove its own liveness, and a governing
+		// ancestor may prove it on its behalf. Nobody else may.
+		if map[string]bool{"inbox": true, "log": true, "sweep": true, "status": true, "retire": true, "state": true, "active": true, "idle": true, "complete": true, "heartbeat": true}[args[1]] {
 			if len(args) < 3 || !(actor.ID == args[2] || sessionAncestor(reg, actor.ID, args[2])) {
 				return false, "parent target is outside caller lineage"
 			}

@@ -345,6 +345,9 @@ func (s *SessionService) Rename(ctx context.Context, id, name string) (*Session,
 	if isLocalParent(sess) {
 		return nil, fmt.Errorf("local parent identity is pane-owned; re-register it with relay parent register")
 	}
+	if IsHeadlessParent(sess) {
+		return nil, fmt.Errorf("headless parent identity IS its registration name; re-register it with relay parent register --headless --name")
+	}
 	safe, err := shellquote.SanitizeSessionName(name)
 	if err != nil {
 		return nil, err
@@ -617,7 +620,7 @@ func (s *SessionService) Destroy(ctx context.Context, id string, keepRemote bool
 	if err != nil {
 		return err
 	}
-	if isLocalParent(sess) {
+	if IsLocalParentSession(sess) {
 		return fmt.Errorf("refuse unguarded local parent destruction; use relay parent retire %s", id)
 	}
 	if children, childErr := s.Reg.DirectChildren(id); childErr != nil {

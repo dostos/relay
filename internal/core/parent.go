@@ -220,6 +220,11 @@ type RegisterParentOpts struct {
 	Name     string
 	RepoRefs []string
 	WakeMode string
+	// Headless registers a manager that is a long-lived service rather than a
+	// pane. See headless.go for why liveness then has to be declared.
+	Headless bool
+	// TTL bounds how long a headless root's heartbeat is trusted.
+	TTL time.Duration
 }
 
 func isLocalParent(sess *Session) bool {
@@ -247,6 +252,13 @@ func normalizeRepoRefs(values []string) []string {
 }
 
 func (p *ParentService) RegisterLocal(ctx context.Context, opts RegisterParentOpts) (*Session, bool, error) {
+	// A headless root is registered before any notifier exists — it has no
+	// surface to bind and no desktop to notify. Dispatch before the pane-bound
+	// preconditions, or the one manager shape that most needs registering is
+	// the one shape that cannot register.
+	if opts.Headless {
+		return p.registerHeadless(opts)
+	}
 	if p.Reg == nil || p.Notifier == nil {
 		return nil, false, fmt.Errorf("parent registry and notifier required")
 	}
@@ -507,6 +519,13 @@ func validateManagerEdge(reg *Registry, parent, child *Session) error {
 
 func (p *ParentService) reparentPaneBinding(childSessionID, parentSessionID string) error {
 	if p.Viz == nil || p.Reg == nil {
+		return nil
+	}
+	// A headless root has no surface to nest the child under. Re-presenting the
+	// child against it would either fail or, worse, project it under a surface
+	// that does not exist — the lineage edge is the whole point of the move, and
+	// it is already committed by the caller.
+	if parent, err := p.Reg.GetSession(parentSessionID); err == nil && IsHeadlessParent(parent) {
 		return nil
 	}
 	child, err := p.Reg.GetSession(childSessionID)
@@ -1036,6 +1055,12 @@ func (p *ParentService) deliverMessage(ctx context.Context, parent *Session, ho 
 			err = p.Notifier.NotifyParent(notifyCtx, parent.ID, notice)
 			cancel()
 		}
+	} else if IsHeadlessParent(parent) {
+		// No pane to capture, no composer to type into: the durable inbox is
+		// the channel. deliverHeadless owns the reservation/finalization pair
+		// itself, so return straight through rather than falling into the
+		// pane-shaped error handling below.
+		return p.deliverHeadless(parent, msg)
 	} else if p.Sessions != nil {
 		attemptCtx, cancel := context.WithTimeout(ctx, deliveryAttemptTimeout)
 		capture, captureErr := p.Sessions.Capture(attemptCtx, parent.ID, 40)
@@ -2049,7 +2074,7 @@ func (p *ParentService) SetState(sessionID, state string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !isLocalParent(sess) {
+	if !IsLocalParentSession(sess) {
 		return nil, fmt.Errorf("session %s is not a local parent", sessionID)
 	}
 	if sess.Labels == nil {
@@ -2080,6 +2105,10 @@ type RetirementGate struct {
 	Repos          []RepoGate `json:"repos"`
 	Reasons        []string   `json:"reasons"`
 	Closed         bool       `json:"closed,omitempty"`
+	// Headless is populated only for a service-hosted root, whose liveness is
+	// declared rather than observable. Retiring one blind is how an inbox
+	// silently stops being read.
+	Headless *HeadlessStatus `json:"headless,omitempty"`
 }
 
 func runGit(ctx context.Context, repo string, args ...string) (string, error) {
@@ -2132,12 +2161,16 @@ func (p *ParentService) RetirementStatus(ctx context.Context, sessionID string) 
 	if err != nil {
 		return nil, err
 	}
-	if !isLocalParent(sess) {
+	if !IsLocalParentSession(sess) {
 		return nil, fmt.Errorf("session %s is not a local parent", sessionID)
 	}
 	gate := &RetirementGate{
 		SessionID: sessionID, State: sess.Labels["parent_state"],
 		ActiveChildren: []string{}, PendingInbox: []string{}, Repos: []RepoGate{}, Reasons: []string{},
+	}
+	if IsHeadlessParent(sess) {
+		health := HeadlessHealth(sess, time.Now().UTC())
+		gate.Headless = &health
 	}
 	if gate.State != "idle" && gate.State != "complete" {
 		gate.Reasons = append(gate.Reasons, "parent is not explicitly idle/complete")
