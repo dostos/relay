@@ -214,6 +214,29 @@ func firstFlagValue(args []string, names ...string) string {
 	return ""
 }
 
+// positionalArgs returns the non-flag arguments, skipping the value of each
+// named value-taking flag. Policy has to read the same targets the command
+// will act on; scanning by index alone would read "--from" as a session id the
+// moment a caller reorders its flags.
+func positionalArgs(args []string, valueFlags ...string) []string {
+	takesValue := map[string]bool{}
+	for _, name := range valueFlags {
+		takesValue[name] = true
+	}
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if takesValue[args[i]] {
+			i++
+			continue
+		}
+		if strings.HasPrefix(args[i], "-") {
+			continue
+		}
+		out = append(out, args[i])
+	}
+	return out
+}
+
 func flagValue(args []string, name string) string {
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == name {
@@ -261,6 +284,65 @@ func authorizeOperation(reg *Registry, actor *Session, args []string) (bool, str
 	if op.Kind == authorityParentTarget {
 		if len(args) < 2 {
 			return false, "parent subcommand required"
+		}
+		// A manager may create another manager — that is the channel-agent
+		// shape: a parent, not a second root. Confinement is preserved by
+		// requiring the new manager's place in the tree to be named and to be
+		// inside the caller's own subtree. Omitting --under asks for a ROOT,
+		// which is exactly the lineage escape this policy exists to prevent, so
+		// it is refused rather than reinterpreted as "under the caller":
+		// guessing here would silently hand an authenticated service the one
+		// authority it must not have.
+		if args[1] == "register" {
+			under := strings.TrimSpace(flagValue(args[2:], "--under"))
+			if under == "" {
+				return false, "parent register requires --under PARENT: a manager may create a child manager inside its own subtree, not a new root"
+			}
+			if !(actor.ID == under || sessionAncestor(reg, actor.ID, under)) {
+				return false, "requested manager is outside caller lineage"
+			}
+			return true, "manager subtree registration"
+		}
+		// Adoption moves a session's lineage. Two independent checks, because
+		// it has two ends: the caller may only adopt INTO its own subtree, and
+		// may only take FROM its own subtree. An unmanaged session is nobody's
+		// child, so no lineage covers it; it is claimable into the caller's
+		// subtree exactly as `parent link` already allows for an unowned
+		// handoff, and the claim is first-come — the second claimant now faces
+		// a managed session and is refused.
+		if args[1] == "adopt" {
+			targets := positionalArgs(args[2:], "--from")
+			if len(targets) != 2 {
+				return false, "parent adoption requires PARENT and SESSION"
+			}
+			parentID, sessionID := targets[0], targets[1]
+			if !(actor.ID == parentID || sessionAncestor(reg, actor.ID, parentID)) {
+				return false, "adopting manager is outside caller lineage"
+			}
+			child, err := reg.GetSession(sessionID)
+			if err != nil {
+				return false, "session target not found"
+			}
+			if child.SourceSessionID == "" {
+				return true, "claim of an unmanaged session into caller subtree"
+			}
+			if actor.ID == child.SourceSessionID || sessionAncestor(reg, actor.ID, child.SourceSessionID) {
+				return true, "manager lineage authority"
+			}
+			return false, "session is outside caller lineage"
+		}
+		// Enumeration is confined the same way every other manager verb is:
+		// scoped to a named subtree the caller governs. Global `parent list`
+		// stays refused — it reports managers the caller has no authority over.
+		if args[1] == "list" {
+			under := strings.TrimSpace(flagValue(args[2:], "--under"))
+			if under == "" {
+				return false, "parent list requires --under PARENT: global enumeration reaches outside caller lineage"
+			}
+			if !(actor.ID == under || sessionAncestor(reg, actor.ID, under)) {
+				return false, "parent target is outside caller lineage"
+			}
+			return true, "manager lineage enumeration"
 		}
 		// Commands naming a manager session are confined to that manager or a
 		// governing ancestor. Message commands resolve their durable inbox owner.
@@ -379,6 +461,13 @@ func sessionDeclaresRepoScope(actor *Session, requested string) bool {
 		}
 	}
 	return false
+}
+
+// IsSessionInSubtree reports whether sessionID is rootID or below it. It is
+// the same containment the authority applies, exported so a listing cannot
+// drift from the policy that authorizes it.
+func IsSessionInSubtree(reg *Registry, rootID, sessionID string) bool {
+	return sessionAncestor(reg, rootID, sessionID)
 }
 
 func sessionAncestor(reg *Registry, ancestorID, sessionID string) bool {

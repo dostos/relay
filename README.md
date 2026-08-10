@@ -118,6 +118,41 @@ Two things differ from a pane parent, and only two:
   visible** rather than being marked delivered into a service nobody is running.
   `relay parent list` reports every headless root's heartbeat state alongside it.
 
+### Managers under managers
+
+A headless manager does not have to be a root. `--under` registers it as the
+child of another manager, which is the "channel agent" shape: it supervises its
+own children — status, capture, direct, restart — while governance (holds,
+approvals, the last escalation stop) stays with the manager above it.
+
+```bash
+relay parent register --headless --name chan-gazer --under sess-apex…   # a parent, not a root
+relay parent adopt sess-chan-gazer… sess-project…                       # give a session a manager
+relay parent list --under sess-chan-gazer…                              # its own subtree
+```
+
+`relay parent link|move` name a **handoff**, because a handoff is normally what
+creates a child. A session adopted from an already-running tmux
+(`relay session adopt`) has no handoff, so those verbs had nothing to name and
+such a session could never leave the top of the tree. `relay parent adopt`
+addresses the **session** instead, and refuses rather than guesses:
+
+* moving a session that already has a manager requires `--from CURRENT`, and
+  the name must be right;
+* `--from` on a session with no manager is refused, because the caller believes
+  something about the tree that is not true;
+* a session whose lineage is owned by a **live handoff** is not adoptable here
+  at all — moving the session record alone would leave the handoff's event
+  stream escalating to the old manager. The refusal names `relay parent move`.
+
+Authority is unchanged in shape: a caller may create a manager only inside its
+own subtree (`--under` is mandatory for an authenticated non-human caller —
+omitting it asks for a new *root*, which is the one thing lineage confinement
+exists to prevent), may adopt only into its own subtree, and may take a child
+only from its own subtree. An unmanaged session is nobody's child, so it is
+claimable first-come, exactly as `parent link` already allows for an unowned
+handoff.
+
 The holder process usually lives somewhere other than the authority host. It
 operates the root through the ordinary authenticated command boundary, using an
 identity issued at registration (`--print-identity`) and confined by the same
@@ -478,6 +513,9 @@ relay session … / session adopt             # durable tmux
 relay agent start|wait|send|capture|done    # orchestrator API
 relay parent register|inbox|reply|ack       # durable parent communication
 relay parent register --headless --name N   # a root that is a service, not a pane
+relay parent register --headless --under P  # a managing parent under P, not a second root
+relay parent adopt PARENT SESSION [--from]  # give a handoff-less session a manager
+relay parent list --under PARENT            # one manager's own subtree
 relay parent heartbeat PARENT               # renew a headless root's liveness
 relay board post|query|watch                # manager-scoped peer coordination
 relay root adopt|enroll|status|digest       # always-on apex (autonomous mode)

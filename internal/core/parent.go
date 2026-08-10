@@ -225,6 +225,14 @@ type RegisterParentOpts struct {
 	Headless bool
 	// TTL bounds how long a headless root's heartbeat is trusted.
 	TTL time.Duration
+	// Under registers this manager as the CHILD of another manager instead of
+	// as a new root. A manager that is not a root is the whole "channel agent"
+	// shape: it supervises its own children while governance — holds,
+	// approvals, the last escalation stop — stays above it. Empty means "a
+	// root", which is why an authenticated non-human caller must always name
+	// it (authorizeOperation): creating a root is precisely the lineage escape
+	// confinement exists to prevent.
+	Under string
 }
 
 func isLocalParent(sess *Session) bool {
@@ -258,6 +266,13 @@ func (p *ParentService) RegisterLocal(ctx context.Context, opts RegisterParentOp
 	// the one shape that cannot register.
 	if opts.Headless {
 		return p.registerHeadless(opts)
+	}
+	// A pane manager's lineage is its surface: it is bound to a cmux pane, and
+	// nesting one under another manager would need a projection story that does
+	// not exist. Ignoring the flag would be worse than refusing it — the caller
+	// would be told a child manager was created and get a second root.
+	if strings.TrimSpace(opts.Under) != "" {
+		return nil, false, fmt.Errorf("--under is only supported for --headless registration; a pane manager's place in the tree comes from its surface")
 	}
 	if p.Reg == nil || p.Notifier == nil {
 		return nil, false, fmt.Errorf("parent registry and notifier required")
@@ -500,6 +515,86 @@ func (p *ParentService) ReparentChild(parentID, handoffID string) (*Handoff, str
 		"child_session_id": child.ID, "handoff_id": ho.ID,
 	})
 	return ho, oldParentID, nil
+}
+
+// AdoptSession gives a SESSION a manager. LinkChild and ReparentChild both
+// address a handoff, because a handoff is normally what creates a child — it
+// carries the goal, the event stream and the lineage together. A session
+// adopted from an already-running tmux (`relay session adopt`) has no handoff
+// at all, so those verbs had nothing to name and such a session could never
+// leave the top of the tree. That is why every project session on this fleet
+// reads `source_session_id: null`: not a configuration mistake, a missing
+// operation.
+//
+// The rules are deliberately blunt, because every silent wrong answer this
+// stack has produced came from a verb that guessed:
+//
+//   - Adopting a session that already has a manager is a MOVE. It must be
+//     stated with the manager it is moving away from, and that name must be
+//     right. A move that reads as an adoption leaves the old manager still
+//     believing it owns the child.
+//   - `from` on a session with no manager is refused too: the caller believes
+//     something about the tree that is not true, and the next thing it does
+//     will be built on that belief.
+//   - A session whose lineage is owned by a LIVE handoff is not adoptable here
+//     at all. Moving the session record alone would leave the handoff's event
+//     stream escalating to the old manager — delivered, answered by nobody,
+//     and invisible. `relay parent move` moves both, and the refusal says so.
+func (p *ParentService) AdoptSession(parentID, sessionID, from string, fromGiven bool) (*Session, string, error) {
+	if p == nil || p.Reg == nil {
+		return nil, "", fmt.Errorf("parent registry required")
+	}
+	parent, err := p.Reg.GetSession(parentID)
+	if err != nil {
+		return nil, "", err
+	}
+	child, err := p.Reg.GetSession(sessionID)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := validateManagerEdge(p.Reg, parent, child); err != nil {
+		return nil, child.SourceSessionID, err
+	}
+	current := child.SourceSessionID
+	if fromGiven && strings.TrimSpace(from) != current {
+		if current == "" {
+			return nil, "", fmt.Errorf("session %s has no manager; drop --from %s", child.ID, from)
+		}
+		return nil, current, fmt.Errorf("session %s reports to %s, not %s", child.ID, current, from)
+	}
+	if current == parentID {
+		return child, current, nil
+	}
+	handoffs, err := p.Reg.ListHandoffs()
+	if err != nil {
+		return nil, current, err
+	}
+	for _, ho := range handoffs {
+		if ho.SessionID == child.ID && !handoffTerminal(ho) {
+			return nil, current, fmt.Errorf(
+				"session %s is the child of live handoff %s, which owns its lineage and its event stream; move both: relay parent move %s %s",
+				child.ID, ho.ID, parentID, ho.ID)
+		}
+	}
+	if current != "" && !fromGiven {
+		return nil, current, fmt.Errorf(
+			"session %s already reports to %s; confirm the move with --from %s", child.ID, current, current)
+	}
+	child.SourceSessionID, child.SourceHostID, child.SourcePersistName = parent.ID, parent.HostID, parent.Persist.Name
+	child.UpdatedAt = time.Now().UTC()
+	if err := p.Reg.PutSession(child); err != nil {
+		return nil, current, err
+	}
+	_ = AppendLedger(map[string]any{
+		"v": 1, "type": "parent_adopt_session", "ts": child.UpdatedAt.Format(time.RFC3339),
+		"parent_session_id": parent.ID, "child_session_id": child.ID, "old_parent_session_id": current,
+	})
+	// The lineage edge is already committed; presentation is cosmetic and a
+	// headless manager has no pane to nest the child under anyway.
+	if err := p.reparentPaneBinding(child.ID, parentID); err != nil {
+		return child, current, err
+	}
+	return child, current, nil
 }
 
 func validateManagerEdge(reg *Registry, parent, child *Session) error {

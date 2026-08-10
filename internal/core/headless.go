@@ -185,11 +185,40 @@ func (p *ParentService) registerHeadless(opts RegisterParentOpts) (*Session, boo
 	default:
 		return nil, false, fmt.Errorf("wake mode must be inject, notify, or inbox")
 	}
+	// A manager registered UNDER another manager is a child manager, not a
+	// root. Resolve the requested manager before writing anything: a headless
+	// registration that half-succeeded would leave a root nobody meant to
+	// create.
+	var manager *Session
+	if under := strings.TrimSpace(opts.Under); under != "" {
+		manager, err = p.Reg.GetSession(under)
+		if err != nil {
+			return nil, false, fmt.Errorf("manager %s not found: %w", under, err)
+		}
+	}
 	now := time.Now().UTC()
 	if list, err := p.Reg.ListSessions(); err == nil {
 		for _, sess := range list {
 			if !IsHeadlessParent(sess) || sess.Persist.Name != name {
 				continue
+			}
+			// Registration converges; it never re-homes. A seed hook re-running
+			// with a different --under is either a mistake or a move, and a move
+			// is an explicitly named, audited operation (AdoptSession) precisely
+			// so it cannot happen as a side effect of a container restart.
+			if manager != nil && sess.SourceSessionID != manager.ID {
+				if manager.ID == sess.ID {
+					return nil, false, fmt.Errorf("session %s cannot manage itself", sess.ID)
+				}
+				if sess.SourceSessionID != "" {
+					return nil, false, fmt.Errorf(
+						"headless manager %s already reports to %s; move it explicitly: relay parent adopt %s %s --from %s",
+						sess.ID, sess.SourceSessionID, manager.ID, sess.ID, sess.SourceSessionID)
+				}
+				if err := validateManagerEdge(p.Reg, manager, sess); err != nil {
+					return nil, false, err
+				}
+				sess.SourceSessionID, sess.SourceHostID, sess.SourcePersistName = manager.ID, manager.HostID, manager.Persist.Name
 			}
 			applyHeadlessLabels(sess, ttl, degradedFrom, now)
 			if len(refs) > 0 {
@@ -208,6 +237,9 @@ func (p *ParentService) registerHeadless(opts RegisterParentOpts) (*Session, boo
 		RepoRefs:  refs,
 		CreatedAt: now, UpdatedAt: now,
 	}
+	if manager != nil {
+		sess.SourceSessionID, sess.SourceHostID, sess.SourcePersistName = manager.ID, manager.HostID, manager.Persist.Name
+	}
 	if len(refs) > 0 {
 		sess.RepoRef, sess.RemoteCWD = refs[0], refs[0]
 	}
@@ -221,6 +253,7 @@ func (p *ParentService) registerHeadless(opts RegisterParentOpts) (*Session, boo
 	_ = AppendLedger(map[string]any{
 		"v": 1, "type": "parent_register_headless", "ts": now.Format(time.RFC3339),
 		"session_id": sess.ID, "name": name, "ttl_s": int64(ttl / time.Second), "repo_refs": refs,
+		"source_session_id": sess.SourceSessionID,
 	})
 	return sess, true, nil
 }

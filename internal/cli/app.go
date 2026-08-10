@@ -1965,7 +1965,7 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 	a.JSON = true
 	a.CompactJSON = true
 	if a.Parents == nil || len(args) == 0 {
-		return a.fail(fmt.Errorf("usage: relay parent register|heartbeat|link|list|inbox|sweep|reply|ack|state|status|retire …"))
+		return a.fail(fmt.Errorf("usage: relay parent register|heartbeat|link|adopt|move|list|inbox|sweep|reply|ack|state|status|retire …"))
 	}
 	switch args[0] {
 	case "send":
@@ -2054,6 +2054,12 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 				if i < len(args) {
 					opts.WakeMode = args[i]
 				}
+			case "--under":
+				i++
+				if i >= len(args) {
+					return a.fail(fmt.Errorf("--under requires a manager session id"))
+				}
+				opts.Under = args[i]
 			default:
 				return a.fail(rejectUnknownFlag(args[i]))
 			}
@@ -2065,7 +2071,7 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		if err != nil {
 			return a.fail(err)
 		}
-		result := map[string]any{"ok": true, "created": created, "session": sess}
+		result := map[string]any{"ok": true, "created": created, "session": sess, "manager_session_id": sess.SourceSessionID}
 		if opts.Headless {
 			result["headless"] = core.HeadlessHealth(sess, time.Now().UTC())
 			// The holder process is not this process. Handing back the bridge
@@ -2116,6 +2122,34 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 			"ok": true, "parent_session_id": parentID,
 			"handoff_id": ho.ID, "child_session_id": ho.SessionID,
 		}))
+	case "adopt":
+		// `parent link|move` name a HANDOFF. A session adopted from a running
+		// tmux has none, so this is the only verb that can give it a manager.
+		if len(args) < 3 || strings.HasPrefix(args[1], "-") || strings.HasPrefix(args[2], "-") {
+			return a.fail(fmt.Errorf("usage: relay parent adopt PARENT SESSION [--from CURRENT_PARENT]"))
+		}
+		parentID, sessionID := args[1], args[2]
+		from, fromGiven := "", false
+		for i := 3; i < len(args); i++ {
+			switch args[i] {
+			case "--from":
+				i++
+				if i >= len(args) {
+					return a.fail(fmt.Errorf("--from requires the session id of the manager the child is moving away from"))
+				}
+				from, fromGiven = args[i], true
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
+			}
+		}
+		child, oldParentID, err := a.Parents.AdoptSession(parentID, sessionID, from, fromGiven)
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{
+			"ok": true, "parent_session_id": parentID, "child_session_id": child.ID,
+			"old_parent_session_id": oldParentID, "moved": oldParentID != parentID,
+		}))
 	case "move", "reparent":
 		if len(args) != 3 {
 			return a.fail(fmt.Errorf("usage: relay parent move PARENT HANDOFF"))
@@ -2128,6 +2162,24 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		a.ensureParentWatcher(ho.ID)
 		return a.errOut(a.out(map[string]any{"ok": true, "handoff_id": ho.ID, "child_session_id": ho.SessionID, "old_parent_session_id": oldParentID, "parent_session_id": parentID}))
 	case "list":
+		// --under scopes the listing to one manager's own subtree. Without it
+		// this is a global enumeration, which the authority refuses for every
+		// caller but the human — so a channel parent that wants to see its own
+		// children asks for exactly them, and gets an answer instead of a
+		// refusal it cannot act on.
+		under := ""
+		for i := 1; i < len(args); i++ {
+			switch args[i] {
+			case "--under":
+				i++
+				if i >= len(args) {
+					return a.fail(fmt.Errorf("--under requires a manager session id"))
+				}
+				under = args[i]
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
+			}
+		}
 		list, err := a.Reg.ListSessions()
 		if err != nil {
 			return a.fail(err)
@@ -2139,12 +2191,18 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 			if !core.IsLocalParentSession(sess) {
 				continue
 			}
+			if under != "" && !core.IsSessionInSubtree(a.Reg, under, sess.ID) {
+				continue
+			}
 			out = append(out, sess)
 			if core.IsHeadlessParent(sess) {
 				health[sess.ID] = core.HeadlessHealth(sess, now)
 			}
 		}
 		result := map[string]any{"ok": true, "parents": out}
+		if under != "" {
+			result["under"] = under
+		}
 		if len(health) > 0 {
 			// A headless root's liveness is not visible in its record, so listing
 			// one without its heartbeat state invites reading "registered" as
