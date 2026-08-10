@@ -100,9 +100,15 @@ service — a container, a daemon — registers as a **headless root**:
 
 ```bash
 relay parent register --headless --name Apex --ttl 15m   # idempotent; re-run on every start
-relay parent heartbeat sess-…                            # renew declared liveness
-relay parent inbox sess-…                                # also renews it
+relay parent heartbeat                                   # renew declared liveness
+relay parent inbox                                       # also renews it
 ```
+
+`inbox`, `log`, `status`, `sweep` and `heartbeat` name no manager because there
+is only one they could mean: the authenticated caller. A manager gets its
+identity from the command boundary, not from an id it was told to memorise, so
+these read and prove *itself*. Naming another manager still works when it is
+inside your own subtree, and is still refused — explicitly — when it is not.
 
 Two things differ from a pane parent, and only two:
 
