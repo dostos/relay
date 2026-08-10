@@ -296,3 +296,43 @@ func TestHeadlessRootAuthorityIsLineageConfined(t *testing.T) {
 		}
 	}
 }
+
+// A manager that cannot name itself is not a manager. Its identity arrives from
+// the authenticated boundary, not from an argument it was told to remember, so
+// the verbs whose only subject is the manager itself must work with no subject
+// written down. Confinement is unchanged: naming somebody else is still
+// refused, and it is refused for saying so, not for saying nothing.
+func TestManagerActsOnItselfWithoutNamingItself(t *testing.T) {
+	_, reg, headless, _ := headlessDeliveryFixture(t, time.Hour)
+	now := time.Now().UTC()
+	stranger := &Session{ID: "sess-stranger", Persist: ports.PersistHandle{Name: "stranger"}, CreatedAt: now, UpdatedAt: now}
+	if err := reg.PutSession(stranger); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		actor  *Session
+		args   []string
+		want   bool
+		reason string
+	}{
+		{"own inbox unnamed", headless, []string{"parent", "inbox"}, true, "manager's own inbox"},
+		{"own inbox unnamed with flag", headless, []string{"parent", "inbox", "--all"}, true, "manager's own inbox"},
+		{"own log unnamed", headless, []string{"parent", "log"}, true, "manager's own log"},
+		{"own status unnamed", headless, []string{"parent", "status"}, true, "manager's own status"},
+		{"own sweep unnamed", headless, []string{"parent", "sweep"}, true, "manager's own sweep"},
+		{"own heartbeat unnamed", headless, []string{"parent", "heartbeat"}, true, "manager's own heartbeat"},
+		{"own inbox named", headless, []string{"parent", "inbox", headless.ID}, true, "manager lineage authority"},
+		{"stranger inbox named", stranger, []string{"parent", "inbox", headless.ID}, false, "parent target is outside caller lineage"},
+		// Destructive and two-positional verbs keep requiring the id, and say
+		// so: "outside caller lineage" for an argument nobody wrote is a
+		// refusal that describes the wrong problem.
+		{"retire unnamed", headless, []string{"parent", "retire"}, false, "parent retire requires a PARENT"},
+		{"state unnamed", headless, []string{"parent", "state"}, false, "parent state requires a PARENT"},
+	} {
+		allowed, reason := authorizeOperation(reg, tc.actor, tc.args)
+		if allowed != tc.want || reason != tc.reason {
+			t.Fatalf("%s: allowed=%v reason=%q want %v %q", tc.name, allowed, reason, tc.want, tc.reason)
+		}
+	}
+}

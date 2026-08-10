@@ -263,6 +263,32 @@ func soleFlagValue(args []string, name string) (string, bool) {
 	return value, seen == 1 && value != ""
 }
 
+// parentSelfScopedVerbs are the `relay parent VERB …` forms whose only
+// positional argument is the manager itself. Omitting it can therefore mean
+// exactly one thing — the authenticated caller — so it is resolved rather than
+// refused. Every other parent verb still requires its subject written down.
+var parentSelfScopedVerbs = map[string]bool{
+	"inbox": true, "log": true, "sweep": true, "status": true, "heartbeat": true,
+}
+
+// ParentVerbTarget reads the PARENT a `relay parent VERB …` names from the
+// arguments that FOLLOW the verb: the first one that is not a flag, and nothing
+// otherwise. Empty means the caller named no manager, which for a self-scoped
+// verb resolves to the caller itself.
+//
+// It is exported and shared with the command for the same reason
+// IsSessionInSubtree is: policy and execution must read the same token out of
+// the same argv. Two copies of "which word is the PARENT" is precisely the
+// shape of the escape this file already closed once (see soleFlagValue) — one
+// side taking a different word than the other authorizes one session and acts
+// on another.
+func ParentVerbTarget(afterVerb []string) string {
+	if len(afterVerb) > 0 && !strings.HasPrefix(afterVerb[0], "-") {
+		return afterVerb[0]
+	}
+	return ""
+}
+
 func flagValue(args []string, name string) string {
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == name {
@@ -396,7 +422,33 @@ func authorizeOperation(reg *Registry, actor *Session, args []string) (bool, str
 		// inbox is: a headless root may prove its own liveness, and a governing
 		// ancestor may prove it on its behalf. Nobody else may.
 		if map[string]bool{"inbox": true, "log": true, "sweep": true, "status": true, "retire": true, "state": true, "active": true, "idle": true, "complete": true, "heartbeat": true}[args[1]] {
-			if len(args) < 3 || !(actor.ID == args[2] || sessionAncestor(reg, actor.ID, args[2])) {
+			target := ParentVerbTarget(args[2:])
+			if target == "" {
+				// Naming nobody is not the same refusal as naming somebody
+				// else, and answering it with "outside caller lineage"
+				// described the wrong problem: an authenticated manager
+				// receives its identity from this boundary, so the one session
+				// it can mean here is itself. Reading its own escalations is
+				// the whole point of being a manager; a manager that cannot do
+				// it without being told its own id is decorative.
+				//
+				// This is not a widening. The subject is fixed to the actor the
+				// boundary already authenticated, so there is no argument that
+				// could redirect it, and the command resolves the SAME identity
+				// from the source the bridge stamps on it (App.currentParentID)
+				// — the argv where policy and command could disagree does not
+				// exist.
+				if !parentSelfScopedVerbs[args[1]] {
+					// Destructive (retire) and two-positional (state) verbs are
+					// deliberately excluded: a manager may read and prove
+					// itself without ceremony, but retiring is worth the id,
+					// and `parent state PARENT active` has a second positional
+					// that a defaulted first one would silently absorb.
+					return false, "parent " + args[1] + " requires a PARENT"
+				}
+				return true, "manager's own " + args[1]
+			}
+			if !(actor.ID == target || sessionAncestor(reg, actor.ID, target)) {
 				return false, "parent target is outside caller lineage"
 			}
 			return true, "manager lineage authority"

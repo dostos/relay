@@ -627,13 +627,16 @@ Long-lived goal orchestration (durable compact inbox + guarded local-pane cleanu
   relay parent register [--surface REF] [--name NAME] [--repo DIR ...] [--wake inject|notify]
   relay parent register --headless --name NAME [--repo DIR ...] [--ttl 15m] [--print-identity]
                                                # a root that is a service, not a pane
-  relay parent heartbeat PARENT                # renew a headless root's declared liveness
+  relay parent inbox [PARENT] [--all]          # YOUR escalations when PARENT is omitted
+  relay parent log [PARENT] [--after N]        # …and your own communication log
+  relay parent sweep [PARENT]                  # …and your own terminal-message sweep
+  relay parent heartbeat [PARENT]              # renew declared liveness (yours by default)
+  relay parent status [PARENT]
   relay parent bind PARENT [--surface REF]     # preserve identity after cmux restart
   relay parent link PARENT HANDOFF             # adopt an already-running goal
   relay parent move PARENT HANDOFF             # explicitly repair a wrong parent edge
-  relay parent list
+  relay parent list --under PARENT
   relay parent state PARENT active|idle|complete
-  relay parent status ID
   relay parent retire ID [--dry-run]
 
 Automatic handling policies (desktop-local; unmatched/errors go to manager):
@@ -2003,13 +2006,17 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		}
 		return a.errOut(a.out(map[string]any{"ok": true, "parent_session_id": managerID, "child_session_id": args[1], "submitted": receipt.Submitted, "delivery": receipt.Delivery, "event_stream": receipt.EventStream, "handoff_id": receipt.HandoffID}))
 	case "heartbeat":
-		if len(args) != 2 || strings.HasPrefix(args[1], "-") {
-			return a.fail(fmt.Errorf("usage: relay parent heartbeat PARENT"))
-		}
-		if err := authorizeParentCaller(args[1]); err != nil {
+		parentID, rest, err := a.parentTargetOrSelf(args)
+		if err != nil {
 			return a.fail(err)
 		}
-		sess, err := a.Parents.Heartbeat(args[1])
+		if len(rest) != 0 {
+			return a.fail(fmt.Errorf("usage: relay parent heartbeat [PARENT]"))
+		}
+		if err := authorizeParentCaller(parentID); err != nil {
+			return a.fail(err)
+		}
+		sess, err := a.Parents.Heartbeat(parentID)
 		if err != nil {
 			return a.fail(err)
 		}
@@ -2219,17 +2226,17 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		}
 		return a.errOut(a.out(result))
 	case "inbox":
-		if len(args) < 2 || strings.HasPrefix(args[1], "-") {
-			return a.fail(fmt.Errorf("usage: relay parent inbox PARENT [--all]"))
+		parentID, rest, err := a.parentTargetOrSelf(args)
+		if err != nil {
+			return a.fail(err)
 		}
-		parentID := args[1]
 		all := false
-		for i := 2; i < len(args); i++ {
-			switch args[i] {
+		for _, arg := range rest {
+			switch arg {
 			case "--all":
 				all = true
 			default:
-				return a.fail(rejectUnknownFlag(args[i]))
+				return a.fail(rejectUnknownFlag(arg))
 			}
 		}
 		if err := authorizeParentCaller(parentID); err != nil {
@@ -2265,42 +2272,43 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		}
 		return a.errOut(a.out(map[string]any{"ok": true, "message_id": msg.ID, "state": msg.State, "delivery_method": msg.DeliveryMethod, "delivery_build": msg.DeliveryBuild}))
 	case "log":
-		if len(args) < 2 || strings.HasPrefix(args[1], "-") {
-			return a.fail(fmt.Errorf("usage: relay parent log PARENT [--after CURSOR] [--limit N] [--handoff ID]"))
+		parentID, rest, err := a.parentTargetOrSelf(args)
+		if err != nil {
+			return a.fail(err)
 		}
-		parentID, handoffID := args[1], ""
+		handoffID := ""
 		var after int64
 		limit := 20
-		for i := 2; i < len(args); i++ {
-			switch args[i] {
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
 			case "--after":
 				i++
-				if i >= len(args) {
+				if i >= len(rest) {
 					return a.fail(fmt.Errorf("--after requires a cursor"))
 				}
 				var err error
-				after, err = strconv.ParseInt(args[i], 10, 64)
+				after, err = strconv.ParseInt(rest[i], 10, 64)
 				if err != nil || after < 0 {
-					return a.fail(fmt.Errorf("invalid --after cursor %q", args[i]))
+					return a.fail(fmt.Errorf("invalid --after cursor %q", rest[i]))
 				}
 			case "--limit":
 				i++
-				if i >= len(args) {
+				if i >= len(rest) {
 					return a.fail(fmt.Errorf("--limit requires a number"))
 				}
 				var err error
-				limit, err = strconv.Atoi(args[i])
+				limit, err = strconv.Atoi(rest[i])
 				if err != nil || limit < 1 || limit > 100 {
 					return a.fail(fmt.Errorf("--limit must be between 1 and 100"))
 				}
 			case "--handoff":
 				i++
-				if i >= len(args) || strings.HasPrefix(args[i], "-") {
+				if i >= len(rest) || strings.HasPrefix(rest[i], "-") {
 					return a.fail(fmt.Errorf("--handoff requires an ID"))
 				}
-				handoffID = args[i]
+				handoffID = rest[i]
 			default:
-				return a.fail(rejectUnknownFlag(args[i]))
+				return a.fail(rejectUnknownFlag(rest[i]))
 			}
 		}
 		if err := authorizeParentCaller(parentID); err != nil {
@@ -2312,10 +2320,13 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		}
 		return a.errOut(a.out(map[string]any{"ok": true, "parent_session_id": parentID, "log": page}))
 	case "sweep":
-		if len(args) != 2 || strings.HasPrefix(args[1], "-") {
-			return a.fail(fmt.Errorf("usage: relay parent sweep PARENT"))
+		parentID, rest, err := a.parentTargetOrSelf(args)
+		if err != nil {
+			return a.fail(err)
 		}
-		parentID := args[1]
+		if len(rest) != 0 {
+			return a.fail(fmt.Errorf("usage: relay parent sweep [PARENT]"))
+		}
 		if err := authorizeParentCaller(parentID); err != nil {
 			return a.fail(err)
 		}
@@ -2380,14 +2391,26 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		}
 		return a.errOut(a.out(map[string]any{"ok": true, "session_id": sess.ID, "state": state}))
 	case "status", "retire":
-		if len(args) < 2 || strings.HasPrefix(args[1], "-") {
+		// Only `status` defaults to the caller. Retiring a manager is
+		// destructive and keeps requiring its id written down — the same split
+		// the authority policy makes (parentSelfScopedVerbs).
+		sessionID, rest := core.ParentVerbTarget(args[1:]), args[1:]
+		if sessionID != "" {
+			rest = args[2:]
+		} else if args[0] == "status" {
+			var err error
+			sessionID, err = a.currentParentID()
+			if err != nil {
+				return a.fail(err)
+			}
+		}
+		if sessionID == "" {
 			return a.fail(fmt.Errorf("usage: relay parent %s PARENT [--dry-run]", args[0]))
 		}
-		sessionID := args[1]
 		dryRun := args[0] == "status"
 		force, keepViz := false, false
-		for i := 2; i < len(args); i++ {
-			switch args[i] {
+		for _, arg := range rest {
+			switch arg {
 			case "--dry-run":
 				dryRun = true
 			case "--force":
@@ -2395,7 +2418,7 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 			case "--keep-viz":
 				keepViz = true
 			default:
-				return a.fail(rejectUnknownFlag(args[i]))
+				return a.fail(rejectUnknownFlag(arg))
 			}
 		}
 		if args[0] == "status" {
@@ -2488,6 +2511,28 @@ func soleFlagValue(args []string, i int, name string, seen map[string]bool) (str
 		return "", fmt.Errorf("%s requires a non-empty value", name)
 	}
 	return value, nil
+}
+
+// parentTargetOrSelf reads the PARENT a `relay parent VERB …` names and returns
+// the arguments that follow it. When no PARENT is named the caller's OWN
+// manager identity is used — a manager receives its identity from the
+// authenticated boundary, so for these verbs there is exactly one session it
+// could mean, and requiring it to recite an id it was never handed is what made
+// "read your own inbox" impossible for the channel managers.
+//
+// The rule ("first non-flag argument after the verb, else the caller") is not
+// re-implemented here: core.ParentVerbTarget is the one the authority applies,
+// and the identity resolved here is the one the bridge stamped on this process.
+// Policy and command therefore cannot end up talking about different sessions.
+func (a *App) parentTargetOrSelf(args []string) (string, []string, error) {
+	if named := core.ParentVerbTarget(args[1:]); named != "" {
+		return named, args[2:], nil
+	}
+	id, err := a.currentParentID()
+	if err != nil {
+		return "", nil, err
+	}
+	return id, args[1:], nil
 }
 
 func (a *App) currentParentID() (string, error) {

@@ -592,6 +592,46 @@ func TestParentLogReturnsCursorDelta(t *testing.T) {
 	}
 }
 
+// The command has to resolve the same manager the boundary authorized:
+// the authenticated source identity, never an ambient guess. Otherwise
+// "my own inbox" is authorized against one session and read from another.
+func TestParentSelfVerbsResolveTheAuthenticatedManager(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	t.Setenv(bridge.SourceSessionEnv, "sess-parent")
+	msg := &core.ParentMessage{
+		ID: "pm-1", CorrelationID: "corr-1", ParentSessionID: "sess-parent",
+		ChildSessionID: "sess-child", HandoffID: "ho-1", Kind: "ask", Text: "which branch?",
+	}
+	if err := core.AppendCommunication(msg, "request", ""); err != nil {
+		t.Fatal(err)
+	}
+	a := New()
+	inbox := captureStdout(t, func() {
+		if code := a.Run([]string{"parent", "inbox"}); code != 0 {
+			t.Fatalf("parent inbox exit=%d", code)
+		}
+	})
+	if !strings.Contains(inbox, `"parent_session_id":"sess-parent"`) {
+		t.Fatalf("unnamed inbox resolved the wrong manager: %s", inbox)
+	}
+	log := captureStdout(t, func() {
+		if code := a.Run([]string{"parent", "log", "--limit", "1"}); code != 0 {
+			t.Fatalf("parent log exit=%d", code)
+		}
+	})
+	if !strings.Contains(log, `"parent_session_id":"sess-parent"`) {
+		t.Fatalf("unnamed log resolved the wrong manager: %s", log)
+	}
+	// A named manager still wins over the caller's own identity: this is a
+	// default, not an override.
+	named := captureStdout(t, func() {
+		_ = a.Run([]string{"parent", "inbox", "sess-other"})
+	})
+	if !strings.Contains(named, `"parent_session_id":"sess-other"`) {
+		t.Fatalf("named manager was overridden by the caller identity: %s", named)
+	}
+}
+
 func TestCommunicationLogInfersAuthenticatedManager(t *testing.T) {
 	t.Setenv("RELAY_STATE_DIR", t.TempDir())
 	t.Setenv(bridge.SourceSessionEnv, "sess-parent")
