@@ -2018,6 +2018,7 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 	case "register":
 		var opts core.RegisterParentOpts
 		printIdentity := false
+		seen := map[string]bool{}
 		for i := 1; i < len(args); i++ {
 			switch args[i] {
 			case "--headless":
@@ -2041,9 +2042,11 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 				}
 			case "--name":
 				i++
-				if i < len(args) {
-					opts.Name = args[i]
+				value, err := soleFlagValue(args, i, "--name", seen)
+				if err != nil {
+					return a.fail(err)
 				}
+				opts.Name = value
 			case "--repo":
 				i++
 				if i < len(args) {
@@ -2056,10 +2059,11 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 				}
 			case "--under":
 				i++
-				if i >= len(args) {
-					return a.fail(fmt.Errorf("--under requires a manager session id"))
+				value, err := soleFlagValue(args, i, "--under", seen)
+				if err != nil {
+					return a.fail(err)
 				}
-				opts.Under = args[i]
+				opts.Under = value
 			default:
 				return a.fail(rejectUnknownFlag(args[i]))
 			}
@@ -2130,14 +2134,16 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		}
 		parentID, sessionID := args[1], args[2]
 		from, fromGiven := "", false
+		seen := map[string]bool{}
 		for i := 3; i < len(args); i++ {
 			switch args[i] {
 			case "--from":
 				i++
-				if i >= len(args) {
-					return a.fail(fmt.Errorf("--from requires the session id of the manager the child is moving away from"))
+				value, err := soleFlagValue(args, i, "--from", seen)
+				if err != nil {
+					return a.fail(err)
 				}
-				from, fromGiven = args[i], true
+				from, fromGiven = value, true
 			default:
 				return a.fail(rejectUnknownFlag(args[i]))
 			}
@@ -2168,14 +2174,16 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		// children asks for exactly them, and gets an answer instead of a
 		// refusal it cannot act on.
 		under := ""
+		seen := map[string]bool{}
 		for i := 1; i < len(args); i++ {
 			switch args[i] {
 			case "--under":
 				i++
-				if i >= len(args) {
-					return a.fail(fmt.Errorf("--under requires a manager session id"))
+				value, err := soleFlagValue(args, i, "--under", seen)
+				if err != nil {
+					return a.fail(err)
 				}
-				under = args[i]
+				under = value
 			default:
 				return a.fail(rejectUnknownFlag(args[i]))
 			}
@@ -2455,6 +2463,31 @@ func (a *App) cmdCommunicationLog(args []string) int {
 		return a.fail(err)
 	}
 	return a.errOut(a.out(map[string]any{"events": page.Entries, "next": page.NextAfter, "more": page.HasMore}))
+}
+
+// soleFlagValue reads a value flag that must appear exactly once with a
+// non-blank value.
+//
+// It has to refuse the same argv core's authority policy refuses, because the
+// two read these flags differently by nature: the policy scans for the first
+// occurrence, an ordinary parse loop keeps the last. Left alone, that gap is a
+// lineage escape — `--under <self> --under ""` authorizes against the caller's
+// own id and then executes as "no manager", i.e. a brand new root. Failing
+// closed on both sides means no argv exists where what was authorized and what
+// is acted on can differ.
+func soleFlagValue(args []string, i int, name string, seen map[string]bool) (string, error) {
+	if seen[name] {
+		return "", fmt.Errorf("%s may be given only once", name)
+	}
+	seen[name] = true
+	if i >= len(args) {
+		return "", fmt.Errorf("%s requires a value", name)
+	}
+	value := strings.TrimSpace(args[i])
+	if value == "" {
+		return "", fmt.Errorf("%s requires a non-empty value", name)
+	}
+	return value, nil
 }
 
 func (a *App) currentParentID() (string, error) {

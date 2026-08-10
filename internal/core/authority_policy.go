@@ -237,6 +237,32 @@ func positionalArgs(args []string, valueFlags ...string) []string {
 	return out
 }
 
+// soleFlagValue reads a flag that must appear exactly once with a non-blank
+// value, and fails closed otherwise.
+//
+// It exists because policy and the command must agree on WHICH value they are
+// talking about. flagValue takes the first occurrence; an ordinary CLI parse
+// loop takes the last. That difference is invisible until someone repeats the
+// flag — `--under <self> --under ""` would then be authorized against the
+// caller's own id and executed as "no manager", i.e. a brand new root, which is
+// the one act this confinement exists to prevent. Both sides refuse a repeated
+// or blank flag, so there is no argv where they can disagree.
+func soleFlagValue(args []string, name string) (string, bool) {
+	value, seen := "", 0
+	for i := 0; i < len(args); i++ {
+		if args[i] != name {
+			continue
+		}
+		seen++
+		if i+1 < len(args) {
+			value = args[i+1]
+		}
+		i++
+	}
+	value = strings.TrimSpace(value)
+	return value, seen == 1 && value != ""
+}
+
 func flagValue(args []string, name string) string {
 	for i := 0; i+1 < len(args); i++ {
 		if args[i] == name {
@@ -294,22 +320,38 @@ func authorizeOperation(reg *Registry, actor *Session, args []string) (bool, str
 		// guessing here would silently hand an authenticated service the one
 		// authority it must not have.
 		if args[1] == "register" {
-			under := strings.TrimSpace(flagValue(args[2:], "--under"))
-			if under == "" {
-				return false, "parent register requires --under PARENT: a manager may create a child manager inside its own subtree, not a new root"
+			under, ok := soleFlagValue(args[2:], "--under")
+			if !ok {
+				return false, "parent register requires exactly one non-empty --under PARENT: a manager may create a child manager inside its own subtree, not a new root"
 			}
 			if !(actor.ID == under || sessionAncestor(reg, actor.ID, under)) {
 				return false, "requested manager is outside caller lineage"
 			}
+			// Note this authorizes a manager, while registerHeadless acts on a
+			// NAME. They are kept the same object by registerHeadless refusing
+			// every lineage change on convergence: the only session it can
+			// converge onto is one that already reports to this manager, and so
+			// is already inside the caller's subtree.
 			return true, "manager subtree registration"
 		}
-		// Adoption moves a session's lineage. Two independent checks, because
-		// it has two ends: the caller may only adopt INTO its own subtree, and
-		// may only take FROM its own subtree. An unmanaged session is nobody's
-		// child, so no lineage covers it; it is claimable into the caller's
-		// subtree exactly as `parent link` already allows for an unowned
-		// handoff, and the claim is first-come — the second claimant now faces
-		// a managed session and is refused.
+		// Adoption moves a session's lineage. Two independent checks, because it
+		// has two ends: the caller may only adopt INTO its own subtree, and may
+		// only take FROM its own subtree.
+		//
+		// An UNMANAGED session is nobody's child, so no lineage covers it — and
+		// it is deliberately not claimable by an ordinary manager. `parent link`
+		// allows that for an unowned HANDOFF, a record relay itself created, but
+		// the same rule applied to sessions is a different size of hole: most
+		// sessions in a registry have no manager, so "claim any orphan" would be
+		// a reach across the entire fleet. And it does not stop at reading —
+		// once a session is in the caller's lineage, authoritySessionTarget
+		// grants send/exec/destroy on it, i.e. arbitrary commands on whatever
+		// host that session lives on. Which sessions belong to which manager is
+		// a declared fact, applied by the reconciling writer that owns the
+		// registry; the only authenticated caller that may claim one over the
+		// bridge is the governing apex, which is the top of the tree by
+		// designation and has no ancestor to be confined by. With no apex
+		// designated this fails closed, which is the right default.
 		if args[1] == "adopt" {
 			targets := positionalArgs(args[2:], "--from")
 			if len(targets) != 2 {
@@ -323,11 +365,15 @@ func authorizeOperation(reg *Registry, actor *Session, args []string) (bool, str
 			if err != nil {
 				return false, "session target not found"
 			}
-			if child.SourceSessionID == "" {
-				return true, "claim of an unmanaged session into caller subtree"
-			}
-			if actor.ID == child.SourceSessionID || sessionAncestor(reg, actor.ID, child.SourceSessionID) {
+			if child.SourceSessionID != "" &&
+				(actor.ID == child.SourceSessionID || sessionAncestor(reg, actor.ID, child.SourceSessionID)) {
 				return true, "manager lineage authority"
+			}
+			if apex, apexErr := (&RootService{Reg: reg}).Apex(); apexErr == nil && apex.ID == actor.ID {
+				return true, "governing apex adoption"
+			}
+			if child.SourceSessionID == "" {
+				return false, "session has no manager and only the governing apex may claim one"
 			}
 			return false, "session is outside caller lineage"
 		}
@@ -335,9 +381,9 @@ func authorizeOperation(reg *Registry, actor *Session, args []string) (bool, str
 		// scoped to a named subtree the caller governs. Global `parent list`
 		// stays refused — it reports managers the caller has no authority over.
 		if args[1] == "list" {
-			under := strings.TrimSpace(flagValue(args[2:], "--under"))
-			if under == "" {
-				return false, "parent list requires --under PARENT: global enumeration reaches outside caller lineage"
+			under, ok := soleFlagValue(args[2:], "--under")
+			if !ok {
+				return false, "parent list requires exactly one non-empty --under PARENT: global enumeration reaches outside caller lineage"
 			}
 			if !(actor.ID == under || sessionAncestor(reg, actor.ID, under)) {
 				return false, "parent target is outside caller lineage"

@@ -58,6 +58,46 @@ func TestParentRegisterUnderAndAdoptSessionBuildASubtree(t *testing.T) {
 	}
 }
 
+// The policy reads the FIRST occurrence of a flag; an ordinary parse loop keeps
+// the LAST. Every one of these argv shapes must be refused by the command too,
+// or a caller can have one value authorized and another one executed —
+// `--under <self> --under ""` being the worst of them: authorized as "inside my
+// own subtree", executed as "a brand new root".
+func TestRepeatedOrBlankFlagsAreRefusedByTheCommandToo(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	t.Setenv("CMUX_SURFACE_REF", "")
+	root := registerUnder(t, "cli-apex", "")
+	other := registerUnder(t, "cli-other", "")
+
+	for _, tc := range []struct {
+		name string
+		argv []string
+	}{
+		{"repeated --under emptied", []string{"--json", "parent", "register", "--headless", "--name", "evil", "--under", root, "--under", ""}},
+		{"repeated --under rehomed", []string{"--json", "parent", "register", "--headless", "--name", "evil", "--under", root, "--under", other}},
+		{"blank --under", []string{"--json", "parent", "register", "--headless", "--name", "evil", "--under", "   "}},
+		{"repeated --name", []string{"--json", "parent", "register", "--headless", "--name", "a", "--name", "b", "--under", root}},
+		{"repeated --under on list", []string{"--json", "parent", "list", "--under", root, "--under", other}},
+		{"blank --under on list", []string{"--json", "parent", "list", "--under", ""}},
+		{"repeated --from on adopt", []string{"--json", "parent", "adopt", root, other, "--from", root, "--from", other}},
+	} {
+		out := captureStdout(t, func() {
+			if code := New().Run(tc.argv); code == 0 {
+				t.Fatalf("%s: must be refused", tc.name)
+			}
+		})
+		if !strings.Contains(out, "once") && !strings.Contains(out, "non-empty") {
+			t.Fatalf("%s: refusal must say why: %q", tc.name, out)
+		}
+	}
+	// Nothing was created by any of the refusals.
+	listed := runJSON(t, "--json", "parent", "list")
+	parents, _ := listed["parents"].([]any)
+	if len(parents) != 2 {
+		t.Fatalf("a refused registration created something: %v", listed)
+	}
+}
+
 func TestParentAdoptRefusesAnUnconfirmedMoveFromTheCLI(t *testing.T) {
 	t.Setenv("RELAY_STATE_DIR", t.TempDir())
 	t.Setenv("CMUX_SURFACE_REF", "")

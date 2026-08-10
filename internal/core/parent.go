@@ -563,6 +563,14 @@ func (p *ParentService) AdoptSession(parentID, sessionID, from string, fromGiven
 		return nil, current, fmt.Errorf("session %s reports to %s, not %s", child.ID, current, from)
 	}
 	if current == parentID {
+		// Converged — but still re-run the presentation. A previous call can
+		// have committed the lineage and then failed to rebind the pane; if the
+		// converged path returned early, the retry that was supposed to repair
+		// that would report success and change nothing, leaving the child drawn
+		// under a manager that no longer owns it, forever.
+		if err := p.reparentPaneBinding(child.ID, parentID); err != nil {
+			return child, current, err
+		}
 		return child, current, nil
 	}
 	handoffs, err := p.Reg.ListHandoffs()
@@ -584,6 +592,30 @@ func (p *ParentService) AdoptSession(parentID, sessionID, from string, fromGiven
 	child.UpdatedAt = time.Now().UTC()
 	if err := p.Reg.PutSession(child); err != nil {
 		return nil, current, err
+	}
+	// Pending escalations move with the child, the way ReparentChild already
+	// moves them: an unanswered ask left in the old manager's inbox is
+	// addressed to somebody who no longer owns the child — delivered, answered
+	// by nobody, invisible. Answered history stays with the manager that
+	// actually handled it.
+	if current != "" {
+		messages, listErr := p.ListMessages(current, true)
+		if listErr != nil {
+			return child, current, listErr
+		}
+		for _, msg := range messages {
+			if msg.ChildSessionID != child.ID {
+				continue
+			}
+			oldPath := parentMessagePath(current, msg.ID)
+			msg.ParentSessionID = parent.ID
+			if err := writeParentMessage(msg, false); err != nil {
+				return child, current, err
+			}
+			if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
+				return child, current, err
+			}
+		}
 	}
 	_ = AppendLedger(map[string]any{
 		"v": 1, "type": "parent_adopt_session", "ts": child.UpdatedAt.Format(time.RFC3339),

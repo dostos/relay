@@ -77,6 +77,40 @@ func TestRegisterHeadlessUnderIsIdempotentAndRefusesSilentRehoming(t *testing.T)
 	}
 }
 
+// Registration is authorized on --under but acts on --name, and a name is the
+// documented, guessable identity of every headless service here. If convergence
+// could also SET lineage, `--name <someone else's root> --under <self>` would
+// pull that root — and its whole tree, and its bridge token — into the caller's
+// subtree. So convergence never changes lineage at all, including from "no
+// manager" to "some manager".
+func TestRegisterHeadlessNeverAdoptsAnExistingRootByName(t *testing.T) {
+	service, _, reg := newParentTestService(t)
+	victim, _, err := service.RegisterLocal(context.Background(), RegisterParentOpts{Headless: true, Name: "hermes", TTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attacker, _, err := service.RegisterLocal(context.Background(), RegisterParentOpts{Headless: true, Name: "squatter", TTL: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, created, err := service.RegisterLocal(context.Background(), RegisterParentOpts{
+		Headless: true, Name: "hermes", Under: attacker.ID,
+	})
+	if err == nil {
+		t.Fatalf("name squatting must be refused; got %+v created=%v", sess, created)
+	}
+	if !strings.Contains(err.Error(), "parent adopt") {
+		t.Fatalf("refusal must name the explicit move: %v", err)
+	}
+	stored, err := reg.GetSession(victim.ID)
+	if err != nil || stored.SourceSessionID != "" {
+		t.Fatalf("victim lineage was changed: %+v err=%v", stored, err)
+	}
+	if sessionAncestor(reg, attacker.ID, victim.ID) {
+		t.Fatal("the caller became an ancestor of a root it has no authority over")
+	}
+}
+
 func TestRegisterHeadlessUnderRefusesUnknownParentsSelfAndCycles(t *testing.T) {
 	service, _, _ := newParentTestService(t)
 	root, _, err := service.RegisterLocal(context.Background(), RegisterParentOpts{Headless: true, Name: "apex", TTL: time.Hour})
@@ -242,6 +276,16 @@ func TestChannelParentAuthorityIsSubtreeConfined(t *testing.T) {
 		{"channel parent enumerates itself", channel, []string{"parent", "list", "--under", channel.ID}, true},
 		{"channel parent may not enumerate the root", channel, []string{"parent", "list", "--under", root.ID}, false},
 		{"global enumeration stays refused", root, []string{"parent", "list"}, false},
+
+		// A repeated flag is where the policy (first occurrence) and an
+		// ordinary parse loop (last occurrence) disagree. Both sides refuse it,
+		// so no argv can be authorized against one value and executed with
+		// another — `--under <self> --under ""` would otherwise mint a ROOT.
+		{"repeated --under on register", root, []string{"parent", "register", "--headless", "--name", "x", "--under", root.ID, "--under", ""}, false},
+		{"repeated --under naming a stranger", channel, []string{"parent", "register", "--headless", "--name", "x", "--under", channel.ID, "--under", rival.ID}, false},
+		{"blank --under on register", root, []string{"parent", "register", "--headless", "--name", "x", "--under", "  "}, false},
+		{"repeated --under on list", channel, []string{"parent", "list", "--under", channel.ID, "--under", root.ID}, false},
+		{"blank --under on list", root, []string{"parent", "list", "--under", ""}, false},
 	} {
 		allowed, reason := authorizeOperation(reg, tc.actor, tc.args)
 		if allowed != tc.want {
@@ -251,23 +295,90 @@ func TestChannelParentAuthorityIsSubtreeConfined(t *testing.T) {
 	_ = service
 }
 
-// An unmanaged session is nobody's child, so nobody's lineage covers it. The
-// only rule that can apply is the one `parent link` already applies to an
-// unowned handoff: a caller may claim it INTO its own subtree, and the claim is
-// first-come — a second claimant now sees a managed session and is refused.
-func TestUnmanagedSessionIsClaimableOnceAndThenConfined(t *testing.T) {
+// A confirmed move takes the child's UNANSWERED escalations with it, the way
+// ReparentChild already does for a handoff. An ask left in the old manager's
+// inbox is addressed to somebody who no longer owns the child: delivered,
+// answered by nobody, invisible. Answered history stays where it was handled.
+func TestAdoptSessionMovesPendingEscalationsWithTheChild(t *testing.T) {
 	service, reg, root, channel, orphan := adoptionFixture(t)
-	rival, _, err := service.RegisterLocal(context.Background(), RegisterParentOpts{Headless: true, Name: "chan-engram", TTL: time.Hour, Under: root.ID})
+	other, _, err := service.RegisterLocal(context.Background(), RegisterParentOpts{Headless: true, Name: "chan-engram", TTL: time.Hour, Under: root.ID})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if allowed, reason := authorizeOperation(reg, rival, []string{"parent", "adopt", rival.ID, orphan.ID}); !allowed {
-		t.Fatalf("claiming an unmanaged session must be allowed: %s", reason)
 	}
 	if _, _, err := service.AdoptSession(channel.ID, orphan.ID, "", false); err != nil {
 		t.Fatal(err)
 	}
-	if allowed, _ := authorizeOperation(reg, rival, []string{"parent", "adopt", rival.ID, orphan.ID, "--from", channel.ID}); allowed {
-		t.Fatal("once claimed, the session is confined to its manager's lineage")
+	now := time.Now().UTC()
+	pending := &ParentMessage{V: 1, ID: "pm-pending", ParentSessionID: channel.ID, ChildSessionID: orphan.ID,
+		HandoffID: "ho-done", Kind: "ask", Text: "which branch?", State: ParentMessagePending, CreatedAt: now}
+	if err := writeParentMessage(pending, true); err != nil {
+		t.Fatal(err)
+	}
+	answered := &ParentMessage{V: 1, ID: "pm-answered", ParentSessionID: channel.ID, ChildSessionID: orphan.ID,
+		HandoffID: "ho-done", Kind: "ask", Text: "old", State: ParentMessageReplied, CreatedAt: now}
+	if err := writeParentMessage(answered, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.AdoptSession(other.ID, orphan.ID, channel.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	moved, err := service.FindMessage(pending.ID)
+	if err != nil || moved.ParentSessionID != other.ID {
+		t.Fatalf("pending envelope did not follow the child: %+v err=%v", moved, err)
+	}
+	stayed, err := service.FindMessage(answered.ID)
+	if err != nil || stayed.ParentSessionID != channel.ID {
+		t.Fatalf("answered history must stay with the manager that handled it: %+v err=%v", stayed, err)
+	}
+	_ = reg
+}
+
+// Most sessions in a registry have no manager, so "any manager may claim an
+// unmanaged session" is a reach across the whole fleet — and it does not stop
+// at reading: once a session is in the caller's lineage, authoritySessionTarget
+// grants exec on it, i.e. arbitrary commands on that session's host. Which
+// session belongs to which manager is a declared fact applied by the writer
+// that owns the registry; over the bridge only the governing apex may claim
+// one, and with no apex designated that fails closed.
+func TestClaimingAnUnmanagedSessionIsNotAnOrdinaryManagerAuthority(t *testing.T) {
+	service, reg, root, channel, orphan := adoptionFixture(t)
+
+	if allowed, reason := authorizeOperation(reg, channel, []string{"parent", "adopt", channel.ID, orphan.ID}); allowed {
+		t.Fatalf("an ordinary manager must not claim an unmanaged session: %s", reason)
+	}
+	if allowed, reason := authorizeOperation(reg, root, []string{"parent", "adopt", channel.ID, orphan.ID}); allowed {
+		t.Fatalf("a root that is not the designated apex must not claim either: %s", reason)
+	}
+	// The escalation that makes it matter: a claim would hand the caller exec.
+	if allowed, _ := authorizeOperation(reg, channel, []string{"session", "exec", orphan.ID}); allowed {
+		t.Fatal("exec on an unclaimed session must be refused")
+	}
+
+	// The declared path — the writer that owns the registry — still applies it.
+	if _, _, err := service.AdoptSession(channel.ID, orphan.ID, "", false); err != nil {
+		t.Fatal(err)
+	}
+	if allowed, reason := authorizeOperation(reg, channel, []string{"session", "exec", orphan.ID}); !allowed {
+		t.Fatalf("a manager may act on its own child: %s", reason)
+	}
+
+	// The governing apex is the top of the tree by designation, with no
+	// ancestor to be confined by, so it is the one caller that may claim.
+	stray := &Session{ID: "sess-stray", HostID: "madrid", Persist: ports.PersistHandle{Kind: "tmux", Name: "stray"},
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := reg.PutSession(stray); err != nil {
+		t.Fatal(err)
+	}
+	if allowed, _ := authorizeOperation(reg, root, []string{"parent", "adopt", channel.ID, stray.ID}); allowed {
+		t.Fatal("claim must stay refused while no apex is designated")
+	}
+	if _, err := (&RootService{Reg: reg}).Adopt(root.ID); err != nil {
+		t.Fatal(err)
+	}
+	if allowed, reason := authorizeOperation(reg, root, []string{"parent", "adopt", channel.ID, stray.ID}); !allowed {
+		t.Fatalf("the governing apex may claim an unmanaged session: %s", reason)
+	}
+	if allowed, _ := authorizeOperation(reg, channel, []string{"parent", "adopt", channel.ID, stray.ID}); allowed {
+		t.Fatal("designating an apex must not widen anybody else")
 	}
 }

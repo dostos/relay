@@ -149,9 +149,26 @@ Authority is unchanged in shape: a caller may create a manager only inside its
 own subtree (`--under` is mandatory for an authenticated non-human caller —
 omitting it asks for a new *root*, which is the one thing lineage confinement
 exists to prevent), may adopt only into its own subtree, and may take a child
-only from its own subtree. An unmanaged session is nobody's child, so it is
-claimable first-come, exactly as `parent link` already allows for an unowned
-handoff.
+only from its own subtree.
+
+Three details are load-bearing rather than incidental:
+
+* Registration is authorized on `--under` but acts on `--name`, and a name is a
+  guessable durable identity. So registration **never** changes lineage on
+  convergence — not even from "no manager" to "some manager". The only session
+  it can converge onto is one already reporting to the named manager, and so
+  already inside the caller's subtree. Re-homing is `parent adopt`, always.
+* `--under`, `--name` and `--from` must appear exactly once with a non-blank
+  value, refused identically by the policy and by the command. The policy reads
+  the first occurrence and an ordinary parse loop keeps the last, so a repeated
+  flag is otherwise authorized against one value and executed with another.
+* An **unmanaged** session is not claimable by an ordinary manager. `parent
+  link` allows that for an unowned handoff, but most sessions in a registry have
+  no manager, so the same rule for sessions is a reach across the whole fleet —
+  and it does not stop at reading, because a session in your lineage can be
+  `exec`'d. Which session belongs to which manager is a declared fact applied by
+  the writer that owns the registry; over the bridge, only the governing apex
+  may claim one.
 
 The holder process usually lives somewhere other than the authority host. It
 operates the root through the ordinary authenticated command boundary, using an

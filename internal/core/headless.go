@@ -202,23 +202,33 @@ func (p *ParentService) registerHeadless(opts RegisterParentOpts) (*Session, boo
 			if !IsHeadlessParent(sess) || sess.Persist.Name != name {
 				continue
 			}
-			// Registration converges; it never re-homes. A seed hook re-running
-			// with a different --under is either a mistake or a move, and a move
-			// is an explicitly named, audited operation (AdoptSession) precisely
-			// so it cannot happen as a side effect of a container restart.
+			// Registration converges; it NEVER re-homes — not even from no
+			// manager to some manager.
+			//
+			// This is a security boundary, not a style choice. Registration is
+			// authorized on the manager named by --under, but it acts on the
+			// session named by --name, and the name is the documented, guessable,
+			// durable identity of every headless service on this stack. If
+			// convergence could also set lineage, then `parent register --name
+			// <someone else's root> --under <self>` would place a root nobody
+			// gave the caller authority over inside the caller's own subtree —
+			// handing it that root's entire tree, and (with --print-identity)
+			// that root's bridge token. Refusing every lineage change keeps the
+			// authorized object and the acted-on object the same thing: a
+			// session already reporting to the named manager.
 			if manager != nil && sess.SourceSessionID != manager.ID {
 				if manager.ID == sess.ID {
 					return nil, false, fmt.Errorf("session %s cannot manage itself", sess.ID)
 				}
-				if sess.SourceSessionID != "" {
+				current := sess.SourceSessionID
+				if current == "" {
 					return nil, false, fmt.Errorf(
-						"headless manager %s already reports to %s; move it explicitly: relay parent adopt %s %s --from %s",
-						sess.ID, sess.SourceSessionID, manager.ID, sess.ID, sess.SourceSessionID)
+						"headless manager %s already exists as a root; registration never re-homes — move it explicitly: relay parent adopt %s %s",
+						sess.ID, manager.ID, sess.ID)
 				}
-				if err := validateManagerEdge(p.Reg, manager, sess); err != nil {
-					return nil, false, err
-				}
-				sess.SourceSessionID, sess.SourceHostID, sess.SourcePersistName = manager.ID, manager.HostID, manager.Persist.Name
+				return nil, false, fmt.Errorf(
+					"headless manager %s already reports to %s; move it explicitly: relay parent adopt %s %s --from %s",
+					sess.ID, current, manager.ID, sess.ID, current)
 			}
 			applyHeadlessLabels(sess, ttl, degradedFrom, now)
 			if len(refs) > 0 {
