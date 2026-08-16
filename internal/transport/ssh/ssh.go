@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/dostos/relay/internal/shellquote"
 )
@@ -25,6 +26,8 @@ type Transport struct {
 	Stderr              io.Writer
 	reverseRemoteSocket string
 	reverseLocalSocket  string
+	// controlPathCache holds the %C-expanded multiplexing socket path.
+	controlPathCache string
 }
 
 // ConfigureEndpoint pins projection-owned SSH policy for every reconnect.
@@ -78,7 +81,82 @@ func controlOpts() ([]string, error) {
 		"-o", "ControlMaster=auto",
 		"-o", "ControlPath=" + cp,
 		"-o", "ControlPersist=60",
+		// Keepalives belong here, on the shared options, because with
+		// ControlMaster=auto the *master* inherits the options of whichever
+		// launch happened to create it first. A master born without them
+		// cannot notice a dead peer: it blocks forever holding the socket,
+		// and every later client that multiplexes onto it blocks too.
+		// ConnectTimeout does not help once the control socket exists — it
+		// only bounds a fresh TCP connect, not the handshake with a wedged
+		// master. Setting them at the single source makes the master mortal
+		// no matter which code path reaches the host first.
+		"-o", "ServerAliveInterval=15",
+		"-o", "ServerAliveCountMax=3",
+		"-o", "TCPKeepAlive=yes",
 	}, nil
+}
+
+// controlProbeTimeout bounds every multiplexing-socket probe. It must be
+// short and it must exist: `ssh -O check` against a wedged master hangs
+// exactly like the calls it is meant to protect.
+const controlProbeTimeout = 3 * time.Second
+
+// resolvedControlPath expands the %C token in the shared ControlPath to a
+// concrete file, so a wedged socket can be removed when the master refuses
+// to exit. The value depends only on the endpoint, so it is cached.
+func (t *Transport) resolvedControlPath(ctx context.Context) (string, error) {
+	if t.controlPathCache != "" {
+		return t.controlPathCache, nil
+	}
+	ctrl, err := controlOpts()
+	if err != nil {
+		return "", err
+	}
+	gctx, cancel := context.WithTimeout(ctx, controlProbeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(gctx, "ssh", append(ctrl, "-G", "--", t.Host)...).Output()
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "controlpath "); ok {
+			t.controlPathCache = strings.TrimSpace(rest)
+			return t.controlPathCache, nil
+		}
+	}
+	return "", fmt.Errorf("ssh -G %s: no controlpath", t.Host)
+}
+
+// ensureLiveControlMaster clears a wedged multiplexing master before it can
+// swallow another call. Killing the ssh *client* on a context deadline does
+// not help on its own: the master survives, so the next attempt hangs
+// identically and the hung clients pile up. This reaps the master itself.
+func (t *Transport) ensureLiveControlMaster(ctx context.Context) {
+	cp, err := t.resolvedControlPath(ctx)
+	if err != nil || cp == "" {
+		return
+	}
+	if _, err := os.Stat(cp); err != nil {
+		return // no master yet — nothing to reap
+	}
+	ctrl, err := controlOpts()
+	if err != nil {
+		return
+	}
+	cctx, cancel := context.WithTimeout(ctx, controlProbeTimeout)
+	healthy := exec.CommandContext(cctx, "ssh", append(ctrl, "-O", "check", t.Host)...).Run() == nil
+	cancel()
+	if healthy {
+		return
+	}
+	ectx, cancel2 := context.WithTimeout(ctx, controlProbeTimeout)
+	_ = exec.CommandContext(ectx, "ssh", append(ctrl, "-O", "exit", t.Host)...).Run()
+	cancel2()
+	// A master that answers neither check nor exit still owns the socket
+	// file; dropping it forces the next launch to dial fresh.
+	if _, err := os.Stat(cp); err == nil {
+		_ = os.Remove(cp)
+	}
 }
 
 func (t *Transport) sshBase(ctx context.Context, extra ...string) (*exec.Cmd, error) {
@@ -86,6 +164,7 @@ func (t *Transport) sshBase(ctx context.Context, extra ...string) (*exec.Cmd, er
 	if err != nil {
 		return nil, err
 	}
+	t.ensureLiveControlMaster(ctx)
 	base := []string{
 		"-o", "BatchMode=yes",
 		"-o", "ConnectTimeout=15",
@@ -129,10 +208,9 @@ func (t *Transport) RunStream(ctx context.Context, cwd, command string, w io.Wri
 	if err != nil {
 		return err
 	}
+	t.ensureLiveControlMaster(ctx)
 	args := []string{
 		"-o", "BatchMode=yes",
-		"-o", "ServerAliveInterval=30",
-		"-o", "ServerAliveCountMax=4",
 	}
 	args = append(args, ctrl...)
 	args = append(args, t.Host, remote)
