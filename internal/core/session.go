@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -327,7 +328,7 @@ func (s *SessionService) transportFor(sess *Session) (ports.Transport, error) {
 }
 
 func (s *SessionService) Get(id string) (*Session, error) {
-	return s.Reg.GetSession(id)
+	return s.getSessionAuthorized(context.Background(), id)
 }
 
 func (s *SessionService) List() ([]*Session, error) {
@@ -394,7 +395,7 @@ func (s *SessionService) Rename(ctx context.Context, id, name string) (*Session,
 }
 
 func (s *SessionService) Capture(ctx context.Context, id string, lines int) (string, error) {
-	sess, err := s.Reg.GetSession(id)
+	sess, err := s.getSessionAuthorized(ctx, id)
 	if err != nil {
 		return "", err
 	}
@@ -419,7 +420,7 @@ func (s *SessionService) Capture(ctx context.Context, id string, lines int) (str
 // registry record. An error is unknown, not absent, and must fail closed when
 // used to authorize an ancestor skipping a manager.
 func (s *SessionService) Exists(ctx context.Context, id string) (bool, error) {
-	sess, err := s.Reg.GetSession(id)
+	sess, err := s.getSessionAuthorized(ctx, id)
 	if err != nil {
 		return false, err
 	}
@@ -438,7 +439,7 @@ func (s *SessionService) Exists(ctx context.Context, id string) (bool, error) {
 }
 
 func (s *SessionService) Send(ctx context.Context, id, text string, enter bool) error {
-	sess, err := s.Reg.GetSession(id)
+	sess, err := s.getSessionAuthorized(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -553,7 +554,7 @@ func (s *SessionService) SendManagedChild(ctx context.Context, managerID, childI
 }
 
 func (s *SessionService) Exec(ctx context.Context, id, command string) (stdout, stderr string, err error) {
-	sess, err := s.Reg.GetSession(id)
+	sess, err := s.getSessionAuthorized(ctx, id)
 	if err != nil {
 		return "", "", err
 	}
@@ -583,7 +584,7 @@ func (s *SessionService) execPlan(sess *Session, command string) (cwd, cmd strin
 }
 
 func (s *SessionService) Resize(ctx context.Context, id string) error {
-	sess, err := s.Reg.GetSession(id)
+	sess, err := s.getSessionAuthorized(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -595,7 +596,7 @@ func (s *SessionService) Resize(ctx context.Context, id string) error {
 }
 
 func (s *SessionService) Attach(ctx context.Context, id string) error {
-	sess, err := s.Reg.GetSession(id)
+	sess, err := s.getSessionAuthorized(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -607,8 +608,53 @@ func (s *SessionService) Attach(ctx context.Context, id string) error {
 	return t.Interactive(ctx, cmd)
 }
 
-func (s *SessionService) AttachCommand(id string) (string, error) {
+// getSessionAuthorized resolves a session by id, falling back to the live
+// viz projection inventory when the local registry is not authoritative
+// (ErrProjectionOnlyAuthority — home holds that, this client's registry is
+// only a viz projection). Every read-only SessionService operation that a
+// projection client (e.g. a Mac whose durable authority lives on a home
+// host) might run directly goes through this, so the fallback lives in one
+// place instead of being re-derived per method the way `Attach` first was.
+func (s *SessionService) getSessionAuthorized(ctx context.Context, id string) (*Session, error) {
 	sess, err := s.Reg.GetSession(id)
+	if errors.Is(err, ErrProjectionOnlyAuthority) {
+		sess, err = s.projectedSession(ctx, id)
+	}
+	return sess, err
+}
+
+// projectedSession finds one session's connection coordinates from the live
+// viz projection inventory, for use when the local registry is
+// authority-unavailable (see ErrProjectionOnlyAuthority).
+func (s *SessionService) projectedSession(ctx context.Context, id string) (*Session, error) {
+	manager, ok := s.Viz.(ports.ProjectionInventory)
+	if !ok {
+		return nil, ErrProjectionOnlyAuthority
+	}
+	panes, err := manager.ProjectionSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, pane := range panes {
+		if pane.SessionID != id {
+			continue
+		}
+		return &Session{
+			ID:              pane.SessionID,
+			HostID:          pane.Target,
+			Persist:         ports.PersistHandle{Kind: "tmux", Name: pane.TmuxName},
+			SourceSessionID: pane.ParentSessionID,
+			VizSurfaceRef:   pane.Surface,
+			Labels:          map[string]string{"role": "projection", "authority": "home"},
+			CreatedAt:       pane.CreatedAt,
+			UpdatedAt:       pane.UpdatedAt,
+		}, nil
+	}
+	return nil, fmt.Errorf("%w: %q", ErrSessionNotFound, id)
+}
+
+func (s *SessionService) AttachCommand(id string) (string, error) {
+	sess, err := s.getSessionAuthorized(context.Background(), id)
 	if err != nil {
 		return "", err
 	}
