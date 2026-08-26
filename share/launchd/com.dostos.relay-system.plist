@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.dostos.relay-system — the authoritative home service on macOS.
+
+  The macOS counterpart of share/systemd/relay-system.service, which did not
+  exist until 2026-08-27. Until then the authority lived on a Linux host and a
+  Mac only ever ran the outbound viz client (com.dostos.relay-viz). When the
+  authority moved to this Mac there was no unit to run it under, so
+  `relay doctor` reported `desktop_bridge: not running; remote agents cannot
+  reach this control plane` with nothing to start.
+
+  `relay service run` is boundary + control loop:
+    boundary      the authenticated command socket at
+                  $STATE/relay/desktop-bridge.sock, which is what a remote
+                  agent's `relay ...` call comes back to.
+    control loop  pushes that socket out to each remote session over `ssh -R`.
+                  It opens a tunnel ONLY for sessions that have a token in
+                  $STATE/relay/bridge-tokens/ (internal/controlbridge/service.go
+                  hasToken), so which sessions are reachable is decided by which
+                  tokens exist -- not by this file.
+
+  Use `relay service boundary` instead if you want the socket without any ssh
+  tunnels (a container, or a host with no cmux).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.dostos.relay-system</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>REPLACE_INSTALL_DIR/relay</string>
+    <string>service</string>
+    <string>run</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- ssh must resolve, and so must the relay binary the boundary re-execs
+         for each authorized command (bridge.Server.RelayBin). -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:REPLACE_HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>REPLACE_HOME</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <!-- The control loop opens one ssh -R per tokened session. A crash-loop here
+       is a burst of ssh connections at the fleet, and the SNU edge IPS bans the
+       source IP on exactly that pattern (docs/fleet-roles.md). 30s, not the
+       viz client's 5s: this restarts rarely and should back off when it does. -->
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>REPLACE_HOME/Library/Logs/relay-system.log</string>
+  <key>StandardErrorPath</key>
+  <string>REPLACE_HOME/Library/Logs/relay-system.log</string>
+</dict>
+</plist>
