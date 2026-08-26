@@ -3656,7 +3656,7 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 		if len(args) < 2 {
 			return a.fail(fmt.Errorf("session id required"))
 		}
-		sess, err := a.Sessions.Get(args[1])
+		sess, err := a.visualizationSession(ctx, args[1])
 		if err != nil {
 			return a.fail(err)
 		}
@@ -3714,7 +3714,7 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 		if len(args) < 2 {
 			return a.fail(fmt.Errorf("session id required"))
 		}
-		sess, err := a.Sessions.Get(args[1])
+		sess, err := a.visualizationSession(ctx, args[1])
 		if err != nil {
 			return a.fail(err)
 		}
@@ -3727,7 +3727,11 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 		if len(args) < 2 {
 			return a.fail(fmt.Errorf("session id required"))
 		}
-		if err := a.Viz.Close(ctx, args[1]); err != nil {
+		sess, err := a.visualizationSession(ctx, args[1])
+		if err != nil {
+			return a.fail(err)
+		}
+		if err := a.Viz.Close(ctx, sess.ID); err != nil {
 			return a.fail(err)
 		}
 		return 0
@@ -3746,6 +3750,38 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 	default:
 		return a.fail(fmt.Errorf("unknown viz subcommand %q", args[0]))
 	}
+}
+
+// visualizationSession resolves against the local projection when the Mac
+// has retired its authoritative registry. Visualization commands are local
+// cmux operations, so they must remain usable in projection-only mode while
+// durable control-plane mutations continue to fail closed.
+func (a *App) visualizationSession(ctx context.Context, ref string) (*core.Session, error) {
+	sess, err := a.Sessions.Get(ref)
+	if err == nil {
+		return sess, nil
+	}
+	if !core.ProjectionOnly() || !errors.Is(err, core.ErrProjectionOnlyAuthority) {
+		return nil, err
+	}
+
+	projected, projectionErr := a.projectedSessions(ctx)
+	if projectionErr != nil {
+		return nil, projectionErr
+	}
+	matches := make([]*core.Session, 0, 1)
+	for _, candidate := range projected {
+		if ref == candidate.ID || ref == candidate.Persist.Name || ref == candidate.HostID {
+			matches = append(matches, candidate)
+		}
+	}
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("projected visualization session %q not found", ref)
+	}
+	if len(matches) > 1 {
+		return nil, fmt.Errorf("multiple projected visualization sessions match %q; use a session ID", ref)
+	}
+	return matches[0], nil
 }
 
 func (a *App) cmdResume(ctx context.Context, args []string) int {

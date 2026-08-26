@@ -24,6 +24,18 @@ type projectedPaneViz struct {
 	err   error
 }
 
+type localFocusViz struct {
+	projectedPaneViz
+	focused string
+}
+
+func (v *localFocusViz) Available(context.Context) bool { return true }
+
+func (v *localFocusViz) Focus(_ context.Context, sessionID string) error {
+	v.focused = sessionID
+	return nil
+}
+
 type authorityForwardViz struct{ ports.Viz }
 
 func (authorityForwardViz) ForwardAuthorityCommand(context.Context, []string) (int, string, string, error) {
@@ -170,6 +182,25 @@ func TestProjectedSessionListUsesLiveVizBindings(t *testing.T) {
 	got := projected[0]
 	if got.ID != "sess-engram" || got.SourceSessionID != "sess-apex" || got.HostID != "c3" || got.Persist.Name != "engram" || got.VizSurfaceRef != "surface:2" {
 		t.Fatalf("projection fields lost: %+v", got)
+	}
+}
+
+func TestProjectionOnlyVizFocusUsesProjectedIdentity(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("RELAY_STATE_DIR", state)
+	if err := os.WriteFile(filepath.Join(state, ".viz-projection-only"), []byte("projection only\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	viz := &localFocusViz{projectedPaneViz: projectedPaneViz{panes: []ports.ProjectedSession{
+		{SessionID: "sess-hamburg", Target: "hamburg", TmuxName: "beholder", Surface: "surface:1"},
+	}}}
+	a := New()
+	a.Viz = viz
+	if code := a.Run([]string{"viz", "focus", "hamburg"}); code != 0 {
+		t.Fatalf("projection-only viz focus code=%d", code)
+	}
+	if viz.focused != "sess-hamburg" {
+		t.Fatalf("focused session=%q, want sess-hamburg", viz.focused)
 	}
 }
 
