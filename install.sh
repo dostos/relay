@@ -130,6 +130,32 @@ printf '{"v":1,"old_installed_build":"%s","installed_build":"%s","event_socket":
 chmod 600 "$RECEIPT"
 echo "relay migration receipt: $RECEIPT"
 
+# The authoritative home service on macOS. Installed when this Mac IS the
+# authority -- i.e. it is NOT projection-only. A projection-only Mac forwards
+# its authoritative commands to another host and must not also serve a boundary
+# of its own; that is the split that produced two registries in 2026-08.
+#
+# The Linux equivalent is share/systemd/relay-system.service, proposed rather
+# than installed by this script (SYSTEM_UNIT_PROPOSAL above) because a system
+# unit needs root. A LaunchAgent does not, so this one is installed directly.
+SYSTEM_LABEL="com.dostos.relay-system"
+SYSTEM_PLIST="$HOME/Library/LaunchAgents/$SYSTEM_LABEL.plist"
+if [[ "$(uname -s)" == "Darwin" && ! -f "$STATE_ROOT/.viz-projection-only" ]]; then
+  mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
+  sed -e "s|REPLACE_INSTALL_DIR|$INSTALL_DIR|g" -e "s|REPLACE_HOME|$HOME|g" \
+    "$ROOT/share/launchd/$SYSTEM_LABEL.plist" > "$SYSTEM_PLIST"
+  # The same self-update guard the viz client uses, and for a sharper reason:
+  # this service is the command boundary, so an install triggered THROUGH it
+  # would bootout the process running the install. The plist is refreshed
+  # either way; only the restart is deferred to the caller.
+  if [[ -z "${RELAY_SYSTEM_SELF_UPDATE:-}" ]]; then
+    launchctl bootout "gui/$(id -u)/$SYSTEM_LABEL" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/$(id -u)" "$SYSTEM_PLIST"
+    launchctl kickstart -k "gui/$(id -u)/$SYSTEM_LABEL"
+  fi
+  echo "relay service: authoritative home service registered ($SYSTEM_LABEL)"
+fi
+
 # The optional Mac visualization client connects outbound to the authoritative
 # control host. It is installed only when owner config declares a control
 # target; home never needs inbound SSH access to the Mac.
