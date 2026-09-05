@@ -655,14 +655,6 @@ func (s *SessionService) Destroy(ctx context.Context, id string, keepRemote bool
 	if err != nil {
 		return err
 	}
-	if IsLocalParentSession(sess) {
-		return fmt.Errorf("refuse unguarded local parent destruction; use relay parent retire %s", id)
-	}
-	if children, childErr := s.Reg.DirectChildren(id); childErr != nil {
-		return childErr
-	} else if len(children) > 0 {
-		return fmt.Errorf("refuse session destruction with %d direct child(ren); replace or reparent the manager first", len(children))
-	}
 	if !keepRemote {
 		t, err := s.transportFor(sess)
 		if err != nil {

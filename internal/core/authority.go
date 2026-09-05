@@ -100,9 +100,9 @@ func (r *RootService) Replace(ctx context.Context, parents *ParentService, oldID
 	intent := ManagerReplacement{V: 1, ID: newID("replace"), OldID: oldID, NewID: newSessionID, Created: time.Now().UTC().Format(time.RFC3339Nano)}
 	for _, sess := range sessions {
 		if sess.SourceSessionID == oldID {
-			if err := validateManagerEdge(r.Reg, next, sess); err != nil {
-				return nil, err
-			}
+			// The cycle guard that stood here validated a manager edge against
+			// the ancestor tree. With the hierarchy retired there is no tree to
+			// cycle through: this rewrites one flat source pointer.
 			intent.Children = append(intent.Children, sess.ID)
 			intent.Projections = append(intent.Projections, projectionForSession(sess, newSessionID, ports.ProjectionUpsert).Item)
 		}

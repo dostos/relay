@@ -649,13 +649,9 @@ Long-lived goal orchestration (durable compact inbox + guarded local-pane cleanu
   relay parent log [PARENT] [--after N]        # …and your own communication log
   relay parent sweep [PARENT]                  # …and your own terminal-message sweep
   relay parent heartbeat [PARENT]              # renew declared liveness (yours by default)
-  relay parent status [PARENT]
   relay parent bind PARENT [--surface REF]     # preserve identity after cmux restart
-  relay parent link PARENT HANDOFF             # adopt an already-running goal
-  relay parent move PARENT HANDOFF             # explicitly repair a wrong parent edge
   relay parent list
   relay parent state PARENT active|idle|complete
-  relay parent retire ID [--dry-run]
 
 Automatic handling policies (desktop-local; unmatched/errors go to manager):
   relay policy list
@@ -2002,7 +1998,7 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 	a.JSON = true
 	a.CompactJSON = true
 	if a.Parents == nil || len(args) == 0 {
-		return a.fail(fmt.Errorf("usage: relay parent register|heartbeat|link|adopt|move|list|inbox|sweep|reply|ack|state|status|retire …"))
+		return a.fail(fmt.Errorf("usage: relay parent register|heartbeat|bind|list|send|inbox|redeliver|log|sweep|reply|ack|state|watch …"))
 	}
 	switch args[0] {
 	case "send":
@@ -2150,61 +2146,6 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 			return a.fail(err)
 		}
 		return a.errOut(a.out(map[string]any{"ok": true, "parent_session_id": sess.ID, "surface": sess.VizSurfaceRef, "state": sess.Labels["parent_state"]}))
-	case "link":
-		if len(args) != 3 {
-			return a.fail(fmt.Errorf("usage: relay parent link PARENT HANDOFF"))
-		}
-		parentID, handoffID := args[1], args[2]
-		ho, err := a.Parents.LinkChild(parentID, handoffID)
-		if err != nil {
-			return a.fail(err)
-		}
-		a.startParentWatcher(ho.ID)
-		return a.errOut(a.out(map[string]any{
-			"ok": true, "parent_session_id": parentID,
-			"handoff_id": ho.ID, "child_session_id": ho.SessionID,
-		}))
-	case "adopt":
-		// `parent link|move` name a HANDOFF. A session adopted from a running
-		// tmux has none, so this is the only verb that can give it a manager.
-		if len(args) < 3 || strings.HasPrefix(args[1], "-") || strings.HasPrefix(args[2], "-") {
-			return a.fail(fmt.Errorf("usage: relay parent adopt PARENT SESSION [--from CURRENT_PARENT]"))
-		}
-		parentID, sessionID := args[1], args[2]
-		from, fromGiven := "", false
-		seen := map[string]bool{}
-		for i := 3; i < len(args); i++ {
-			switch args[i] {
-			case "--from":
-				i++
-				value, err := soleFlagValue(args, i, "--from", seen)
-				if err != nil {
-					return a.fail(err)
-				}
-				from, fromGiven = value, true
-			default:
-				return a.fail(rejectUnknownFlag(args[i]))
-			}
-		}
-		child, oldParentID, err := a.Parents.AdoptSession(parentID, sessionID, from, fromGiven)
-		if err != nil {
-			return a.fail(err)
-		}
-		return a.errOut(a.out(map[string]any{
-			"ok": true, "parent_session_id": parentID, "child_session_id": child.ID,
-			"old_parent_session_id": oldParentID, "moved": oldParentID != parentID,
-		}))
-	case "move", "reparent":
-		if len(args) != 3 {
-			return a.fail(fmt.Errorf("usage: relay parent move PARENT HANDOFF"))
-		}
-		parentID, handoffID := args[1], args[2]
-		ho, oldParentID, err := a.Parents.ReparentChild(parentID, handoffID)
-		if err != nil {
-			return a.fail(err)
-		}
-		a.ensureParentWatcher(ho.ID)
-		return a.errOut(a.out(map[string]any{"ok": true, "handoff_id": ho.ID, "child_session_id": ho.SessionID, "old_parent_session_id": oldParentID, "parent_session_id": parentID}))
 	case "list":
 		// A flat enumeration of every registered mailbox. Subtree scoping went
 		// with the hierarchy: there is no tree left to scope to.
@@ -2382,44 +2323,6 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 			return a.fail(err)
 		}
 		return a.errOut(a.out(map[string]any{"ok": true, "session_id": sess.ID, "state": state}))
-	case "status", "retire":
-		// Only `status` defaults to the caller. Retiring a manager is
-		// destructive and keeps requiring its id written down — the same split
-		// the authority policy makes (parentSelfScopedVerbs).
-		sessionID, rest := core.ParentVerbTarget(args[1:]), args[1:]
-		if sessionID != "" {
-			rest = args[2:]
-		} else if args[0] == "status" {
-			var err error
-			sessionID, err = a.currentParentID()
-			if err != nil {
-				return a.fail(err)
-			}
-		}
-		if sessionID == "" {
-			return a.fail(fmt.Errorf("usage: relay parent %s PARENT [--dry-run]", args[0]))
-		}
-		dryRun := args[0] == "status"
-		force, keepViz := false, false
-		for _, arg := range rest {
-			switch arg {
-			case "--dry-run":
-				dryRun = true
-			case "--force":
-				force = true
-			case "--keep-viz":
-				keepViz = true
-			default:
-				return a.fail(rejectUnknownFlag(arg))
-			}
-		}
-		if args[0] == "status" {
-		}
-		gate, err := a.Parents.Retire(ctx, sessionID, dryRun, force, keepViz)
-		if err != nil {
-			return a.fail(err)
-		}
-		return a.errOut(a.out(map[string]any{"ok": true, "retirement": gate}))
 	case "watch":
 		return a.fail(fmt.Errorf("parent watchers are owned by relay service run; use relay service status"))
 	default:
