@@ -604,6 +604,9 @@ Host profiles (authoritative on each remote ~/.config/relay/host.yaml):
   relay host fetch -H HOST
   relay host probe -H HOST
   relay host cache -H HOST
+  relay host map -H HOST --match NAME --remote-cwd DIR
+                                      Record where a local repo lives on HOST
+  relay host ls -H HOST [--path DIR]  List remote directories (for a folder picker)
   relay host example -H HOST          Print starter host.yaml
   relay host bootstrap -H HOST        Install host-local event service (unix socket; one quiet SSH)
 
@@ -993,6 +996,86 @@ func (a *App) cmdHost(ctx context.Context, args []string) int {
 			fmt.Print(card.ProposalYAML)
 		}
 		return 0
+	case "map":
+		// Records where a local repo lives on this host, in the host's own
+		// host.yaml. A client that offers a folder picker edits this; it does
+		// not keep its own copy, or relay and that client would answer the same
+		// question differently the first time either changed.
+		if host == "" {
+			return a.fail(fmt.Errorf("-H HOST required"))
+		}
+		match, remoteCWD := "", ""
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case "--match":
+				i++
+				if i < len(rest) {
+					match = rest[i]
+				}
+			case "--remote-cwd":
+				i++
+				if i < len(rest) {
+					remoteCWD = rest[i]
+				}
+			default:
+				return a.fail(rejectUnknownFlag(rest[i]))
+			}
+		}
+		if match == "" || remoteCWD == "" {
+			return a.fail(fmt.Errorf("usage: relay host map -H HOST --match NAME --remote-cwd DIR"))
+		}
+		t, err := a.tf(host)
+		if err != nil {
+			return a.fail(err)
+		}
+		profile, err := a.Profiles.MapRepo(ctx, t, host, match, remoteCWD)
+		if err != nil {
+			return a.fail(err)
+		}
+		a.JSON = true
+		return a.errOut(a.out(map[string]any{
+			"ok": true, "host_id": host, "match": match, "remote_cwd": remoteCWD,
+			"path_map": profile.PathMap,
+		}))
+	case "ls":
+		// One level of directories, so a client can offer a remote folder
+		// picker without speaking SSH itself.
+		if host == "" {
+			return a.fail(fmt.Errorf("-H HOST required"))
+		}
+		dir := "~"
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case "--path":
+				i++
+				if i < len(rest) {
+					dir = rest[i]
+				}
+			default:
+				return a.fail(rejectUnknownFlag(rest[i]))
+			}
+		}
+		cmd, err := core.RemoteDirsCommand(dir)
+		if err != nil {
+			return a.fail(err)
+		}
+		t, err := a.tf(host)
+		if err != nil {
+			return a.fail(err)
+		}
+		out, _, runErr := t.Run(ctx, "", cmd)
+		if runErr != nil {
+			return a.fail(fmt.Errorf("list %s on %s: %w", dir, host, runErr))
+		}
+		dirs := make([]string, 0, 32)
+		for _, line := range strings.Split(out, "\n") {
+			name := strings.TrimSuffix(strings.TrimSpace(line), "/")
+			if name != "" {
+				dirs = append(dirs, name)
+			}
+		}
+		a.JSON = true
+		return a.errOut(a.out(map[string]any{"ok": true, "host_id": host, "path": dir, "dirs": dirs}))
 	case "init":
 		if host == "" {
 			return a.fail(fmt.Errorf("-H HOST required"))
