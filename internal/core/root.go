@@ -8,23 +8,14 @@ import (
 	"strings"
 )
 
-// Autonomous mode is not a flag — it is a shape. A subtree is governed when it
-// has an agent-root ancestor, so turning it on means enrolling a root under an
-// always-on apex, and turning it off means unenrolling. Nothing else changes.
-//
-// Relay stays model-free here: it owns enrollment, where the rules live, and
-// the audit. The judgment lives in the apex agent (share/roles/relay-conductor.md).
+// What is left of this file after the apex retired: where this machine's
+// control plane is declared, and where a project's rules file lives. Neither
+// governs anything. The enrollment and apex model the file was named for is
+// gone; see docs/2026-09-05-retire-hierarchy-plan.md.
 
-const (
-	// GovernedLabel marks a root that has been placed under the apex.
-	GovernedLabel = "governed"
-)
-
-// RootService manages the apex and the roots enrolled under it.
-type RootService struct {
-	Reg      *Registry
-	Sessions *SessionService
-}
+// RootService is the remaining namespace for those two concerns. It holds no
+// state: its only method takes what it needs as parameters.
+type RootService struct{}
 
 // ControlPlane describes where governance actually runs. Enrolling a root
 // makes its subtree governed, but governance only happens while the machine

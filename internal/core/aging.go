@@ -10,31 +10,22 @@ import (
 )
 
 // Delivery treats "reachable" as "will decide". Those are the same thing for an
-// agent manager and completely different for a human-attended cmux pane: a pane
-// is alive whether or not anyone is reading it. So an escalation lands on a
-// live-but-unattended manager and stops there, while an always-on apex one level
-// up — perfectly able to rule on it — is never consulted.
+// agent mailbox and completely different for a human-attended cmux pane: a pane
+// is alive whether or not anyone is reading it. So an ask lands on a
+// live-but-unattended mailbox and stops there, and nothing else notices.
 //
-// Ageing adds the missing clock, but it REPORTS staleness; it does not transfer
-// the decision.
+// Ageing adds the missing clock. It REPORTS staleness; it does not transfer the
+// decision. The question stays with the mailbox it was addressed to, and the
+// human is told that mailbox has been sitting on it.
 //
-// An earlier version moved the envelope to the next ancestor, which looked like
-// Part A's failover but is not the same thing. Failover bypasses a manager that
-// CANNOT receive; there is no alternative. Taking a question from a manager that
-// is merely slow strips authority from a manager that still exists, tells it
-// nothing, and makes the ancestor answer its own grandchild directly — which
-// breaks the one rule the whole tree rests on, that each level talks only to the
-// next.
-//
-// So a stale question stays with its holder, and the holder's MANAGER is told
-// that its own child has a stalled subtree. That is a fact about the manager's
-// immediate child, which is squarely within its remit, and it leaves the
-// decision where the tree says it belongs.
+// This file used to describe a tree: escalation to an always-on apex one level
+// up, and a rule that each level talks only to the next. There are no levels
+// now. What survived is the clock and the refusal to answer on anyone's behalf.
 
-// DefaultEscalationMaxHold is how long one manager may sit on an unanswered
-// attention envelope before its own manager is told. Long enough that a human
-// reading their pane is not pre-empted mid-thought; short enough that unattended
-// work does not stall for an afternoon.
+// DefaultEscalationMaxHold is how long a mailbox may sit on an unanswered
+// attention envelope before the human is told. Long enough that someone reading
+// their pane is not pre-empted mid-thought; short enough that unattended work
+// does not stall for an afternoon.
 const DefaultEscalationMaxHold = 15 * time.Minute
 
 // EscalationMaxHold reads RELAY_ESCALATION_MAX_HOLD_MIN, else the default.

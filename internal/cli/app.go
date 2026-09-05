@@ -153,7 +153,7 @@ func New() *App {
 		Coord:    coord,
 		Msg:      msgs,
 		Boards:   &core.BoardService{Reg: reg, Msg: msgs},
-		Roots:    &core.RootService{Reg: reg, Sessions: sessions},
+		Roots:    &core.RootService{},
 		Maint:    &core.MaintenanceService{Sessions: sessions, Reg: reg, Viz: viz, NewTransport: tf},
 		Parents:  parents,
 		Policies: policies,
@@ -2400,13 +2400,12 @@ func (a *App) cmdCommunicationLog(args []string) int {
 // soleFlagValue reads a value flag that must appear exactly once with a
 // non-blank value.
 //
-// It has to refuse the same argv core's authority policy refuses, because the
-// two read these flags differently by nature: the policy scans for the first
-// occurrence, an ordinary parse loop keeps the last. Left alone, that gap is a
-// lineage escape — `--under <self> --under ""` authorizes against the caller's
-// own id and then executes as "no manager", i.e. a brand new root. Failing
-// closed on both sides means no argv exists where what was authorized and what
-// is acted on can differ.
+// A repeated flag is ambiguous: a scanner that takes the first occurrence and
+// a parse loop that keeps the last disagree about what was asked for. That gap
+// used to be exploitable -- `--under <self> --under ""` authorized against the
+// caller's own id and then executed as "no manager". The authority policy that
+// made it exploitable is gone, but refusing the ambiguity outright is still the
+// right answer, because a command that means two things is a bug either way.
 func soleFlagValue(args []string, i int, name string, seen map[string]bool) (string, error) {
 	if seen[name] {
 		return "", fmt.Errorf("%s may be given only once", name)
@@ -3060,7 +3059,7 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 			"rules": []string{
 				"managed start: no follow-up; hooks are receipts",
 				"run argv only when returned; wait timeout means stop",
-				"dead parent->ancestor; root->human",
+				"dead parent->stays pending; no failover",
 				"blocked: relay ask QUESTION; security gates stop",
 				"ask/result wake; note/progress/idle only advance cursors",
 				"board=peer state; post -k KEY -- TEXT; query folds latest",

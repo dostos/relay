@@ -37,9 +37,9 @@ import (
 // headless root is live only while it says so: it heartbeats, on a declared
 // TTL, and every inbox read renews it (a root that is doing its job proves its
 // liveness by doing its job). Past the TTL the root is treated exactly like an
-// absent pane: delivery reports the target unavailable, attention envelopes
-// fail over to an ancestor, and anything with nowhere to go stays pending and
-// visible instead of being marked delivered.
+// absent pane: delivery reports the target unavailable, and the envelope stays
+// pending and visible instead of being marked delivered. Nothing fails over to
+// anywhere else -- there is nowhere else.
 const (
 	// HeadlessPersistKind marks a parent session with no pane behind it. It is
 	// deliberately not LocalPersistKind: everything keyed on "cmux" (capture,
@@ -221,14 +221,18 @@ func (p *ParentService) registerHeadless(opts RegisterParentOpts) (*Session, boo
 					return nil, false, fmt.Errorf("session %s cannot manage itself", sess.ID)
 				}
 				current := sess.SourceSessionID
+				// These used to point at `relay parent adopt`, which was
+				// deleted with the hierarchy. Naming a verb that no longer
+				// exists is worse than naming none: it sends the reader to a
+				// dead end. There is no re-homing verb now, so say that.
 				if current == "" {
 					return nil, false, fmt.Errorf(
-						"headless manager %s already exists as a root; registration never re-homes — move it explicitly: relay parent adopt %s %s",
-						sess.ID, manager.ID, sess.ID)
+						"headless manager %s already exists with no launcher; registration never re-homes, and there is no verb to move it — destroy and re-register it under %s",
+						sess.ID, manager.ID)
 				}
 				return nil, false, fmt.Errorf(
-					"headless manager %s already reports to %s; move it explicitly: relay parent adopt %s %s --from %s",
-					sess.ID, current, manager.ID, sess.ID, current)
+					"headless manager %s already reports to %s; registration never re-homes, and there is no verb to move it — destroy and re-register it under %s",
+					sess.ID, current, manager.ID)
 			}
 			applyHeadlessLabels(sess, ttl, degradedFrom, now)
 			if len(refs) > 0 {
@@ -353,9 +357,9 @@ func (p *ParentService) deliverHeadless(parent *Session, msg *ParentMessage) err
 // `relay parent inbox` and have it executed against the authority. A service in
 // another container has no such session — nothing ever injected anything into
 // it — so it has to be handed the same two facts explicitly. This is the same
-// identity, issued the same way and authorized by the same policy
-// (authorizeOperation confines it to its own lineage); the only difference is
-// who carries it.
+// identity, issued the same way; the only difference is who carries it. It
+// used to be confined to its own lineage by the authority policy, which
+// retired with the hierarchy.
 type HeadlessIdentity struct {
 	V         int    `json:"v"`
 	SessionID string `json:"session_id"`

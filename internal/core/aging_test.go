@@ -65,9 +65,6 @@ func TestStaleEscalationStaysWithItsHolder(t *testing.T) {
 	if err != nil || len(held) != 1 {
 		t.Fatalf("the holder must keep the decision: %d (%v)", len(held), err)
 	}
-	if held[0].SkippedSessionIDs != nil {
-		t.Fatalf("nothing was skipped; this is a report, not a failover: %+v", held[0].SkippedSessionIDs)
-	}
 }
 
 // The holder's own manager is told — a fact about its immediate child, which is

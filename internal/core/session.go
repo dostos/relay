@@ -450,8 +450,8 @@ func (s *SessionService) Capture(ctx context.Context, id string, lines int) (str
 }
 
 // Exists confirms the backing surface/process, rather than trusting the
-// registry record. An error is unknown, not absent, and must fail closed when
-// used to authorize an ancestor skipping a manager.
+// registry record. An error means unknown, not absent, and callers must treat
+// it that way rather than reading it as "gone".
 func (s *SessionService) Exists(ctx context.Context, id string) (bool, error) {
 	sess, err := s.Reg.GetSession(id)
 	if err != nil {
@@ -500,10 +500,11 @@ type ManagedSendReceipt struct {
 	HandoffID   string `json:"handoff_id,omitempty"`
 }
 
-// effectiveLiveHandoff derives routing from the live session edge. The
-// session registry is the authority for current hierarchy; handoff lineage is
-// retained as a historical launch snapshot and must not become a second live
-// source of truth after enrollment or manager replacement.
+// effectiveLiveHandoff derives routing from the live session edge. The session
+// registry is the authority for where a handoff currently reports; the
+// handoff's own record is a historical launch snapshot and must not become a
+// second live source of truth once a headless manager re-registers --under
+// somewhere else.
 func effectiveLiveHandoff(reg *Registry, ho *Handoff) (*Handoff, error) {
 	if ho == nil {
 		return nil, fmt.Errorf("handoff required")

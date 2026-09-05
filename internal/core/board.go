@@ -143,36 +143,6 @@ func (b *BoardService) Query(ctx context.Context, sessionID, category, key strin
 	return out, nil
 }
 
-// readBoard folds one manager's board to the latest entry per (node, key).
-func (b *BoardService) readBoard(ctx context.Context, manager *Session, category, key string) ([]BoardEntry, error) {
-	msgs, _, err := b.Msg.Read(ctx, manager.HostID, boardChannel(manager.ID, category), 0, false, 0)
-	if err != nil {
-		return nil, err
-	}
-	latest := map[string]BoardEntry{}
-	for _, m := range msgs {
-		entry := BoardEntry{Node: m.From, Text: m.Text, Seq: m.Seq}
-		if m.Meta != nil {
-			if k, ok := m.Meta["key"].(string); ok {
-				entry.Key = k
-			}
-		}
-		if entry.Node == "" || (key != "" && entry.Key != key) {
-			continue
-		}
-		id := entry.Node + "\x00" + entry.Key
-		if prev, ok := latest[id]; ok && prev.Seq > entry.Seq {
-			continue
-		}
-		latest[id] = entry
-	}
-	out := make([]BoardEntry, 0, len(latest))
-	for _, entry := range latest {
-		out = append(out, entry)
-	}
-	return out, nil
-}
-
 // CurrentSeq returns the board's current tail cursor. Bare `board watch` uses
 // it before subscribing so old state cannot masquerade as a new update and
 // turn a blocking operator into a hot loop. Subscribing from this cursor is

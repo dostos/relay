@@ -1198,9 +1198,7 @@ func TestCompactParentMessageDoesNotRepeatStructuredGateText(t *testing.T) {
 func TestParentMessageCarriesFailoverAttribution(t *testing.T) {
 	msg := &ParentMessage{
 		V: 1, ID: "pm-x", ParentSessionID: "sess-root",
-		IntendedParentSessionID: "sess-mid",
-		SkippedSessionIDs:       []string{"sess-mid"},
-		ResolvedBySessionID:     "sess-root",
+		ResolvedBySessionID: "sess-root",
 	}
 	raw, err := json.Marshal(msg)
 	if err != nil {
@@ -1209,12 +1207,6 @@ func TestParentMessageCarriesFailoverAttribution(t *testing.T) {
 	var back ParentMessage
 	if err := json.Unmarshal(raw, &back); err != nil {
 		t.Fatal(err)
-	}
-	if back.IntendedParentSessionID != "sess-mid" {
-		t.Fatalf("intended parent lost: %+v", back)
-	}
-	if len(back.SkippedSessionIDs) != 1 || back.SkippedSessionIDs[0] != "sess-mid" {
-		t.Fatalf("skipped ids lost: %+v", back)
 	}
 	if back.ResolvedBySessionID != "sess-root" {
 		t.Fatalf("resolver lost: %+v", back)
@@ -1345,9 +1337,6 @@ func TestEscalationNeverSkipsALiveManager(t *testing.T) {
 	if msg.ParentSessionID != manager.ID {
 		t.Fatalf("a live manager must not be skipped, went to %s", msg.ParentSessionID)
 	}
-	if msg.IntendedParentSessionID != "" {
-		t.Fatalf("no failover expected, got intended=%q", msg.IntendedParentSessionID)
-	}
 	if len(notifier.notices) != 0 {
 		t.Fatalf("the human root must not be interrupted, got %d notices", len(notifier.notices))
 	}
@@ -1385,16 +1374,16 @@ func TestEscalationStaysPendingWhenNoAncestorIsLive(t *testing.T) {
 func TestReplyRecordsTheResolvingSession(t *testing.T) {
 	service, _, reg := newParentTestService(t)
 	now := time.Now().UTC()
-	root, manager, child, ho := failoverTree(t, reg)
+	root, _, child, ho := failoverTree(t, reg)
 	ho.Status = StatusNeedsInput
 	if err := reg.PutHandoff(ho); err != nil {
 		t.Fatal(err)
 	}
-	// The root holds the ask because the manager was disconnected.
+	// The mailbox holds the ask.
 	msg := &ParentMessage{
 		V: 1, ID: "pm-resolve", ParentSessionID: root.ID, ChildSessionID: child.ID,
 		HandoffID: ho.ID, Kind: "ask", State: ParentMessagePending,
-		IntendedParentSessionID: manager.ID, CreatedAt: now,
+		CreatedAt: now,
 	}
 	if err := writeParentMessage(msg, true); err != nil {
 		t.Fatal(err)

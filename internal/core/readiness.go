@@ -6,11 +6,10 @@ import (
 	"strings"
 )
 
-// An agent can be launched, bound, and designated the apex while sitting at a
-// login screen doing nothing. That state is indistinguishable from a working
-// agent unless someone looks at the pane — which is how an apex ends up
-// configured and inert, with escalations arriving into a prompt that will never
-// answer them.
+// An agent can be launched and bound while sitting at a login screen doing
+// nothing. That state is indistinguishable from a working agent unless someone
+// looks at the pane — which is how a mailbox ends up configured and inert, with
+// asks arriving into a prompt that will never answer them.
 //
 // Readiness classification makes that visible, and makes it impossible for an
 // automation to "handle" a security gate by sending Enter at it: a gate is a

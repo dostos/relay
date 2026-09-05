@@ -59,11 +59,12 @@ type ParentMessage struct {
 	CorrelationID   string `json:"correlation_id"`
 	ParentSessionID string `json:"parent_session_id"`
 	ChildSessionID  string `json:"child_session_id"`
-	// Failover attribution. Empty on the common path where the immediate
-	// parent received the escalation directly.
-	IntendedParentSessionID string   `json:"intended_parent_session_id,omitempty"`
-	SkippedSessionIDs       []string `json:"skipped_session_ids,omitempty"`
-	ResolvedBySessionID     string   `json:"resolved_by_session_id,omitempty"`
+	// ResolvedBySessionID records who answered. It is always the addressed
+	// mailbox now: the two fields beside it (intended parent, skipped
+	// sessions) were failover attribution and are gone with failover, since
+	// nothing could ever set them non-empty again. Old records on disk may
+	// still carry those keys; unmarshal ignores them.
+	ResolvedBySessionID string `json:"resolved_by_session_id,omitempty"`
 	// StallReportedAt records when this envelope's holder-manager was last told
 	// it was stuck, so a standing stall is not re-announced every tick.
 	StallAttemptedAt   *time.Time         `json:"stall_attempted_at,omitempty"`
@@ -225,13 +226,15 @@ type RegisterParentOpts struct {
 	Headless bool
 	// TTL bounds how long a headless root's heartbeat is trusted.
 	TTL time.Duration
-	// Under registers this manager as the CHILD of another manager instead of
-	// as a new root. A manager that is not a root is the whole "channel agent"
-	// shape: it supervises its own children while governance — holds,
-	// approvals, the last escalation stop — stays above it. Empty means "a
-	// root", which is why an authenticated non-human caller must always name
-	// it (authorizeOperation): creating a root is precisely the lineage escape
-	// confinement exists to prevent.
+	// Under records which mailbox launched this one. Empty means it has no
+	// launcher.
+	//
+	// This used to be a governance boundary: a caller that left it empty
+	// created a top-level root, and an authorization check forced non-human
+	// callers to name it, because escaping the lineage was the thing
+	// confinement existed to prevent. That check retired with the hierarchy,
+	// and so did the risk -- with no tree there is no privileged position to
+	// escape to, so an empty Under is now just a mailbox nobody launched.
 	Under string
 }
 
@@ -401,42 +404,6 @@ func (p *ParentService) BindLocal(ctx context.Context, parentID, surface string)
 		"session_id": sess.ID, "old_surface": oldSurface, "surface": surface,
 	})
 	return sess, nil
-}
-
-func (p *ParentService) reparentPaneBinding(childSessionID, parentSessionID string) error {
-	if p.Viz == nil || p.Reg == nil {
-		return nil
-	}
-	// A headless root has no surface to nest the child under. Re-presenting the
-	// child against it would either fail or, worse, project it under a surface
-	// that does not exist — the lineage edge is the whole point of the move, and
-	// it is already committed by the caller.
-	if parent, err := p.Reg.GetSession(parentSessionID); err == nil && IsHeadlessParent(parent) {
-		return nil
-	}
-	child, err := p.Reg.GetSession(childSessionID)
-	if err != nil {
-		return err
-	}
-	ref, err := PresentSession(context.Background(), p.Viz, child, ResumeLaunchCmd(child.Persist.Name), ports.Layout{Mode: "remote", SourceSessionID: parentSessionID})
-	if err != nil {
-		return err
-	}
-	child.VizSurfaceRef = ref
-	return p.Reg.PutSession(child)
-}
-
-func (p *ParentService) projectPane(item ports.Presentation) error {
-	if p.Viz == nil {
-		return nil
-	}
-	if sink, ok := p.Viz.(ports.ProjectionSink); ok {
-		_, err := sink.ApplyProjection(context.Background(), ports.ProjectionEvent{V: 1, Op: ports.ProjectionUpsert, Item: item})
-		return err
-	}
-	sess := &Session{ID: item.SessionID, HostID: item.Target, SourceSessionID: item.ParentSessionID, Persist: ports.PersistHandle{Name: item.TmuxName}}
-	_, err := PresentSession(context.Background(), p.Viz, sess, ResumeLaunchCmd(item.TmuxName), ports.Layout{Mode: "remote", SourceSessionID: item.ParentSessionID})
-	return err
 }
 
 func handoffTerminal(ho *Handoff) bool {
@@ -919,25 +886,10 @@ func (p *ParentService) deliverMessage(ctx context.Context, parent *Session, ho 
 	notice := ParentNotice{MessageID: msg.ID, Kind: msg.Kind, Child: childName, Text: msg.Text, Action: action}
 	var err error
 	claimed := false
-	// An apex used to be able to be its own handoff's destination, notified
-	// rather than typed into. Nothing is its own destination now.
-	rootToHuman := false
-	if rootToHuman {
-		if p.Notifier == nil {
-			return &parentDeliveryError{err: fmt.Errorf("no human notification path for apex %s", parent.ID)}
-		}
-		var writeErr error
-		claimed, writeErr = claimParentDelivery(msg, parent.ID)
-		if writeErr != nil {
-			err = fmt.Errorf("reserve apex notification: %w", writeErr)
-		} else if !claimed {
-			return nil
-		} else {
-			notifyCtx, cancel := context.WithTimeout(ctx, deliveryAttemptTimeout)
-			err = p.Notifier.NotifyParent(notifyCtx, parent.ID, notice)
-			cancel()
-		}
-	} else if IsHeadlessParent(parent) {
+	// An apex used to be its own handoff's destination, notified rather than
+	// typed into. Nothing is its own destination now, so that branch is gone
+	// rather than left standing behind a constant false.
+	if IsHeadlessParent(parent) {
 		// No pane to capture, no composer to type into: the durable inbox is
 		// the channel. deliverHeadless owns the reservation/finalization pair
 		// itself, so return straight through rather than falling into the
@@ -984,9 +936,6 @@ func (p *ParentService) deliverMessage(ctx context.Context, parent *Session, ho 
 			return &parentDeliveryError{err: err, unavailable: true}
 		}
 		return err
-	}
-	if rootToHuman {
-		return finalizeParentDelivery(msg, "human_notification_confirmed", "", true)
 	}
 	// Desktop presentation is supplementary. It can flash a bound surface, but
 	// it never owns or acknowledges the parent communication.
@@ -1295,12 +1244,6 @@ func decisionExcerpt(capture string) string {
 	return compactText(strings.Join(useful, " "))
 }
 
-// deliveryCandidates lists the sessions that may receive an escalation, in
-// lineage order: the immediate manager first, then its ancestors. Liveness is
-// the OUTCOME of attempting delivery rather than a separate presence oracle,
-// so the caller walks this list and stops at the first hop that succeeds. A
-// live manager is therefore never skipped — only ancestors that genuinely
-// cannot receive the envelope are passed over.
 // deliveryCandidates resolves the mailbox a handoff's messages belong to.
 //
 // This used to return a chain: the immediate parent, then every ancestor, so a
@@ -1370,7 +1313,7 @@ func (p *ParentService) routeChildEvent(ctx context.Context, ho *Handoff, ev coo
 	}
 	candidates := p.deliveryCandidates(ho)
 	if len(candidates) == 0 {
-		return nil, fmt.Errorf("handoff %s has no reachable parent lineage", ho.ID)
+		return nil, fmt.Errorf("handoff %s has no reachable mailbox", ho.ID)
 	}
 	parent := candidates[0]
 	correlationID := eventString(ev.Meta, "correlation_id", "request_id")
@@ -1444,9 +1387,6 @@ func (p *ParentService) routeChildEvent(ctx context.Context, ho *Handoff, ev coo
 	if handled, decided := p.applyPolicy(ctx, ho, ev, msg); decided {
 		return handled, nil
 	}
-	// Delivery walks UP to the nearest ancestor that can actually receive the
-	// envelope. A live manager is never skipped. Only a local root owns a
-	// human-facing cmux surface; every other ancestor is an agent manager.
 	return msg, p.deliverEscalation(ctx, candidates, ho, msg)
 }
 

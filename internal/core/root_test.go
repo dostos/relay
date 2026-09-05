@@ -57,7 +57,7 @@ func newRootTestService(t *testing.T) (*RootService, *Registry) {
 			}
 		}
 	}
-	return &RootService{Reg: reg}, reg
+	return &RootService{}, reg
 }
 
 func TestRulesPathIsProjectScopedAndRefusesTraversal(t *testing.T) {

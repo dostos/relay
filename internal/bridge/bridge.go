@@ -549,10 +549,12 @@ func validateArgv(argv []string) error {
 	if len(filtered) == 0 {
 		return fmt.Errorf("empty relay command")
 	}
-	// Command authority is evaluated once by Server.AuthorizeRequest after
-	// bridge identity authentication. This function is deliberately syntax
-	// only; duplicating semantic allowlists here caused authenticated apex and
-	// manager repair operations to be rejected before lineage policy ran.
+	// Syntax only, deliberately. AuthorizeRequest is the hook where command
+	// authority would be evaluated after identity authentication, but nothing
+	// wires it any more: the policy it called retired with the hierarchy, so
+	// this is the only check that actually runs. Keeping it syntax-only is
+	// still right -- duplicating semantic allowlists here used to reject
+	// authenticated repair operations before the policy ever saw them.
 	return nil
 }
 

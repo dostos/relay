@@ -163,7 +163,10 @@ func (s *SupervisorService) Reconcile(ctx context.Context) (int, error) {
 			// A headless root has no pane and no agent process of relay's
 			// making, so there are no sensors to reinstall into it — the same
 			// reason a cmux pane is skipped here.
-			if sess == nil || sess.Persist.Kind == LocalPersistKind || IsHeadlessParent(sess) || (sess.Labels["agent"] == "" && sess.Labels["apex"] != "true") {
+			// The apex clause that stood beside the agent check is gone with
+			// the apex: nothing writes that label any more, so it was a
+			// disjunct that could only ever be true.
+			if sess == nil || sess.Persist.Kind == LocalPersistKind || IsHeadlessParent(sess) || sess.Labels["agent"] == "" {
 				continue
 			}
 			s.mu.Lock()
