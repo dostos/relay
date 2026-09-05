@@ -294,3 +294,39 @@ func TestExistsDoesNotTreatTransportFailureAsMissing(t *testing.T) {
 		t.Fatal("transport failure was reported as an absent session")
 	}
 }
+
+// A surface that comes up on a fresh shell must say so. The old command was
+// `tmux new-session -A`, which attaches or creates and reports neither, so a
+// host that had lost the session produced a healthy-looking prompt with the
+// work silently gone. Verified live on hamburg 2026-09-05.
+func TestAttachCommandDistinguishesAttachFromCreate(t *testing.T) {
+	got := (&Persist{}).AttachCommand(ports.PersistHandle{Name: "work"}, "")
+
+	if strings.Contains(got, "new-session -A") {
+		t.Errorf("-A attaches or creates and reports neither:\n%s", got)
+	}
+	// The existing-session path must be a plain attach, with nothing printed
+	// into a session that is carrying real work.
+	if !strings.Contains(got, "has-session -t 'work'") {
+		t.Errorf("no existence check, so the two paths cannot differ:\n%s", got)
+	}
+	if !strings.Contains(got, "exec tmux attach -t 'work'") {
+		t.Errorf("attach path missing:\n%s", got)
+	}
+	attachIdx := strings.Index(got, "exec tmux attach")
+	noticeIdx := strings.Index(got, "relay: session")
+	if noticeIdx < 0 {
+		t.Fatalf("create path prints no notice:\n%s", got)
+	}
+	if noticeIdx < attachIdx {
+		t.Errorf("the notice must belong to the create path, not the attach path:\n%s", got)
+	}
+	// The notice has to survive: printing before `exec tmux new-session` is
+	// erased by the repaint, so it is the new session's own first line.
+	if !strings.Contains(got, "new-session -s 'work' -- bash -lc") {
+		t.Errorf("notice is not carried inside the new session:\n%s", got)
+	}
+	if !strings.Contains(got, "exec bash -l") {
+		t.Errorf("create path must still hand over a login shell:\n%s", got)
+	}
+}

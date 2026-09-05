@@ -269,9 +269,36 @@ tmux send-keys -t %s C-l
 	return err
 }
 
+// AttachCommand attaches a local surface to the remote session, and says which
+// of the two things it did.
+//
+// This used to be `tmux new-session -A`, whose -A means "attach if it exists,
+// else create". That is the right behaviour and the wrong report: when the host
+// had rebooted, or the session had been killed, the surface came up on a fresh
+// shell showing a healthy prompt with no indication that the work it was
+// attached to is gone. Verified live on hamburg 2026-09-05 -- killing the
+// remote session and reattaching produced a clean prompt and a brand new
+// session of the same name, silently.
+//
+// A surface that looks alive while the agent behind it is gone is the exact
+// failure this control plane is worst at catching, so the create path
+// announces itself.
 func (p *Persist) AttachCommand(h ports.PersistHandle, cwd string) string {
 	_ = cwd
-	return fmt.Sprintf("tmux new-session -A -s %s", shellquote.Quote(h.Name))
+	q := shellquote.Quote(h.Name)
+	// The notice is written INSIDE the new session, as its first line, not
+	// before it. Printing beforehand does not work: `exec tmux new-session`
+	// repaints the screen and erases it. An earlier version paused two seconds
+	// so the line could be read, which is still a warning that disappears --
+	// the same "looks healthy" failure a moment later. As the session's first
+	// scrollback line it stays until the operator scrolls past it.
+	banner := fmt.Sprintf(
+		`printf '\033[33mrelay: session %%s was not running on %%s; its previous work is gone. This is a NEW session.\033[0m\n' %s $(hostname -s); exec bash -l`,
+		q)
+	return fmt.Sprintf(
+		"if tmux has-session -t %s 2>/dev/null; then exec tmux attach -t %s; "+
+			"else exec tmux new-session -s %s -- bash -lc %s; fi",
+		q, q, q, shellquote.Quote(banner))
 }
 
 func (p *Persist) DeadStatus(ctx context.Context, t ports.Transport, h ports.PersistHandle) (bool, int, error) {

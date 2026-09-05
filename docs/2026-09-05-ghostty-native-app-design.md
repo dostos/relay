@@ -102,6 +102,41 @@ writes a compiler cache to `~/.cache/zig` regardless of where the build runs.
 rule this spike produces: read `minimum_zig_version` from the tree you actually
 have, never from the docs page, which describes the current release.
 
+## Stage 1 primitive: validated live (2026-09-05)
+
+The design rests on one claim: a surface is a local process running
+`relay resume --session N --host H`, and attach/detach is attaching a local
+surface to a remote tmux session rather than moving anything. Tested against
+hamburg with a marker process ticking in the remote session:
+
+| Step | Result |
+|---|---|
+| Attach from a local pty | surface shows the live remote output |
+| Detach (kill the local surface) | remote session and its process keep running |
+| Reattach from a fresh surface | same session, full scrollback, continuity |
+
+So the app needs no knowledge of SSH, tmux or docker, exactly as designed.
+
+**The host-reboot trap this document predicted is real, and was worse than
+predicted.** With the remote session destroyed, reattaching did not fail. It
+silently created a new empty session of the same name and presented a clean,
+healthy prompt. Nothing said the previous work was gone. A tab in the app would
+have looked perfectly alive.
+
+The cause was `tmux new-session -A`, whose `-A` means "attach if it exists,
+else create" -- correct behaviour, and a report of neither. Fixed in relay
+rather than in the app, because that is where the knowledge lives: the create
+path now announces itself.
+
+Two things that fix got wrong first, both worth remembering for anything that
+prints around a terminal takeover:
+
+1. Printing the notice before `exec tmux new-session` is useless. The new
+   session repaints the screen and erases it in the same instant.
+2. Pausing so the line can be read is still a warning that vanishes -- the same
+   "looks healthy" state one moment later. The notice is now the new session's
+   own first scrollback line, so it stays until the operator scrolls past it.
+
 ## Correction: build on Ghostty itself
 
 This document was first written assuming the choice was *embed libghostty in a
