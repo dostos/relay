@@ -121,3 +121,35 @@ files this plan has not yet audited, so it is deliberately a fresh unit of work:
 
 Nothing live depends on it: `relay root status` reports `no apex designated` on
 this control plane, so the retirement is not a production change.
+
+## Two dependencies this plan missed, found by a survey of the kept surface
+
+Both verified in code, neither addressed yet.
+
+**`board.go` builds a tree.** `resolveBoard` walks `sess.SourceSessionID` to a
+manager (board.go:71-74) and `QuerySubtree` assembles a parent-to-children map
+from the same field (board.go:168-169). The whole verb is named for a subtree.
+This was outside the four passes and needs its own decision: a board scoped to
+one mailbox, or a board scoped to a channel.
+
+**`applyAgentChildWorkspaceTrust` is a second permission decision**, living in
+the file this plan calls the messaging engine (parent.go:1519-1551). It
+auto-approves a child agent's folder-trust gate when the launch edge and the
+workspace both match. It is deliberately **kept**: it grants rather than
+refuses, and it keys off the launch edge (`SourceSessionID`), which is exactly
+what flat delivery is built on, not off the ancestor tree. Its one real tie to
+the retiring machinery is an `ApexLabel` read, which goes in pass 4.
+
+## A note on what the retirement cost
+
+Flattening `deliveryCandidates` made `len(candidates) == 1` permanently true,
+which silently killed the second delivery attempt after a transient transport
+failure -- one arm of an early return that no longer meant what it said. No
+test failed, because that property had only ever been covered through the
+failover tree and its test retired with the tree. Fixed in 42926b9 with a test
+that fails on the exact regression.
+
+The lesson generalizes to pass 4: when a guard is written in terms of a
+structure being removed, deleting the structure can quietly change what the
+guard does. Re-read every condition that mentions candidates, ancestors,
+children or labels before assuming it is inert.
