@@ -833,7 +833,8 @@ func sameGateDecision(a, b *SecurityGate) bool {
 // received it. Nothing escalates now, so the mailbox holds its own pending ask
 // and the one-unresolved-ask-per-handoff invariant needs no chain scan.
 func (p *ParentService) pendingAttention(parentID, handoffID string) (*ParentMessage, error) {
-	for _, holder := range []string{parentID} {
+	{
+		holder := parentID
 		messages, err := p.ListMessages(holder, true)
 		if err != nil {
 			return nil, err
@@ -874,7 +875,8 @@ func (p *ParentService) createParentMessage(msg *ParentMessage) (*ParentMessage,
 		}
 	}
 	if attentionMessage(msg.Kind) {
-		for _, holder := range []string{msg.ParentSessionID} {
+		{
+			holder := msg.ParentSessionID
 			entries, readErr := os.ReadDir(parentMessageDir(holder))
 			if readErr != nil && !os.IsNotExist(readErr) {
 				return nil, false, readErr
@@ -1315,37 +1317,31 @@ func (p *ParentService) deliveryCandidates(ho *Handoff) []*Session {
 	return []*Session{immediate}
 }
 
-// deliverEscalation delivers an envelope, failing over to the nearest ancestor
-// that can actually receive it when the intended manager cannot.
+// deliverEscalation delivers an envelope to the mailbox it is addressed to,
+// retrying once when the first attempt hits a transport failure.
 //
-// Three rules keep the management tree intact:
-//   - Only attention envelopes fail over. A routine result/exit receipt whose
-//     manager is asleep must never walk up and interrupt a human.
-//   - The intended manager gets a second attempt before anyone is skipped, so
-//     a transient hiccup cannot bypass a manager that is actually live.
-//   - The envelope changes hands only after an ancestor has received it.
+// It used to fail over to the nearest ancestor that could receive it. There is
+// no chain to fail over to now, so an unreachable manager leaves the envelope
+// pending where it was addressed and DeliverPending retries it there on
+// reconnect, rather than parking it somewhere nobody named.
+//
+// The one rule that survived the tree is the second attempt: a transient
+// hiccup must not be mistaken for a manager that cannot receive at all. It is
+// spent only on attention envelopes whose delivery is not already in doubt --
+// re-sending a possibly-delivered ask would show a human the same question
+// twice.
 func (p *ParentService) deliverEscalation(ctx context.Context, candidates []*Session, ho *Handoff, msg *ParentMessage) error {
 	immediate := candidates[0]
 	err := p.deliverMessage(ctx, immediate, ho, msg)
-	if err == nil || !attentionMessage(msg.Kind) || len(candidates) == 1 {
-		// With no ancestor to fail over to there is nothing to protect the
-		// manager from, so the envelope simply stays pending for DeliverPending.
+	if err == nil || !attentionMessage(msg.Kind) || deliveryInDoubt(msg) {
 		return err
 	}
-	if deliveryInDoubt(msg) {
+	if !deliveryUnavailable(err) {
 		return err
 	}
-	// Give the intended manager a second chance before anyone is skipped, so a
-	// transient hiccup cannot bypass a manager that is actually live.
 	if retryErr := p.deliverMessage(ctx, immediate, ho, msg); retryErr == nil {
 		return nil
-	} else if !deliveryUnavailable(retryErr) {
-		return retryErr
 	}
-	// There is no chain to fail over to any more: one handoff addresses one
-	// mailbox. An unreachable manager leaves the envelope pending with the
-	// manager it was addressed to, so DeliverPending retries it there on
-	// reconnect rather than parking it somewhere nobody named.
 	return err
 }
 

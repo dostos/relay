@@ -1727,3 +1727,57 @@ func TestIdleOnASettledPaneDoesNotInventAnAsk(t *testing.T) {
 	}
 	_ = manager
 }
+
+// A transient transport failure must cost the addressed mailbox a second
+// attempt, not a single try.
+//
+// This property used to be covered only through the failover tree, phrased as
+// "a transient hiccup must not bypass a live manager". When the tree was
+// retired, the guard that short-circuited on a single candidate made the retry
+// unreachable and nothing failed: the property had no test of its own. It does
+// now, stated in flat terms.
+func TestTransientFailureCostsTheMailboxASecondAttempt(t *testing.T) {
+	service, _, reg := newParentTestService(t)
+	failing := &failingPersistence{}
+	service.Sessions.Persist = failing
+	now := time.Now().UTC()
+	manager := &Session{
+		ID: "sess-manager", HostID: "c1",
+		Persist: ports.PersistHandle{Kind: "tmux", Name: "manager"}, CreatedAt: now,
+	}
+	child := &Session{
+		ID: "sess-child", HostID: "c3",
+		Persist:         ports.PersistHandle{Kind: "tmux", Name: "worker"},
+		SourceSessionID: manager.ID, CreatedAt: now,
+	}
+	for _, sess := range []*Session{manager, child} {
+		if err := reg.PutSession(sess); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ho := &Handoff{
+		ID: "ho-worker", SessionID: child.ID, HostID: child.HostID,
+		Kind: KindAgent, Status: StatusRunning, SourceSessionID: manager.ID, CreatedAt: now,
+	}
+	msg := &ParentMessage{
+		ID: "pm-transient", ParentSessionID: manager.ID, ChildSessionID: child.ID,
+		HandoffID: ho.ID, Kind: "ask", State: ParentMessagePending, CreatedAt: now,
+	}
+	// Delivery reserves its side effect against the durable envelope, so the
+	// message has to exist on disk before it can be attempted at all.
+	if err := writeParentMessage(msg, true); err != nil {
+		t.Fatal(err)
+	}
+	err := service.deliverEscalation(context.Background(), []*Session{manager}, ho, msg)
+	if err == nil {
+		t.Fatal("an unreachable mailbox must surface the delivery failure")
+	}
+	if len(failing.attempts) != 2 {
+		t.Fatalf("want two attempts on the addressed mailbox, got %d: %v", len(failing.attempts), failing.attempts)
+	}
+	for _, name := range failing.attempts {
+		if name != "manager" {
+			t.Fatalf("retry must stay on the addressed mailbox, got %q", name)
+		}
+	}
+}
