@@ -38,6 +38,7 @@ type App struct {
 	Auth        *core.AuthService
 	Bootstrap   *core.BootstrapService
 	Discover    *core.DiscoverService
+	Containers  *core.ContainerService
 	Ensure      *core.EnsureService
 	Reg         *core.Registry
 	Coord       ports.Coord
@@ -113,6 +114,10 @@ func New() *App {
 			Profiles:     profiles,
 		},
 		Ensure: &core.EnsureService{
+			NewTransport: tf,
+			Profiles:     profiles,
+		},
+		Containers: &core.ContainerService{
 			NewTransport: tf,
 			Profiles:     profiles,
 		},
@@ -440,6 +445,8 @@ func (a *App) Run(args []string) int {
 		return 0
 	case "host":
 		return a.cmdHost(ctx, filtered[1:])
+	case "container":
+		return a.cmdContainer(ctx, filtered[1:])
 	case "auth":
 		return a.cmdAuth(ctx, filtered[1:])
 	case "targets":
@@ -559,6 +566,17 @@ New machine (ssh config → discover → init):
   relay host init -H HOST [--apply] [--force]
                                       Install relay + compatibility shim; write proposal with --apply
   relay host ensure -H HOST [--apply] Deps + propose/merge ccs:*/codex:* agents + auth help
+
+Dev containers (declared under containers: in the remote host.yaml):
+  relay container open -H HOST --container NAME [--name TMUX] [--keep]
+                                      Up + tmux session inside it + cmux pane, in one command.
+                                      Ephemeral by default: removed when the session is destroyed.
+  relay container up -H HOST --container NAME [--recreate] [--reprovision]
+                                      devcontainer up + relay named volumes; provisions the toolkit
+  relay container status|down -H HOST --container NAME
+  relay session create -H HOST --container NAME [--ephemeral]
+  relay agent start HOST AGENT --container NAME -- GOAL
+                                      Hand a goal to an agent running inside it
 
 Host profiles (authoritative on each remote ~/.config/relay/host.yaml):
   relay host show -H HOST
@@ -1138,6 +1156,15 @@ func (a *App) cmdNamed(ctx context.Context, host, name string) int {
 			}
 		}
 	}
+	return a.openNamedAndPresent(ctx, opts, sourceID, previousIDs)
+}
+
+// openNamedAndPresent opens (or adopts) the named session and puts it in front
+// of the user through cmux, exactly as `relay HOST NAME` does. Shared so a
+// container-backed open lands in the same pane, with the same resume and chrome
+// behaviour, instead of a second near-copy of this flow.
+func (a *App) openNamedAndPresent(ctx context.Context, opts core.CreateOpts, sourceID string, previousIDs []string) int {
+	host := opts.HostID
 	sess, created, err := a.Sessions.OpenNamed(ctx, opts)
 	if err != nil {
 		if errors.Is(err, core.ErrMissingProfile) {
@@ -1290,6 +1317,13 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 				if i < len(rest) {
 					opts.RemoteCWD = rest[i]
 				}
+			case "--container":
+				i++
+				if i < len(rest) {
+					opts.Container = rest[i]
+				}
+			case "--ephemeral":
+				opts.ContainerEphemeral = true
 			case "--name", "-s":
 				i++
 				if i < len(rest) {
@@ -4412,4 +4446,142 @@ func (a *App) applySessionChrome(ctx context.Context, sess *core.Session) error 
 		return err
 	}
 	return tmux.ApplyChrome(ctx, t, sess.Persist)
+}
+
+// cmdContainer manages relay-declared containers on a host: bringing a Dev
+// Containers workspace up with relay's named volumes injected, tearing it
+// down, and reporting whether it is running.
+func (a *App) cmdContainer(ctx context.Context, args []string) int {
+	usage := "usage: relay container up|open|down|status -H HOST --container NAME [--name TMUX] [--recreate] [--reprovision] [--keep]"
+	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
+		fmt.Println(usage)
+		return 0
+	}
+	sub := args[0]
+	host, name, tmuxName := "", "", ""
+	recreate, reprovision, keep := false, false, false
+	rest := args[1:]
+	for i := 0; i < len(rest); i++ {
+		switch rest[i] {
+		case "-H", "--host":
+			i++
+			if i < len(rest) {
+				host = rest[i]
+			}
+		case "--container", "-c":
+			i++
+			if i < len(rest) {
+				name = rest[i]
+			}
+		case "--name", "-s":
+			i++
+			if i < len(rest) {
+				tmuxName = rest[i]
+			}
+		case "--recreate":
+			recreate = true
+		case "--reprovision":
+			reprovision = true
+		case "--keep":
+			keep = true
+		default:
+			return a.fail(rejectUnknownFlag(rest[i]))
+		}
+	}
+	if host == "" {
+		return a.fail(fmt.Errorf("-H HOST required"))
+	}
+	if name == "" {
+		return a.fail(fmt.Errorf("--container NAME required"))
+	}
+	if a.Containers == nil {
+		return a.fail(fmt.Errorf("container service unavailable"))
+	}
+	var (
+		st  *core.ContainerStatus
+		err error
+	)
+	switch sub {
+	case "open":
+		return a.cmdContainerOpen(ctx, host, name, tmuxName, recreate, reprovision, keep)
+	case "up":
+		st, err = a.Containers.Up(ctx, host, name, recreate, reprovision)
+	case "down":
+		st, err = a.Containers.Down(ctx, host, name)
+	case "status":
+		st, err = a.Containers.Status(ctx, host, name)
+	default:
+		return a.fail(fmt.Errorf("unknown container subcommand %q\n%s", sub, usage))
+	}
+	if err != nil {
+		return a.fail(err)
+	}
+	if a.JSON {
+		return a.errOut(a.out(st))
+	}
+	state := "stopped"
+	if st.Running {
+		state = "running"
+	}
+	fmt.Printf("%s on %s: %s\n", st.Name, st.HostID, state)
+	if st.ContainerID != "" {
+		fmt.Printf("  container  %s (%s)\n", st.ContainerID, st.IDLabel)
+	}
+	if st.Toolkit != "" {
+		fmt.Printf("  toolkit    volume %s\n", st.Toolkit)
+	}
+	if st.Home != "" {
+		fmt.Printf("  home       volume %s\n", st.Home)
+	}
+	if st.Detail != "" {
+		fmt.Printf("  detail     %s\n", st.Detail)
+	}
+	return 0
+}
+
+// cmdContainerOpen is the single verb this workflow is meant to be driven by:
+// bring the devcontainer up on the host, open a tmux session whose shell runs
+// inside it, and put that pane in front of the user through cmux. The container
+// is ephemeral by default — torn down when the session is destroyed — because a
+// container nobody remembers starting is the one that is still running a week
+// later. --keep opts out for a long-lived runner.
+func (a *App) cmdContainerOpen(ctx context.Context, host, name, tmuxName string, recreate, reprovision, keep bool) int {
+	if a.Containers == nil {
+		return a.fail(fmt.Errorf("container service unavailable"))
+	}
+	st, err := a.Containers.Up(ctx, host, name, recreate, reprovision)
+	if err != nil {
+		return a.fail(err)
+	}
+	if !a.JSON {
+		ui.Note(fmt.Sprintf("%s up on %s (%s)", name, host, st.ContainerID))
+	}
+	if tmuxName == "" {
+		tmuxName = name
+	}
+	sourceID, sourceHost, sourcePersist, sourceRepo := sourceFromEnvironment(a.Reg)
+	opts := core.CreateOpts{
+		HostID:             host,
+		Name:               tmuxName,
+		Labels:             map[string]string{"role": "interactive", "agent": "human", "container": name},
+		SourceSessionID:    sourceID,
+		SourceHostID:       sourceHost,
+		SourcePersistName:  sourcePersist,
+		Container:          name,
+		ContainerEphemeral: !keep,
+	}
+	if sourceRepo != "" {
+		opts.RepoRef = sourceRepo
+	} else if root, err := findGitRoot(""); err == nil {
+		opts.RepoRef = root
+	}
+	var previousIDs []string
+	if sessions, listErr := a.Reg.ListSessions(); listErr == nil {
+		for _, candidate := range sessions {
+			if candidate.HostID == host && candidate.Persist.Name == tmuxName {
+				previousIDs = append(previousIDs, candidate.ID)
+			}
+		}
+	}
+	return a.openNamedAndPresent(ctx, opts, sourceID, previousIDs)
 }

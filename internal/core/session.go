@@ -14,6 +14,7 @@ import (
 
 	"github.com/dostos/relay/internal/ports"
 	"github.com/dostos/relay/internal/shellquote"
+	"github.com/dostos/relay/internal/ui"
 )
 
 // TransportFactory creates a Transport for a host id.
@@ -78,6 +79,12 @@ type CreateOpts struct {
 	SourceHostID       string
 	SourcePersistName  string
 	CreatedByHandoffID string
+	// Container binds this session to a declared `containers:` entry: the pane's
+	// shell runs via `docker exec` while tmux stays on the host, so a container
+	// recreate leaves the pane intact.
+	Container string
+	// ContainerEphemeral ties the container's lifetime to this session.
+	ContainerEphemeral bool
 }
 
 // OpenNamed returns the existing host/name session or creates it. A remote
@@ -134,10 +141,19 @@ func (s *SessionService) Create(ctx context.Context, opts CreateOpts) (*Session,
 	}
 	cwd := opts.RemoteCWD
 	if cwd == "" {
-		if opts.RepoRef == "" {
+		if opts.RepoRef == "" && opts.Container == "" {
 			return nil, fmt.Errorf("repo_ref or remote_cwd required")
 		}
-		cwd, err = profile.ResolveRemoteCWD(opts.RepoRef)
+		if opts.RepoRef != "" {
+			cwd, err = profile.ResolveRemoteCWD(opts.RepoRef)
+		}
+		if opts.Container != "" && (err != nil || cwd == "") {
+			// For a container session this is only where the host tmux pane
+			// sits; the working directory that matters is resolved inside the
+			// container from the spec's own path_map. An unmapped repo must not
+			// block the session.
+			cwd, err = "~", nil
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -169,6 +185,24 @@ func (s *SessionService) Create(ctx context.Context, opts CreateOpts) (*Session,
 	if cmd == "" {
 		cmd = "bash -l"
 	}
+	var cref *ContainerRef
+	if opts.Container != "" {
+		ref, cerr := resolveSessionContainer(ctx, t, profile, opts)
+		if cerr != nil {
+			forgetBridgeToken(sessionID)
+			return nil, cerr
+		}
+		cref = ref
+		// Wrapped before the relay identity wrapper, not after: the tmux pane
+		// and its relay bridge stay on the host, and only the pane's inner
+		// shell crosses into the container.
+		wrapped, werr := ContainerExec(ref.Runtime, *ref, cmd, true)
+		if werr != nil {
+			forgetBridgeToken(sessionID)
+			return nil, werr
+		}
+		cmd = wrapped
+	}
 	cmd = relaySessionCommand(cmd, sessionID, opts.HostID, name, bridgeToken)
 	h, err := s.Persist.Create(ctx, t, name, cwd, cmd)
 	if err != nil {
@@ -190,6 +224,7 @@ func (s *SessionService) Create(ctx context.Context, opts CreateOpts) (*Session,
 		SourceHostID:       opts.SourceHostID,
 		SourcePersistName:  opts.SourcePersistName,
 		CreatedByHandoffID: opts.CreatedByHandoffID,
+		Container:          cref,
 	}
 	if err := provisionBridgeIdentity(ctx, t, sess, bridgeToken); err != nil {
 		_ = s.Persist.Destroy(ctx, t, h)
@@ -643,6 +678,7 @@ func (s *SessionService) Destroy(ctx context.Context, id string, keepRemote bool
 		if err != nil {
 			return err
 		}
+		s.reapEphemeralContainer(ctx, t, sess)
 		// Intentional teardown — cmux must not treat this as a reconnectable drop.
 		return nil
 	} else {
@@ -883,4 +919,63 @@ func (s *SessionService) tmuxSet(ctx context.Context, hostID string) (map[string
 	defer cancel()
 	tmux, _, ok := probeHostState(cctx, t)
 	return tmux, ok
+}
+
+// resolveSessionContainer binds a session to a declared container. For a
+// relay-managed devcontainer the container id is resolved from the id label at
+// bind time, never from a declared name: a recreate changes the id, and a
+// stale name would send the pane into a container that no longer exists.
+func resolveSessionContainer(ctx context.Context, t ports.Transport, profile *HostProfile, opts CreateOpts) (*ContainerRef, error) {
+	spec, err := profile.ResolveContainer(opts.Container)
+	if err != nil {
+		return nil, err
+	}
+	id := spec.Container
+	if spec.Devcontainer != nil {
+		out, _, rerr := t.Run(ctx, "", DevcontainerResolveCommand(spec))
+		if rerr != nil {
+			return nil, fmt.Errorf("resolve devcontainer %s: %w", spec.Name, rerr)
+		}
+		id = firstLine(out)
+		if id == "" {
+			return nil, fmt.Errorf("no running container carries label %s on %s — run: relay container up -H %s --container %s",
+				spec.ResolvedIDLabel(), opts.HostID, opts.HostID, spec.Name)
+		}
+	}
+	if id == "" {
+		return nil, fmt.Errorf("container %q declares neither container: nor devcontainer:", spec.Name)
+	}
+	cwd := spec.ResolveCWD(opts.RepoRef)
+	ref := spec.RefFor(id, cwd)
+	if ref.User == "" {
+		ref.User = ResolveContainerUser(ctx, t, spec, id)
+	}
+	ref.SpecName = spec.Name
+	ref.Ephemeral = opts.ContainerEphemeral
+	return &ref, nil
+}
+
+// reapEphemeralContainer removes a container relay brought up for this session.
+// Best-effort and never fatal: the session's remote tmux is already gone by the
+// time this runs, so failing here must not turn a completed teardown into an
+// error. The named volumes are deliberately left behind — the toolkit and the
+// agent's $HOME are the state meant to outlive any one container.
+func (s *SessionService) reapEphemeralContainer(ctx context.Context, t ports.Transport, sess *Session) {
+	if sess == nil || sess.Container == nil || !sess.Container.Ephemeral {
+		return
+	}
+	if sess.Container.SpecName == "" {
+		return
+	}
+	profile, err := s.Profiles.Get(ctx, sess.HostID, false)
+	if err != nil {
+		return
+	}
+	spec, err := profile.ResolveContainer(sess.Container.SpecName)
+	if err != nil {
+		return
+	}
+	if _, _, err := t.Run(ctx, "", DevcontainerDownCommand(spec)); err != nil {
+		ui.Warn(fmt.Sprintf("ephemeral container %s left running on %s: %v", spec.Name, sess.HostID, err))
+	}
 }

@@ -14,6 +14,18 @@ type ContainerRef struct {
 	CWD     string `json:"cwd,omitempty"`  // working dir inside the container
 	User    string `json:"user,omitempty"` // exec uid[:gid]
 	Home    string `json:"home,omitempty"` // container $HOME (for cred resolution)
+	// PathPrepend is prepended to PATH inside the container. It is how agent
+	// CLIs installed into a toolkit named volume become resolvable without
+	// changing the image.
+	PathPrepend string `json:"path_prepend,omitempty"`
+	// SpecName is the host.yaml `containers:` handle this ref resolved from,
+	// so teardown can find the spec again without re-deriving it.
+	SpecName string `json:"spec_name,omitempty"`
+	// Ephemeral marks a container whose lifetime is this session's: relay
+	// brought it up, and relay removes it when the session is torn down. The
+	// named volumes are never removed with it — the toolkit and the agent's
+	// $HOME are exactly the state meant to outlive the container.
+	Ephemeral bool `json:"ephemeral,omitempty"`
 }
 
 // ContainerExec builds a host-side shell command that runs `inner` inside the
@@ -54,6 +66,17 @@ func ContainerExec(runtime string, ref ContainerRef, inner string, tty bool) (st
 	} else if tty {
 		script = "exec " + inner
 	}
+	if ref.PathPrepend != "" {
+		// Prefixed onto the composed script, never onto `inner`: with a tty the
+		// inner command is the argument of `exec`, and `exec export PATH=...`
+		// is not a command. Set in-shell rather than via -e so the image's own
+		// login-shell PATH is still built first and merely prefixed.
+		p, err := shellquote.PathExpr(ref.PathPrepend)
+		if err != nil {
+			return "", err
+		}
+		script = fmt.Sprintf("export PATH=%s:$PATH; %s", p, script)
+	}
 	args = append(args, shell, shellquote.Quote(script))
 	return strings.Join(args, " "), nil
 }
@@ -71,6 +94,38 @@ type ContainerSpec struct {
 	PathMap    []PathMapEntry `yaml:"path_map,omitempty" json:"path_map,omitempty"`
 	Expose     []string       `yaml:"expose,omitempty" json:"expose,omitempty"`
 	Env        []string       `yaml:"env,omitempty" json:"env,omitempty"`
+
+	// Devcontainer makes this a relay-managed Dev Containers workspace,
+	// brought up by the host's `devcontainer` CLI against the repo's own
+	// .devcontainer/devcontainer.json. When set, Container is resolved at
+	// `up` time from the id label rather than declared.
+	Devcontainer *DevcontainerSpec `yaml:"devcontainer,omitempty" json:"devcontainer,omitempty"`
+	// Toolkit is a named volume carrying agent CLI installs.
+	Toolkit *ToolkitSpec `yaml:"toolkit,omitempty" json:"toolkit,omitempty"`
+	// Home is a named volume that becomes $HOME for in-container agent execs,
+	// so agent credentials and config survive container recreation.
+	Home *HomeSpec `yaml:"home,omitempty" json:"home,omitempty"`
+	// Volumes are extra named volume mounts, each "NAME:/container/path".
+	Volumes []string `yaml:"volumes,omitempty" json:"volumes,omitempty"`
+}
+
+// RefFor builds the exec binding for a resolved container id, carrying the
+// toolkit PATH entry and the volume-backed $HOME so every downstream exec sees
+// the same agent installs and the same credentials.
+func (c *ContainerSpec) RefFor(containerID, cwd string) ContainerRef {
+	ref := ContainerRef{
+		Runtime: c.RuntimeVerb(),
+		Ref:     containerID,
+		CWD:     cwd,
+		User:    c.User,
+	}
+	if c.Home != nil && c.Home.Target != "" {
+		ref.Home = c.Home.Target
+	}
+	if bin := c.Toolkit.ResolvedBinDir(); bin != "" {
+		ref.PathPrepend = bin
+	}
+	return ref
 }
 
 // RuntimeVerb is the container CLI to invoke (default docker).

@@ -123,12 +123,42 @@ func (h *HandoffService) Launch(ctx context.Context, opts HandoffOpts) (*Binding
 		if cwd == "" {
 			cwd = cspec.ResolveCWD(opts.RepoRef)
 		}
-		cref = &ContainerRef{
-			Runtime: cspec.RuntimeVerb(),
-			Ref:     cspec.Container,
-			CWD:     cwd,
-			User:    cspec.User,
+		ref := cspec.Container
+		if cspec.Devcontainer != nil {
+			// A relay-managed devcontainer has no declared container name: the
+			// id is whatever `relay container up` created, found by id label.
+			// Resolving here (not at declare time) is what makes a handoff
+			// survive a container recreate without editing host.yaml.
+			t, terr := h.NewTransport(opts.HostID)
+			if terr != nil {
+				return fail("container", nil, terr)
+			}
+			out, _, rerr := t.Run(ctx, "", DevcontainerResolveCommand(cspec))
+			if rerr != nil {
+				return fail("container", nil, fmt.Errorf("resolve devcontainer %s: %w", cspec.Name, rerr))
+			}
+			ref = firstLine(out)
+			if ref == "" {
+				return fail("container", nil, fmt.Errorf("no running container carries label %s on %s — run: relay container up -H %s --container %s",
+					cspec.ResolvedIDLabel(), opts.HostID, opts.HostID, cspec.Name))
+			}
 		}
+		if ref == "" {
+			return fail("container", nil, fmt.Errorf("container %q declares neither `container:` nor `devcontainer:`", cspec.Name))
+		}
+		r := cspec.RefFor(ref, cwd)
+		if r.User == "" {
+			// A devcontainer's Config.User is root; remoteUser lives in the
+			// CLI's metadata label. Without this every agent exec runs as root,
+			// which agents refuse and which would write root-owned files into
+			// the relay volumes.
+			t, terr := h.NewTransport(opts.HostID)
+			if terr != nil {
+				return fail("container", nil, terr)
+			}
+			r.User = ResolveContainerUser(ctx, t, cspec, ref)
+		}
+		cref = &r
 	}
 	silence := opts.Silence
 	if silence <= 0 {
