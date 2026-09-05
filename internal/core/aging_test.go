@@ -72,7 +72,7 @@ func TestStaleEscalationStaysWithItsHolder(t *testing.T) {
 
 // The holder's own manager is told — a fact about its immediate child, which is
 // within its remit — so a stall is visible without anyone being bypassed.
-func TestStaleEscalationNotifiesTheHoldersManager(t *testing.T) {
+func TestStaleEscalationNotifiesTheHuman(t *testing.T) {
 	service, notifier, reg := newParentTestService(t)
 	_, manager, _, ho := failoverTree(t, reg)
 	if err := reg.PutHandoff(ho); err != nil {
@@ -88,10 +88,10 @@ func TestStaleEscalationNotifiesTheHoldersManager(t *testing.T) {
 		t.Fatalf("want one report, got %d", n)
 	}
 	if len(notifier.notices) != 1 {
-		t.Fatalf("the holder's manager must be told, got %d notices", len(notifier.notices))
+		t.Fatalf("the human must be told, got %d notices", len(notifier.notices))
 	}
 	if notifier.notices[0].Child != manager.ID {
-		t.Fatalf("the report must name the manager's own child, got %s", notifier.notices[0].Child)
+		t.Fatalf("the report must name the stalled mailbox, got %s", notifier.notices[0].Child)
 	}
 }
 

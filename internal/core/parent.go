@@ -1069,16 +1069,12 @@ func sameGateDecision(a, b *SecurityGate) bool {
 }
 
 // pendingAttention finds an existing unresolved ask for this handoff. It scans
-// the given parent AND its ancestors, because an escalation raised while this
-// parent was disconnected is held by whichever ancestor received it. Without
-// the chain scan a reconnecting parent would raise a second ask for one
-// question, breaking the one-unresolved-ask-per-handoff invariant.
+// the addressed mailbox. It used to scan ancestors too, because an escalation
+// raised while a parent was disconnected was held by whichever ancestor
+// received it. Nothing escalates now, so the mailbox holds its own pending ask
+// and the one-unresolved-ask-per-handoff invariant needs no chain scan.
 func (p *ParentService) pendingAttention(parentID, handoffID string) (*ParentMessage, error) {
-	holders := []string{parentID}
-	for _, ancestor := range AncestorChain(p.Reg, parentID) {
-		holders = append(holders, ancestor.ID)
-	}
-	for _, holder := range holders {
+	for _, holder := range []string{parentID} {
 		messages, err := p.ListMessages(holder, true)
 		if err != nil {
 			return nil, err
@@ -1119,11 +1115,7 @@ func (p *ParentService) createParentMessage(msg *ParentMessage) (*ParentMessage,
 		}
 	}
 	if attentionMessage(msg.Kind) {
-		holders := []string{msg.ParentSessionID}
-		for _, ancestor := range AncestorChain(p.Reg, msg.ParentSessionID) {
-			holders = append(holders, ancestor.ID)
-		}
-		for _, holder := range holders {
+		for _, holder := range []string{msg.ParentSessionID} {
 			entries, readErr := os.ReadDir(parentMessageDir(holder))
 			if readErr != nil && !os.IsNotExist(readErr) {
 				return nil, false, readErr
@@ -1546,23 +1538,22 @@ func decisionExcerpt(capture string) string {
 // so the caller walks this list and stops at the first hop that succeeds. A
 // live manager is therefore never skipped — only ancestors that genuinely
 // cannot receive the envelope are passed over.
+// deliveryCandidates resolves the mailbox a handoff's messages belong to.
+//
+// This used to return a chain: the immediate parent, then every ancestor, so a
+// message could escalate upward past a manager that could not receive it. With
+// the hierarchy retired there is no upward. A handoff addresses exactly one
+// mailbox, and an envelope nobody drains stays in it rather than being promoted
+// to somewhere the sender never named.
 func (p *ParentService) deliveryCandidates(ho *Handoff) []*Session {
-	// An apex is an intentional hierarchy root, but its own ask/result still
-	// has one boundary destination: the human surface bound to that apex. Using
-	// the apex session as the durable inbox holder does not invent a parent edge;
-	// deliverMessage recognizes this case and performs notification only.
 	if ho.SourceSessionID == "" {
-		root, err := p.Reg.GetSession(ho.SessionID)
-		if err == nil && root != nil && root.Labels[ApexLabel] == "true" {
-			return []*Session{root}
-		}
 		return nil
 	}
 	immediate, err := p.Reg.GetSession(ho.SourceSessionID)
 	if err != nil || immediate == nil {
 		return nil
 	}
-	return append([]*Session{immediate}, AncestorChain(p.Reg, immediate.ID)...)
+	return []*Session{immediate}
 }
 
 // promoteMessage hands an escalation to the ancestor that has just received

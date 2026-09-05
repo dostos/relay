@@ -57,7 +57,9 @@ func AuthorizeHandoffManager(reg *Registry, handoffID, caller string, exists fun
 	if err != nil {
 		return nil, fmt.Errorf("cannot verify immediate manager: %w", err)
 	}
-	chain := append([]*Session{immediate}, AncestorChain(reg, immediate.ID)...)
+	// The caller used to be allowed to be any manager up the chain. Flat now:
+	// the addressed manager is the only one who can be it.
+	chain := []*Session{immediate}
 	var skipped []string
 	for _, manager := range chain {
 		if manager.ID == caller {

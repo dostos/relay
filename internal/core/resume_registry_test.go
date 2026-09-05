@@ -15,7 +15,7 @@ func TestResumeCleanedVsDisconnected(t *testing.T) {
 
 	RememberResume(&Session{
 		ID: "sess-a", HostID: "c3", RemoteCWD: "~/dev/x",
-		Persist: ports.PersistHandle{Kind: "tmux", Name: "proj-alive"},
+		Persist:   ports.PersistHandle{Kind: "tmux", Name: "proj-alive"},
 		UpdatedAt: time.Now().UTC(),
 	})
 	presence, _, _ := r.ClassifyResume("proj-alive")
@@ -44,7 +44,7 @@ func TestLivePresence(t *testing.T) {
 	r := &Registry{}
 	_ = r.PutSession(&Session{
 		ID: "sess-live", HostID: "c3", RemoteCWD: "~/x",
-		Persist: ports.PersistHandle{Kind: "tmux", Name: "proj-live"},
+		Persist:   ports.PersistHandle{Kind: "tmux", Name: "proj-live"},
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	})
 	RememberResume(&Session{

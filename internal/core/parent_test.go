@@ -541,30 +541,6 @@ func TestAutomaticDeliveryBackoffIsDurableAndCapped(t *testing.T) {
 	}
 }
 
-func TestDeliverPendingDoesNotBurstUnchangedApexFailure(t *testing.T) {
-	service, notifier, reg := newParentTestService(t)
-	now := time.Now().UTC()
-	apex := &Session{ID: "sess-apex", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: "tmux", Name: "apex"}, Labels: map[string]string{ApexLabel: "true"}, CreatedAt: now}
-	ho := &Handoff{ID: "ho-apex", SessionID: apex.ID, HostID: apex.HostID, Kind: KindAgent, Status: StatusRunning, CreatedAt: now}
-	_ = reg.PutSession(apex)
-	_ = reg.PutHandoff(ho)
-	notifier.notifyFail = true
-
-	msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 2, Kind: "result", Meta: map[string]any{"text": "unchanged stuck result"}})
-	if err == nil || msg == nil || msg.DeliveryAttempts != 1 || len(notifier.notices) != 1 {
-		t.Fatalf("initial failure msg=%+v attempts=%d err=%v", msg, len(notifier.notices), err)
-	}
-	for i := 0; i < 100; i++ {
-		if delivered, retryErr := service.DeliverPending(context.Background(), apex.ID); retryErr != nil || delivered != 0 {
-			t.Fatalf("backoff retry %d delivered=%d err=%v", i, delivered, retryErr)
-		}
-	}
-	stored, err := service.FindMessage(msg.ID)
-	if err != nil || stored.DeliveryAttempts != 1 || len(notifier.notices) != 1 {
-		t.Fatalf("unchanged failure burst: msg=%+v attempts=%d err=%v", stored, len(notifier.notices), err)
-	}
-}
-
 func TestFailedEnvelopeDoesNotBlockDueSibling(t *testing.T) {
 	service, notifier, reg := newParentTestService(t)
 	now := time.Now().UTC()
@@ -1618,43 +1594,6 @@ func failoverTree(t *testing.T, reg *Registry) (root, manager, child *Session, h
 	return root, manager, child, ho
 }
 
-func TestEscalationFailsOverToNearestLiveAncestor(t *testing.T) {
-	service, notifier, reg := newParentTestService(t)
-	// The remote manager is unreachable; the local root is live.
-	service.Sessions.Persist = &failingPersistence{}
-	root, manager, _, ho := failoverTree(t, reg)
-
-	msg, err := service.RouteChildEvent(context.Background(), ho,
-		coord.Event{Seq: 1, Kind: "permission_required", Meta: map[string]any{"text": "approve tool?"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if msg == nil {
-		t.Fatal("want an escalation message")
-	}
-	if msg.ParentSessionID != root.ID {
-		t.Fatalf("want delivery to the live root, got %s", msg.ParentSessionID)
-	}
-	if msg.IntendedParentSessionID != manager.ID {
-		t.Fatalf("want the skipped manager recorded, got %q", msg.IntendedParentSessionID)
-	}
-	if len(msg.SkippedSessionIDs) != 1 || msg.SkippedSessionIDs[0] != manager.ID {
-		t.Fatalf("want the manager in skipped ids, got %+v", msg.SkippedSessionIDs)
-	}
-	if msg.DeliveredAt == nil {
-		t.Fatal("want the escalation delivered")
-	}
-	if len(notifier.notices) != 1 {
-		t.Fatalf("want exactly one human-facing notice, got %d", len(notifier.notices))
-	}
-	// Exactly one durable envelope must exist across the whole tree.
-	rootMsgs, _ := service.ListMessages(root.ID, false)
-	managerMsgs, _ := service.ListMessages(manager.ID, false)
-	if len(rootMsgs) != 1 || len(managerMsgs) != 0 {
-		t.Fatalf("want one envelope held by the root, got root=%d manager=%d", len(rootMsgs), len(managerMsgs))
-	}
-}
-
 func TestEscalationNeverSkipsALiveManager(t *testing.T) {
 	service, notifier, reg := newParentTestService(t)
 	recorder := &recordingPersistence{}
@@ -1703,30 +1642,6 @@ func TestEscalationStaysPendingWhenNoAncestorIsLive(t *testing.T) {
 	}
 	if len(held) != 1 {
 		t.Fatalf("want exactly one pending envelope, got %d", len(held))
-	}
-}
-
-func TestPendingAttentionFindsAskHeldByAnAncestor(t *testing.T) {
-	service, _, reg := newParentTestService(t)
-	now := time.Now().UTC()
-	root, manager, _, _ := failoverTree(t, reg)
-	// An unresolved ask for this handoff is already held by the ROOT,
-	// because the manager was disconnected when it was raised.
-	held := &ParentMessage{
-		V: 1, ID: "pm-held", ParentSessionID: root.ID, ChildSessionID: "sess-child",
-		HandoffID: "ho-worker", Kind: "ask", State: ParentMessagePending,
-		IntendedParentSessionID: manager.ID, CreatedAt: now,
-	}
-	if err := writeParentMessage(held, true); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := service.pendingAttention(manager.ID, "ho-worker")
-	if err != nil || got == nil {
-		t.Fatal("want the ancestor-held ask to be found from the manager")
-	}
-	if got.ID != "pm-held" {
-		t.Fatalf("want pm-held, got %s", got.ID)
 	}
 }
 
@@ -1790,40 +1705,6 @@ func (p *flakyPersistence) Send(_ context.Context, _ ports.Transport, handle por
 	}
 	p.sent = append(p.sent, handle.Name+"|"+text)
 	return nil
-}
-
-// A replayed event must never erase a decision the human already recorded.
-func TestReplayAfterFailoverDoesNotEraseRecordedDecision(t *testing.T) {
-	service, notifier, reg := newParentTestService(t)
-	service.Sessions.Persist = &selectivePersistence{fail: map[string]bool{"manager": true}}
-	_, _, _, ho := failoverTree(t, reg)
-	if err := reg.PutHandoff(ho); err != nil {
-		t.Fatal(err)
-	}
-	ev := coord.Event{Seq: 9, Kind: "permission_required", Meta: map[string]any{"text": "delete production bucket?"}}
-
-	msg, err := service.RouteChildEvent(context.Background(), ho, ev)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.Reply(context.Background(), msg.ID, "DENY - do not delete"); err != nil {
-		t.Fatal(err)
-	}
-
-	// The same event is routed again (Watch and AgentWait run on separate cursors).
-	replayed, err := service.RouteChildEvent(context.Background(), ho, ev)
-	if err != nil {
-		t.Fatalf("replay must be a no-op, got %v", err)
-	}
-	if replayed.State != ParentMessageReplied {
-		t.Fatalf("replay erased the decision: state=%s", replayed.State)
-	}
-	if replayed.Reply != "DENY - do not delete" {
-		t.Fatalf("replay erased the reply: %q", replayed.Reply)
-	}
-	if len(notifier.notices) != 1 {
-		t.Fatalf("replay re-asked the human: %d notices", len(notifier.notices))
-	}
 }
 
 // A routine receipt must not walk the tree and interrupt a human.
@@ -1955,31 +1836,6 @@ func TestConcurrentAskFramesCreateOneSemanticEnvelope(t *testing.T) {
 	}
 }
 
-func TestApexRootSignalRoutesDurablyToHumanSurface(t *testing.T) {
-	service, notifier, reg := newParentTestService(t)
-	now := time.Now().UTC()
-	apex := &Session{ID: "sess-apex", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: "tmux", Name: "apex"}, Labels: map[string]string{ApexLabel: "true"}, CreatedAt: now}
-	ho := &Handoff{ID: "ho-apex", SessionID: apex.ID, HostID: apex.HostID, Kind: KindAgent, Status: StatusRunning, CreatedAt: now}
-	_ = reg.PutSession(apex)
-	_ = reg.PutHandoff(ho)
-
-	msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 708, Kind: "ask", Meta: map[string]any{"text": "repair governed edge"}})
-	if err != nil || msg == nil || msg.ParentSessionID != apex.ID || msg.DeliveredAt == nil || msg.DeliveryMethod != "human_notification_confirmed" {
-		t.Fatalf("root authority route msg=%+v err=%v", msg, err)
-	}
-	if len(notifier.notices) != 1 || len(notifier.sent) != 0 {
-		t.Fatalf("root route notifications=%d pane_sends=%d", len(notifier.notices), len(notifier.sent))
-	}
-	stored, listErr := service.ListMessages(apex.ID, false)
-	if listErr != nil || len(stored) != 1 || stored[0].EventSeq != 708 {
-		t.Fatalf("durable root receipt=%+v err=%v", stored, listErr)
-	}
-	result, resultErr := service.RouteChildEvent(context.Background(), ho, coord.Event{Seq: 710, Kind: "result", Meta: map[string]any{"text": "authority repair complete"}})
-	if resultErr != nil || result == nil || result.DeliveredAt == nil || len(notifier.notices) != 2 {
-		t.Fatalf("root result route=%+v notices=%d err=%v", result, len(notifier.notices), resultErr)
-	}
-}
-
 func TestBlockedImmediateManagerIsNeverSkipped(t *testing.T) {
 	service, notifier, reg := newParentTestService(t)
 	service.Sessions.Persist = &capturePersistence{capture: "Do you trust the contents of this directory?\n1. Yes\n2. No"}
@@ -2017,29 +1873,6 @@ func TestTelemetryDoesNotProbeOrInjectIntoAbsentManager(t *testing.T) {
 		coord.Event{Seq: 1, Kind: "note", Meta: map[string]any{"text": "must not execute in shell"}})
 	if err != nil || msg != nil {
 		t.Fatalf("telemetry allocated a manager delivery: msg=%+v err=%v", msg, err)
-	}
-}
-
-// A live manager having a transient hiccup must not be bypassed.
-func TestTransientFailureDoesNotBypassALiveManager(t *testing.T) {
-	service, notifier, reg := newParentTestService(t)
-	flaky := &flakyPersistence{remaining: 1}
-	service.Sessions.Persist = flaky
-	_, manager, _, ho := failoverTree(t, reg)
-
-	msg, err := service.RouteChildEvent(context.Background(), ho,
-		coord.Event{Seq: 1, Kind: "permission_required", Meta: map[string]any{"text": "approve?"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if msg.ParentSessionID != manager.ID {
-		t.Fatalf("a transient error bypassed a live manager, went to %s", msg.ParentSessionID)
-	}
-	if len(notifier.notices) != 0 {
-		t.Fatalf("the human must not be interrupted, got %d notices", len(notifier.notices))
-	}
-	if len(flaky.sent) != 1 {
-		t.Fatalf("want the retry to reach the manager, got %d sends", len(flaky.sent))
 	}
 }
 

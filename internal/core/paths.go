@@ -49,11 +49,12 @@ func DeletedManagerDir() string        { return filepath.Join(StateRoot(), "dele
 func AuthorityReplacementPath() string {
 	return filepath.Join(StateRoot(), "authority-replacement.json")
 }
-func HomeServiceHealthPath() string   { return filepath.Join(StateRoot(), "service-health.json") }
-func HomeServiceLockPath() string     { return filepath.Join(StateRoot(), "service.lock") }
-func HomeClientTokenPath() string     { return filepath.Join(StateRoot(), "home-client.token") }
-func HandoffsDir() string             { return filepath.Join(StateRoot(), "handoffs") }
-func LedgerPath() string              { return filepath.Join(StateRoot(), "handoffs", "ledger.jsonl") }
+func HomeServiceHealthPath() string { return filepath.Join(StateRoot(), "service-health.json") }
+func HomeServiceLockPath() string   { return filepath.Join(StateRoot(), "service.lock") }
+func HomeClientTokenPath() string   { return filepath.Join(StateRoot(), "home-client.token") }
+func HandoffsDir() string           { return filepath.Join(StateRoot(), "handoffs") }
+func LedgerPath() string            { return filepath.Join(StateRoot(), "handoffs", "ledger.jsonl") }
+
 // DesktopBridgeSocketPath is where the authenticated command boundary listens,
 // and where a client dials it. RELAY_BRIDGE_SOCK overrides both ends together
 // on purpose: they must agree, and the default derives from StateRoot, which a
@@ -67,10 +68,10 @@ func DesktopBridgeSocketPath() string {
 	}
 	return filepath.Join(StateRoot(), "desktop-bridge.sock")
 }
-func BridgeTokensDir() string         { return filepath.Join(StateRoot(), "bridge-tokens") }
-func BridgeIdentitiesDir() string     { return filepath.Join(StateRoot(), "bridge-identities") }
-func ParentInboxDir() string          { return filepath.Join(StateRoot(), "parent-inbox") }
-func ParentWatchDir() string          { return filepath.Join(StateRoot(), "parent-watch") }
+func BridgeTokensDir() string     { return filepath.Join(StateRoot(), "bridge-tokens") }
+func BridgeIdentitiesDir() string { return filepath.Join(StateRoot(), "bridge-identities") }
+func ParentInboxDir() string      { return filepath.Join(StateRoot(), "parent-inbox") }
+func ParentWatchDir() string      { return filepath.Join(StateRoot(), "parent-watch") }
 func ParentWatchLockPath(handoffID string) string {
 	return filepath.Join(ParentWatchDir(), sanitizeID(handoffID)+".lock")
 }

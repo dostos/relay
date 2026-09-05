@@ -89,9 +89,9 @@ func (p *ParentService) FindStaleEscalations(maxHold time.Duration, now time.Tim
 	return out, nil
 }
 
-// ReportStaleEscalations tells each stale holder's manager that one of its
-// children has a question nobody has answered. It never moves the envelope and
-// never answers on the holder's behalf; the decision stays where it was routed.
+// ReportStaleEscalations tells the human about every mailbox sitting on a
+// question nobody has answered. It never moves the envelope and never answers
+// on the holder's behalf; the decision stays where it was routed.
 func (p *ParentService) ReportStaleEscalations(ctx context.Context, maxHold time.Duration) (int, error) {
 	stale, err := p.FindStaleEscalations(maxHold, time.Now().UTC())
 	if err != nil {
@@ -105,19 +105,23 @@ func (p *ParentService) ReportStaleEscalations(ctx context.Context, maxHold time
 		if err != nil || holder == nil {
 			continue
 		}
-		chain := AncestorChain(p.Reg, holder.ID)
-		if len(chain) == 0 {
-			// The holder is the top of the tree; only the human is above it.
+		// The reminder used to walk up to the holder's manager, which in
+		// practice meant it ended at the human. With the hierarchy retired
+		// there is no walk, but the property worth keeping is exactly that
+		// endpoint: an unanswered question must not go quiet, and the human is
+		// the one who can act on it. Telling the holder about its own stall
+		// would poke a possibly-remote mailbox about something it already knows.
+		manager := p.localHumanSurface()
+		if manager == nil {
 			continue
 		}
-		manager := chain[0]
 		notice := ParentNotice{
 			MessageID: msg.ID,
 			Kind:      "stalled",
 			Child:     holder.ID,
-			Text: "your child " + holder.ID + " has held an unanswered " + msg.Kind +
+			Text: "you have held an unanswered " + msg.Kind +
 				" for " + strconv.Itoa(int(item.HeldFor.Minutes())) + "m (" + msg.ID +
-				"); it still owns the decision",
+				"); it is still yours to decide",
 			Action: "inspect",
 		}
 		claimed, claimErr := claimStallReport(msg, item.HeldFor, maxHold, time.Now().UTC())
@@ -232,4 +236,22 @@ func stallDue(msg *ParentMessage, heldFor, maxHold time.Duration, now time.Time)
 		next = maxHold
 	}
 	return sinceReport >= next
+}
+
+// localHumanSurface is the one destination that is always the human: the local
+// parent session. It replaces the ancestor walk that used to terminate here.
+func (p *ParentService) localHumanSurface() *Session {
+	if p.Reg == nil {
+		return nil
+	}
+	sessions, err := p.Reg.ListSessions()
+	if err != nil {
+		return nil
+	}
+	for _, sess := range sessions {
+		if isLocalParent(sess) {
+			return sess
+		}
+	}
+	return nil
 }
