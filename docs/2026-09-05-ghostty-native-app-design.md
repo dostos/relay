@@ -1,0 +1,384 @@
+# relay — a native app as the presenter, replacing cmux
+
+Date: 2026-09-05
+Status: Draft. Not accepted. No code written.
+
+Goal, in the user's words: throw a devcontainer-capable repo at the fleet, it
+launches, and you attach or detach it from your window whenever you want.
+
+This is item (3) of [`2026-09-05-retire-hierarchy-plan.md`](2026-09-05-retire-hierarchy-plan.md).
+
+## The answer first
+
+Build a native macOS app that owns terminal surfaces on this machine. Keep
+everything else.
+
+The app does not need to understand SSH, tmux, containers, or the fleet. Every
+surface it opens runs exactly one local command:
+
+```
+relay resume --session <tmux-name> --host <host>
+```
+
+That command already exists (`core.ResumeLaunchCmd`, `internal/core/resume.go`)
+and it is already what cmux puts in a pane (`Viz.attachCommand`,
+`internal/viz/cmux/cmux.go`). It performs the SSH hop, the tmux attach, and the
+reconnect loop. So the app's whole job is: host local PTYs, keep a session list,
+and place windows.
+
+Two consequences fall out of that, and they drive the rest of this document:
+
+1. **Stage 1 needs no relay code change at all.** An app that only launches and
+   attaches drives relay through its existing CLI. It is useful on its own.
+2. **The terminal rendering core is a swappable layer.** Whether it is
+   libghostty or something else changes one Swift file, not the design. That
+   matters, because libghostty's embedding API is not stable (see below).
+
+## What replaces cmux and what stays
+
+| Component | Fate | Why |
+|---|---|---|
+| tmux on the fleet host | **stays** | It *is* the detach substrate. Detach means the local process goes away and tmux does not. |
+| `relay resume` | **stays** | It is the attach primitive: SSH plus `tmux new-session -A` plus a reconnect loop. |
+| `relay container open` | **stays** | Already the launch primitive. See `docs/devcontainers.md`. |
+| SSH transport | **stays** | The app never speaks SSH. `relay resume` does. |
+| cmux (the multiplexer GUI) | **replaced** | The app owns windows, tabs, splits, focus, and titles. |
+| `internal/viz/cmux` (the adapter) | **replaced by a sibling** | A second `ports.Viz` implementation, selected by config. |
+| The `ports.Viz` interface | **stays, with one fix** | It is the seam. One method leaks a cmux type (below). |
+| Agent processes | **untouched by attach/detach** | They run inside remote tmux. Nothing about attaching moves them. |
+
+Explicitly out of scope: reimplementing tmux inside the app, moving agent
+processes to the Mac, and changing container lifecycle.
+
+## The presenter contract, measured
+
+`ports.Viz` in `internal/ports/ports.go` is eight methods:
+
+| Method | What it must do | App implementation |
+|---|---|---|
+| `Kind()` | name the adapter | return a constant |
+| `Available(ctx)` | is the presenter reachable | ping the app's control socket |
+| `Present(id, attachCmd, layout)` | open a surface running `attachCmd`, return a stable surface ref | new tab or split, spawn the PTY, record a binding |
+| `Focus(id)` | raise the surface | activate window, select tab |
+| `Close(id)` | close the surface only | close the tab; never touch tmux |
+| `Layout(ctx)` | human-readable tree of surfaces | serialize the window model |
+| `SaveRestorable(ctx)` | snapshot surfaces for restart | write bindings to disk |
+| `RestoreSaved(ctx)` | reopen them after restart | reopen each binding's `attachCmd` |
+
+`SaveRestorable` and `RestoreSaved` exist because cmux is a separate
+application with its own vault. A native app owns its own window state, so both
+collapse to "persist the binding list, reopen it at launch". They still have to
+exist to satisfy the port.
+
+`Layout` is where a native app is *better* than the current adapter: it can
+report its own model directly instead of shelling out and parsing.
+
+### The optional-capability tail is the real surface area
+
+The interface is eight methods. The cmux adapter implements roughly thirteen
+further capabilities that `internal/cli/app.go` discovers by type assertion
+(`a.Viz.(interface{ ... })`). A partial presenter does not fail; it silently
+loses features. Named, so nothing is discovered late:
+
+| Capability | Used by | If missing |
+|---|---|---|
+| `BindCurrent` | `openNamedAndPresent` (the `relay HOST NAME` path) | the current terminal is not adopted as the session's surface |
+| `BindSurface` | `relay resume` with an explicit surface | no surface binding on resume |
+| `ForgetBinding` | replacing a dead session | duplicate stale bindings |
+| `RebindRenamedSession` | `session rename` | pane keeps the old identity |
+| `ManagedPanes` | `relay pane list` / `relay viz list` | command fails |
+| `LocationForSurface` | sibling pane placement | children land in the wrong workspace |
+| `ProjectionHealth`, `ForwardAuthorityCommand`, `QueueControlRetirement` | projection-only clients, `relay doctor` | projection role unavailable |
+| `ApplyProjection` (`ports.ProjectionSink`) | `core.PresentSession` | falls back to plain `Present` |
+| `ProjectionSessions` (`ports.ProjectionInventory`) | projection-only session listing | listing fails on a projection-only host |
+| `SendScreen`, `CaptureScreen`, `NotifyParent` | parent notices, screen capture | messaging degrades |
+
+**Blocker, and it is small:** `relay viz list` asserts
+`ManagedPanes(context.Context) ([]cmux.ManagedPane, error)`. The CLI names the
+`cmux` package in the assertion. A second presenter cannot satisfy it. That
+type has to move to `ports` before two presenters can coexist. It is a
+mechanical change and it belongs in stage 0.
+
+**Second blocker, also small:** `internal/cli/app.go` constructs the presenter
+as `viz := cmux.New()`, hardcoded. There is no selector. Stage 0 adds one,
+defaulting to cmux so nothing changes for existing users.
+
+## The projection-only constraint, and why it must not be inherited
+
+This Mac carries `.viz-projection-only` (`core.ProjectionOnlyMarkerPath`).
+Local authority state has been retired here, so `relay viz present` exits 1 and
+panes are opened with `relay HOST NAME` instead.
+
+The reason is worth stating precisely, because the fix is architectural, not a
+workaround. `Viz.Present` in the cmux adapter does two unrelated things at once:
+
+1. resolve *which session* is being presented (needs authority metadata);
+2. open a local terminal running a command (needs nothing but a local PTY).
+
+Step 1 fails on a projection-only host. Step 2 cannot fail for that reason. The
+adapter conflates them, so the whole call fails.
+
+The app must keep them apart:
+
+| Concern | Source | Fails when |
+|---|---|---|
+| Session inventory (read model) | `relay session list`, `relay resume list`, or the projection stream | authority is unreachable |
+| Opening a surface (local action) | local PTY plus an attach command | never, for authority reasons |
+
+Practical rule for the app: if the inventory is empty or unreachable, the app
+still opens a surface for a host and name the user types directly. That is
+exactly what `relay HOST NAME` does today, and it is why that path works here
+while `viz present` does not. Degraded inventory must degrade the *list*, not
+the *terminal*.
+
+## How the app implements the Viz port
+
+The Viz port is a Go interface, and relay's CLI is a short-lived process. The
+app is a long-lived AppKit process. They cannot be the same process. Four ways
+to bridge, evaluated:
+
+| Option | Shape | Verdict |
+|---|---|---|
+| A. Link the app into relay | app hosts the Go runtime, or relay hosts AppKit | Reject. relay's CLI is one process per invocation; an AppKit main loop cannot live there. |
+| B. Adapter shells out to an app-provided CLI | `internal/viz/native` runs `relayterm present --session ... --cmd ...`, exactly as the cmux adapter runs `cmux` | **Chosen for stage 2.** Zero new protocol. Identical shape to what already works. |
+| C. Adapter dials a Unix socket the app listens on | same ops, no process spawn | Evolution of B. The helper CLI becomes a thin client of the same socket. Do it when op latency justifies it. |
+| D. App is a projection consumer | subscribes to the projection stream, implements `ApplyProjection`, acks with a durable cursor, like `relay viz serve` | Correct end state *only if* the app runs on a machine that is not the authority. Heaviest. Defer. |
+
+Choose B, and keep the helper CLI's surface identical to the eight Viz methods
+plus the capability tail above. B is the option that costs nothing to try and
+nothing to abandon.
+
+The **other** direction, app to relay, needs no new mechanism at all. The app
+invokes `relay` argv, either as a subprocess or over the desktop bridge socket
+(`core.DesktopBridgeSocketPath`, override `RELAY_BRIDGE_SOCK`). The bridge
+protocol is newline-delimited JSON with two ops, `ping` and `invoke`, and
+`invoke` carries argv plus a request ID that makes retries idempotent
+(`internal/bridge/bridge.go`). It was built so a process inside a remote tmux
+session could invoke relay on the desktop. A local GUI is a strictly easier
+client of the same socket.
+
+Recommendation: subprocess for stage 1 (simplest, and the app is on the same
+machine as the binary), bridge socket later if the app ever needs to run
+sandboxed or as a different user.
+
+## Launch flow, end to end
+
+```
+ pick a repo            pick a fleet host         relay does the work
+ ───────────            ─────────────────         ───────────────────
+ workspace.yaml   ──►   host profiles       ──►   relay container open
+ or a local path        (relay host show)         -H HOST --container NAME
+                                                        │
+                                                        ▼
+                                       ContainerService.Up  (devcontainer CLI)
+                                                        │
+                                                        ▼
+                                       OpenNamed  →  tmux session on the HOST
+                                                        │
+                                                        ▼
+                              app opens a surface running
+                              relay resume --session NAME --host HOST
+```
+
+Step by step, with what already exists:
+
+| Step | Mechanism | Exists today |
+|---|---|---|
+| 1. Pick a repo | app UI over recent repos plus `.devcontainer/` detection | no |
+| 2. Pick a fleet host | host profiles; `relay host show -H HOST` reports declared containers | yes |
+| 3. Bring the container up | `ContainerService.Up`, shells out to the host's `devcontainer` CLI | yes, verified live on hamburg |
+| 4. Create or adopt the tmux session | `SessionService.OpenNamed` via `cmdContainerOpen` | yes |
+| 5. Session appears in the app | `relay session list`, or a Present call from relay | yes for the list |
+| 6. Attach | local PTY running `relay resume --session NAME --host HOST` | yes |
+
+Note from `docs/devcontainers.md`, and it matters here: **tmux runs on the
+host, not inside the container.** Only the pane's inner command is wrapped in
+`docker exec`. So a container recreate does not disturb the session or the
+attach, and the app never needs container awareness to attach.
+
+The one genuinely new thing in the launch flow is step 1. Everything else is
+already a `relay` invocation.
+
+## Attach and detach semantics
+
+Attach means: start a local process that connects a local terminal surface to a
+remote tmux session. Detach means: stop that local process. Neither moves the
+agent. The agent has always been on the fleet host.
+
+| Event | Local surface | SSH | Remote tmux | Agent process |
+|---|---|---|---|---|
+| Attach | opened, PTY spawned | connected | client added | unaffected |
+| Detach (user closes the tab) | closed | terminated | session persists, client count drops | **keeps running** |
+| App quit | all closed | terminated | all persist | keep running |
+| Mac sleeps | stays open | TCP dies | persists | keeps running |
+| Mac wakes | stays open | `relay resume` reconnect loop retries | persists | keeps running |
+| Reattach later | new surface | new connection | same session by name | same process, full scrollback from tmux |
+| Host reboots | stays open | reconnects | **gone** | **gone** |
+| `relay session destroy` | closed by `Viz.Close` | terminated | killed | killed |
+
+Detach must never route to `session destroy`. On an ephemeral container session
+that also removes the container (`docs/devcontainers.md`, lifetime table). Close
+the surface, leave the session. This is the single most important behavioral
+rule in the app.
+
+**How reattach finds the session again.** By `(host_id, tmux name)`, not by
+process. `AttachCommand` is `tmux new-session -A -s NAME`
+(`internal/persist/tmux/tmux.go`), which is attach-or-create, so reattach is
+idempotent. The app persists its bindings; relay separately persists a resume
+registry (`core.RememberResume`, `core.LookupResume`) and the session registry.
+The app should treat relay's registry as the source of truth and its own
+bindings as a display cache.
+
+**The host-reboot trap.** `tmux new-session -A` will happily *create* an empty
+session with the right name after a reboot. The surface then looks alive and is
+not. relay can already tell the difference: `Persistence.DeadStatus` and
+`Registry.ClassifyResume` distinguish live, disconnected, and replaced. The app
+must surface "replaced, your agent is gone" rather than showing a healthy green
+tab. This is the local instance of a failure mode this fleet already knows well:
+a healthy signal on a dead function.
+
+**Multiple attaches.** tmux permits several clients on one session. Two surfaces
+on the same session mirror each other and both size to the smallest client. The
+cmux adapter dedups by binding and reuses an existing surface rather than
+opening a duplicate (`Viz.Present` is idempotent across processes by design).
+The app must do the same, or the first agent handoff produces two panes showing
+the same thing at the wrong size.
+
+**Sleep and wake, honestly.** `relay resume` retries with a status line and a
+backoff (`SessionService.Resume`). It usually recovers. The known failure in
+this fleet is not the retry logic; it is a stale SSH ControlMaster socket, which
+makes every operation to a host hang forever rather than fail. The app should
+give the user a visible "reconnect attempt N" state and a one-click hard
+reconnect that tears the mux down, because a hang is indistinguishable from a
+slow link in a GUI.
+
+## libghostty: feasibility, stated honestly
+
+**Verdict: libghostty's full embedding API is real, works, and is explicitly not
+stable. Do not let stage 1 depend on it.**
+
+What the upstream project says, quoted:
+
+- The API overview warns it is "currently used primarily by the macOS app and is
+  not yet stabilized for general-purpose embedding" and "may change
+  significantly between releases". Its stability section says the current API is
+  "not stable".
+- Mitchell Hashimoto describes the existing C header the macOS app uses as an
+  "internal-only C API", not a generally consumable libghostty, and says the
+  public C API will be designed clean-slate rather than derived from it.
+- The piece being stabilized *first* is `libghostty-vt`: parsing and terminal
+  state only. That is not the embedding surface a GUI needs.
+- His announcement is framed as a "public alpha (not promising API stability)".
+
+What argues in favor anyway:
+
+- The behavior is battle-tested. Ghostty's own macOS app is a Swift app linking
+  the C API, and OrbStack ships it commercially.
+- The API overview documents `ghostty_app_t`, `ghostty_config_t`,
+  `ghostty_surface_t`, `NSView` embedding with a `scale_factor`, Metal
+  rendering, an embedder-owned event loop with wakeup and action callbacks, and
+  explicitly "one or more" surfaces per app.
+- Several third parties already ship exactly the app shape proposed here. The
+  community list includes a SwiftUI macOS terminal multiplexer and an
+  agent-aware terminal with a SwiftUI session sidebar, both on libghostty, plus
+  two SwiftPM wrappers around a prebuilt `GhosttyKit.xcframework`.
+
+**Unverified, and I will not pretend otherwise.** I did not build against
+`ghostty.h`. Every symbol name above is quoted from the published overview page,
+not read from a header or a successful compile. Specifically unverified:
+
+| Claim | How I would test it |
+|---|---|
+| Multiple independent surfaces in one `NSWindow`, each with its own PTY, independent resize and focus | 150-line AppKit spike: two surfaces side by side, each running `relay resume` against a different host, resize both |
+| Whether tabs and splits are the embedder's job or libghostty's | same spike; read what the action callback actually delivers |
+| Which libghostty revision the SwiftPM xcframeworks track, and whether they are versioned at all | inspect the package manifest and the framework's embedded version |
+| Cost of a version bump | pin a commit, bump it once deliberately, count the breaks |
+
+### Fallback options for the terminal core
+
+| Core | Maturity of the *API* | Cost | Main risk |
+|---|---|---|---|
+| libghostty via a prebuilt `GhosttyKit.xcframework` | explicitly unstable, no versioning guarantees | medium | churn on every bump; pin a commit and vendor it |
+| SwiftTerm (`migueldeicaza/SwiftTerm`) | stable, tagged 2.0, actively maintained, MIT | low | lower rendering fidelity and throughput than Ghostty |
+| Shipped Ghostty.app driven from the CLI | n/a | very low | **fails the contract.** On macOS the `ghostty` binary is a helper; `open -na Ghostty.app --args -e CMD` opens a new *instance*, there is no open-a-tab-in-an-existing-window CLI, and there is no way to `Focus` or `Layout` a specific session. Rejected. |
+| xterm.js in a `WKWebView` | stable | low | worst fidelity, extra runtime, poor input handling |
+
+SwiftTerm deserves emphasis as the stage-1 core. Its `LocalProcessTerminalView`
+is an `NSView` that runs a local Unix command in a PTY. That is precisely and
+completely what this app needs, because the local command is `relay resume`. It
+is used in shipping SSH clients and editors. Starting there costs nothing later:
+
+**The mitigation, and it is the whole answer to the libghostty risk.** Define
+one Swift protocol in the app, roughly: create a surface running argv, resize,
+focus, set title, close, report exit. Both libghostty and SwiftTerm satisfy it.
+The rest of the app (session list, bindings, relay invocation, launch flow)
+never names either library. Swapping cores is then one file and a spike, not a
+rewrite, and the choice can be deferred until after the app is useful.
+
+## Risks
+
+| Risk | Severity | Mitigation |
+|---|---|---|
+| libghostty embedding API churn | high | terminal core behind one protocol; start on SwiftTerm; spike libghostty separately |
+| `ManagedPanes` returns a `cmux` type, so two presenters cannot coexist | medium, cheap | move the type to `ports` in stage 0 |
+| Presenter is hardcoded (`viz := cmux.New()`) | medium, cheap | config selector, cmux stays the default |
+| Capability tail silently degrades | medium | implement the tail explicitly, or make the CLI warn on a missing capability instead of skipping |
+| Both cmux and the app bind panes for the same session | medium | one presenter per machine, enforced by the selector; never run both |
+| Projection-only authority split on this Mac | medium | separate inventory from surface opening; allow a typed host and name with no inventory |
+| Host reboot renders a live-looking dead tab | medium | use `DeadStatus` / `ClassifyResume`, show "replaced" |
+| Stale SSH ControlMaster makes every op hang, not fail | medium | visible reconnect state plus an explicit hard-reconnect action |
+| macOS signing, notarization, and app update channel | medium | separate from `relay selfupdate`; decide before distributing beyond this machine |
+| Scope creep into reimplementing tmux | high if unwatched | stated non-goal; the app has no session-persistence code |
+
+## Staged plan
+
+**Stage 0. Unblock a second presenter. In relay only.**
+Move `cmux.ManagedPane` to `ports`. Add a presenter selector reading config,
+defaulting to cmux. Nothing changes for anyone. Independently reviewable.
+
+**Stage 1. Launcher and attacher. No relay change. Useful alone.**
+A native app with a session list and terminal surfaces. Reads the list by
+invoking `relay session list` and `relay resume list --probe`. Opens a surface
+per session running `relay resume --session N --host H`. Attach and detach.
+Persisted bindings, reopened at launch. No Viz adapter, no projection, no
+container UI.
+
+This is useful by itself, today, on this machine: it gives real windows on a
+projection-only host without cmux, and detach or reattach across sleep is the
+daily operation.
+
+**Stage 2. Relay can present into the app.**
+Ship the app's control CLI. Add `internal/viz/native` implementing `ports.Viz`
+plus the capability tail by shelling out to it, exactly as the cmux adapter
+shells out to `cmux`. Select it in config. Now agent handoffs and
+`relay HOST NAME` land in the app.
+
+**Stage 3. The launch flow.**
+Repo picker with `.devcontainer/` detection, host picker from host profiles,
+one button that calls `relay container open`. The session appears in the list
+from stage 1 and attaches. This is the user's sentence, working.
+
+**Stage 4. Terminal core decision.**
+Spike libghostty behind the stage-1 protocol. Adopt it if the spike holds and
+the version pin is tolerable. Otherwise stay on the fallback. Either way the
+app already works.
+
+**Stage 5, only if needed. Projection consumer.**
+If the app must run somewhere that is not the authority, implement
+`ApplyProjection` plus the durable cursor and ack protocol that `relay viz serve`
+already defines. Do not build this speculatively.
+
+## Open questions
+
+1. Should the `.viz-projection-only` marker on this Mac be cleared once the app
+   exists, or does the app become a projection consumer? That is an authority
+   decision, not a presenter decision, and it is not resolved here.
+2. Does the capability tail shrink after the hierarchy retirement in
+   `2026-09-05-retire-hierarchy-plan.md`? `NotifyParent` and the lineage-aware
+   placement helpers may not survive it. Build stage 2 after that lands, not
+   before, so the tail is implemented once.
+3. Does `relay` need a machine-readable event stream for the app's session list,
+   or is polling `relay session list` sufficient? Polling is sufficient for
+   stage 1; revisit when the list is large.
+4. One window with tabs, or one window per session? Not decided. Stage 1 should
+   ship the simpler one and find out.

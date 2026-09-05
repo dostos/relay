@@ -1,7 +1,9 @@
 # relay — retiring ownership, keeping messaging
 
 Date: 2026-09-05
-Status: Accepted — branch A (flat inbox), 2026-09-05. In progress.
+Status: Accepted — branch A (flat inbox). Three of four passes landed
+2026-09-05 (fa9b02b, 4ed068a, d25a08c): -2761 lines, 19 test packages green.
+One pass remains, scoped at the bottom.
 
 Goal, as stated: (1) retire the permission/ownership machinery, (2) refocus on
 messaging + persistence (tmux) + viz, (3) aim at a Ghostty-based native app that
@@ -83,3 +85,39 @@ in production.
 
 Removing tmux (it *is* the detach substrate), the devcontainer work, or
 control-plane authority.
+
+
+## Landed (2026-09-05)
+
+| Pass | Commit | What went |
+|---|---|---|
+| 1 | fa9b02b | `authority_policy.go`, its bridge wiring, 15 dead no-op gate call sites, `parent list --under` |
+| 2 | 4ed068a | ancestor walks in delivery: `deliveryCandidates`, `pendingAttention`, `createParentMessage`, manager verification |
+| 3 | d25a08c | verbs `parent link/adopt/move/reparent/status/retire` + their methods, `promoteMessage`, `validateManagerEdge`, both `Destroy` ownership refusals |
+
+Two behaviours were re-expressed rather than dropped, because the property was
+worth more than the mechanism that carried it:
+
+- **Stale asks still surface.** The old walk ended at the human in practice, so
+  `ReportStaleEscalations` now names that endpoint directly and tells the local
+  human surface. Telling the holder about its own stall was the alternative and
+  is worse: it pokes a possibly-remote mailbox about something it already knows,
+  and on a fleet that send is not deliverable at all.
+- **A manager still addresses itself by writing nothing.** That was enforced by
+  the authority policy; it is argument parsing (`ParentVerbTarget`), and moved.
+
+## Remaining — pass 4: apex
+
+Not started. It is separable and self-contained, but it reaches into three
+files this plan has not yet audited, so it is deliberately a fresh unit of work:
+
+| Site | What |
+|---|---|
+| `root.go` | `Apex`, `Adopt`, `Release`, `Enroll`, `Unenroll`, `Governed`, `Digest` |
+| `cli/app.go` | `relay root adopt/release/enroll/unenroll/status/rules/digest` |
+| `parent.go` (3), `supervisor.go`, `authority.go` | `ApexLabel` reads |
+| `session.go` | `UnobservableGovernedChildren` |
+| `ancestor.go` | `AncestorChain` — its last caller is the apex code above |
+
+Nothing live depends on it: `relay root status` reports `no apex designated` on
+this control plane, so the retirement is not a production change.
