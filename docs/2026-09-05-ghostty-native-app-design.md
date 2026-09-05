@@ -56,6 +56,52 @@ are now discovered by assertion, and every use site already nil-checks and
 returns a named error. That is what makes an incomplete presenter legal, which
 is exactly what stage 1 will be.
 
+## Build spike: Ghostty builds and runs here (2026-09-05)
+
+Verified on this Mac, not assumed. `zig-out/Ghostty.app` was produced and runs:
+
+```
+Ghostty 1.3.2-dev+0000000   channel: tip
+Zig version : 0.16.0        build mode: .ReleaseFast
+```
+
+A universal binary (x86_64 + arm64), 65 MB bundle. The Ghostty path is
+de-risked.
+
+Getting there corrected a wrong diagnosis worth recording, because it is the
+kind of mistake that sends someone down a week of dead ends.
+
+The first attempt used the current **release**, 1.3.1, which pins Zig 0.15.2,
+and it failed with dozens of undefined libSystem symbols. That reads like a
+broken build. It is not: **Zig 0.15.2 cannot link an empty `pub fn main() void
+{}` on this machine at all.** The failure is Zig 0.15.2 against the macOS 26.5
+SDK, and Ghostty's source never got as far as compiling. The plausible-sounding
+remedies that follow from the wrong diagnosis -- install an older Xcode beside
+26.5 and `sudo xcode-select --switch`, wait for a Zig release, or adopt Nix --
+were all unnecessary, and each leaves a much larger footprint on the machine.
+
+The actual situation:
+
+| | Result |
+|---|---|
+| Zig 0.15.2, empty program | fails to link |
+| Zig 0.16.0, empty program | fine |
+| Ghostty 1.3.1 + Zig 0.16.0 | refused; it requires exactly 0.15.2 |
+| Ghostty `main` (1.3.2-dev) | requires Zig 0.16.0 |
+
+So the release was pinned to a Zig that this SDK generation breaks, and
+upstream had already moved on. Build from the `tip` source tarball with Zig
+0.16.0 and it works. No sudo, no global installs, no Nix.
+
+**Prerequisites, all already satisfied here:** full Xcode active (not just
+CommandLineTools), the macOS/iOS SDKs and Metal Toolchain, `gettext` from
+Homebrew, and a local Zig 0.16.0 that needs no system install. Note that Zig
+writes a compiler cache to `~/.cache/zig` regardless of where the build runs.
+
+**Pin the Zig version to the source you build.** That is the one operational
+rule this spike produces: read `minimum_zig_version` from the tree you actually
+have, never from the docs page, which describes the current release.
+
 ## Correction: build on Ghostty itself
 
 This document was first written assuming the choice was *embed libghostty in a
