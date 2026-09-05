@@ -653,7 +653,7 @@ Long-lived goal orchestration (durable compact inbox + guarded local-pane cleanu
   relay parent bind PARENT [--surface REF]     # preserve identity after cmux restart
   relay parent link PARENT HANDOFF             # adopt an already-running goal
   relay parent move PARENT HANDOFF             # explicitly repair a wrong parent edge
-  relay parent list --under PARENT
+  relay parent list
   relay parent state PARENT active|idle|complete
   relay parent retire ID [--dry-run]
 
@@ -2047,9 +2047,6 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		if len(rest) != 0 {
 			return a.fail(fmt.Errorf("usage: relay parent heartbeat [PARENT]"))
 		}
-		if err := authorizeParentCaller(parentID); err != nil {
-			return a.fail(err)
-		}
 		sess, err := a.Parents.Heartbeat(parentID)
 		if err != nil {
 			return a.fail(err)
@@ -2209,25 +2206,10 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		a.ensureParentWatcher(ho.ID)
 		return a.errOut(a.out(map[string]any{"ok": true, "handoff_id": ho.ID, "child_session_id": ho.SessionID, "old_parent_session_id": oldParentID, "parent_session_id": parentID}))
 	case "list":
-		// --under scopes the listing to one manager's own subtree. Without it
-		// this is a global enumeration, which the authority refuses for every
-		// caller but the human — so a channel parent that wants to see its own
-		// children asks for exactly them, and gets an answer instead of a
-		// refusal it cannot act on.
-		under := ""
-		seen := map[string]bool{}
-		for i := 1; i < len(args); i++ {
-			switch args[i] {
-			case "--under":
-				i++
-				value, err := soleFlagValue(args, i, "--under", seen)
-				if err != nil {
-					return a.fail(err)
-				}
-				under = value
-			default:
-				return a.fail(rejectUnknownFlag(args[i]))
-			}
+		// A flat enumeration of every registered mailbox. Subtree scoping went
+		// with the hierarchy: there is no tree left to scope to.
+		if err := requireNoExtra(args[1:]); err != nil {
+			return a.fail(err)
 		}
 		list, err := a.Reg.ListSessions()
 		if err != nil {
@@ -2240,18 +2222,12 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 			if !core.IsLocalParentSession(sess) {
 				continue
 			}
-			if under != "" && !core.IsSessionInSubtree(a.Reg, under, sess.ID) {
-				continue
-			}
 			out = append(out, sess)
 			if core.IsHeadlessParent(sess) {
 				health[sess.ID] = core.HeadlessHealth(sess, now)
 			}
 		}
 		result := map[string]any{"ok": true, "parents": out}
-		if under != "" {
-			result["under"] = under
-		}
 		if len(health) > 0 {
 			// A headless root's liveness is not visible in its record, so listing
 			// one without its heartbeat state invites reading "registered" as
@@ -2273,9 +2249,6 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 				return a.fail(rejectUnknownFlag(arg))
 			}
 		}
-		if err := authorizeParentCaller(parentID); err != nil {
-			return a.fail(err)
-		}
 		// Working the inbox IS the liveness evidence for a headless root: a
 		// service that is still draining its escalations is, by construction,
 		// still running. This keeps the common case heartbeat-free.
@@ -2295,9 +2268,6 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		}
 		candidate, err := a.Parents.FindMessage(args[1])
 		if err != nil {
-			return a.fail(err)
-		}
-		if err := authorizeParentCaller(candidate.ParentSessionID); err != nil {
 			return a.fail(err)
 		}
 		msg, err := a.Parents.RedeliverReceipt(ctx, candidate.ID)
@@ -2345,9 +2315,6 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 				return a.fail(rejectUnknownFlag(rest[i]))
 			}
 		}
-		if err := authorizeParentCaller(parentID); err != nil {
-			return a.fail(err)
-		}
 		page, err := core.LoadCommunicationPage(parentID, handoffID, after, limit)
 		if err != nil {
 			return a.fail(err)
@@ -2361,9 +2328,6 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		if len(rest) != 0 {
 			return a.fail(fmt.Errorf("usage: relay parent sweep [PARENT]"))
 		}
-		if err := authorizeParentCaller(parentID); err != nil {
-			return a.fail(err)
-		}
 		acked, byHandoff, err := a.Parents.SweepTerminal(parentID)
 		if err != nil {
 			return a.fail(err)
@@ -2376,9 +2340,6 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		}
 		candidate, err := a.Parents.FindMessage(messageID)
 		if err != nil {
-			return a.fail(err)
-		}
-		if err := authorizeParentCaller(candidate.ParentSessionID); err != nil {
 			return a.fail(err)
 		}
 		a.Parents.TouchHeadless(candidate.ParentSessionID)
@@ -2397,9 +2358,6 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 		}
 		candidate, err := a.Parents.FindMessage(messageID)
 		if err != nil {
-			return a.fail(err)
-		}
-		if err := authorizeParentCaller(candidate.ParentSessionID); err != nil {
 			return a.fail(err)
 		}
 		a.Parents.TouchHeadless(candidate.ParentSessionID)
@@ -2456,9 +2414,6 @@ func (a *App) cmdParent(ctx context.Context, args []string) int {
 			}
 		}
 		if args[0] == "status" {
-			if err := authorizeParentCaller(sessionID); err != nil {
-				return a.fail(err)
-			}
 		}
 		gate, err := a.Parents.Retire(ctx, sessionID, dryRun, force, keepViz)
 		if err != nil {
@@ -2481,11 +2436,7 @@ func (a *App) cmdResolve(ctx context.Context, args []string) int {
 	if messageID == "" || decision == "" {
 		return a.fail(fmt.Errorf("usage: relay resolve MESSAGE [--] DECISION"))
 	}
-	msg, err := a.Parents.FindMessage(messageID)
-	if err != nil {
-		return a.fail(err)
-	}
-	if err := authorizeParentCaller(msg.ParentSessionID); err != nil {
+	if _, err := a.Parents.FindMessage(messageID); err != nil {
 		return a.fail(err)
 	}
 	resolved, err := a.Parents.Reply(ctx, messageID, decision)
@@ -2572,9 +2523,6 @@ func (a *App) parentTargetOrSelf(args []string) (string, []string, error) {
 func (a *App) currentParentID() (string, error) {
 	for _, key := range []string{bridge.SourceSessionEnv, "RELAY_SESSION_ID"} {
 		if id := strings.TrimSpace(os.Getenv(key)); id != "" {
-			if err := authorizeParentCaller(id); err != nil {
-				return "", err
-			}
 			return id, nil
 		}
 	}
@@ -2742,11 +2690,6 @@ func (a *App) cmdPolicy(args []string) int {
 // Caller authorization is performed once by the authenticated bridge policy.
 // This compatibility helper remains while parent verbs are kept mechanically
 // uniform; service methods below enforce only operation invariants.
-func authorizeParentCaller(parentID string) error {
-	_ = parentID
-	return nil
-}
-
 // cmdRoot owns the apex lifecycle: which session governs, which roots are
 // enrolled under it, where their rules live, and what it decided while the
 // human was away. Relay stays model-free — the judgment lives in the apex
@@ -3417,9 +3360,6 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 		if len(args) < 2 || strings.HasPrefix(args[1], "-") {
 			return a.fail(fmt.Errorf("usage: relay agent restart HANDOFF [--repo DIR] [--cwd REMOTE] [--name NAME] [--no-pane]"))
 		}
-		if err := a.authorizeAgentHandoff(ctx, args[1]); err != nil {
-			return a.fail(err)
-		}
 		opts, err := a.Handoffs.AgentRestartOptions(args[1])
 		if err != nil {
 			return a.fail(err)
@@ -3466,9 +3406,6 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 			return a.fail(fmt.Errorf("usage: relay agent wait HANDOFF [--from SEQ] [--timeout SEC]"))
 		}
 		handoffID := args[1]
-		if err := a.authorizeAgentHandoff(ctx, handoffID); err != nil {
-			return a.fail(err)
-		}
 		var from int64
 		timeoutSec := 120
 		for i := 2; i < len(args); i++ {
@@ -3500,9 +3437,6 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 			return a.fail(fmt.Errorf("usage: relay agent send HANDOFF [--] TEXT"))
 		}
 		handoffID, rest := args[1], args[2:]
-		if err := a.authorizeAgentHandoff(ctx, handoffID); err != nil {
-			return a.fail(err)
-		}
 		if rest[0] == "--" {
 			rest = rest[1:]
 		}
@@ -3523,9 +3457,6 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 			return a.fail(fmt.Errorf("usage: relay agent capture HANDOFF [-n LINES]"))
 		}
 		handoffID := args[1]
-		if err := a.authorizeAgentHandoff(ctx, handoffID); err != nil {
-			return a.fail(err)
-		}
 		n := 80
 		for i := 2; i < len(args); i++ {
 			switch args[i] {
@@ -3551,9 +3482,6 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 			return a.fail(fmt.Errorf("usage: relay agent done HANDOFF [--outcome done|failed|abandoned]"))
 		}
 		handoffID := args[1]
-		if err := a.authorizeAgentHandoff(ctx, handoffID); err != nil {
-			return a.fail(err)
-		}
 		outcome := core.OutcomeDone
 		keep := false
 		closeViz := true
@@ -3585,9 +3513,6 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 			return a.fail(fmt.Errorf("usage: relay agent status HANDOFF"))
 		}
 		handoffID := args[1]
-		if err := a.authorizeAgentHandoff(ctx, handoffID); err != nil {
-			return a.fail(err)
-		}
 		resp, err := a.Handoffs.AgentStatus(ctx, handoffID)
 		if resp != nil {
 			_ = a.out(resp)
@@ -3599,11 +3524,6 @@ func (a *App) cmdAgent(ctx context.Context, args []string) int {
 	default:
 		return a.fail(fmt.Errorf("unknown agent subcommand %q", args[0]))
 	}
-}
-
-func (a *App) authorizeAgentHandoff(ctx context.Context, handoffID string) error {
-	_, _ = ctx, handoffID
-	return nil
 }
 
 func (a *App) cmdViz(ctx context.Context, args []string) int {

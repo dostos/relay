@@ -2407,3 +2407,14 @@ func communicationSummary(text string) string {
 	}
 	return text
 }
+
+// ParentVerbTarget reads the session a parent verb addresses: the first
+// non-flag argument after the verb, or "" when the caller means itself. It is
+// argument parsing, not a permission check — it outlived the authority policy
+// it used to live beside.
+func ParentVerbTarget(afterVerb []string) string {
+	if len(afterVerb) > 0 && !strings.HasPrefix(afterVerb[0], "-") {
+		return afterVerb[0]
+	}
+	return ""
+}

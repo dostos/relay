@@ -338,7 +338,7 @@ func serveCommandBoundary(ctx context.Context, ready func(bool), withControl boo
 	if _, err := core.EnsureHomeClientIdentity(); err != nil {
 		return err
 	}
-	server := &bridge.Server{SockPath: sock, RelayBin: relayBinary(), Build: coord.Build, Authorize: core.AuthorizeBridgeSource, AuthorizeRequest: core.AuthorizeBridgeRequest, ReceiptDir: core.CommandReceiptDir()}
+	server := &bridge.Server{SockPath: sock, RelayBin: relayBinary(), Build: coord.Build, Authorize: core.AuthorizeBridgeSource, ReceiptDir: core.CommandReceiptDir()}
 	componentCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	bridgeErr := make(chan error, 1)

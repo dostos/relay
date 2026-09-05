@@ -240,20 +240,6 @@ func TestSourceEnvironmentUsesAuthenticatedRegistryIdentity(t *testing.T) {
 	}
 }
 
-func TestParentCallerScope(t *testing.T) {
-	t.Setenv(bridge.SourceSessionEnv, "sess-parent")
-	if err := authorizeParentCaller("sess-parent"); err != nil {
-		t.Fatalf("own parent rejected: %v", err)
-	}
-	if err := authorizeParentCaller("sess-other"); err != nil {
-		t.Fatalf("CLI duplicated boundary authorization: %v", err)
-	}
-	t.Setenv(bridge.SourceSessionEnv, "")
-	if err := authorizeParentCaller("sess-local"); err != nil {
-		t.Fatalf("local desktop invocation rejected: %v", err)
-	}
-}
-
 func TestCurrentParentIDUsesRelaySessionIdentity(t *testing.T) {
 	t.Setenv(bridge.SourceSessionEnv, "")
 	t.Setenv("RELAY_SESSION_ID", "sess-apex")
@@ -297,7 +283,7 @@ func TestLocalCLIForwardsAuthenticatedRequestAndConfirmsResponse(t *testing.T) {
 	}
 	server := &bridge.Server{
 		SockPath: core.DesktopBridgeSocketPath(), RelayBin: relayBin, Build: coord.Build,
-		Authorize: core.AuthorizeBridgeSource, AuthorizeRequest: core.AuthorizeBridgeRequest,
+		Authorize: core.AuthorizeBridgeSource,
 		ReceiptDir: core.CommandReceiptDir(),
 	}
 	done := make(chan error, 1)

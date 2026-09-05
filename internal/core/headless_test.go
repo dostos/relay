@@ -191,34 +191,9 @@ func TestHeadlessDeliveryRefusesWhenHeartbeatIsStale(t *testing.T) {
 	}
 }
 
-// A stale headless manager must not swallow an escalation that an ancestor
-// could still answer.
-func TestStaleHeadlessManagerFailsOverToAncestor(t *testing.T) {
-	service, reg, headless, ho := headlessDeliveryFixture(t, time.Minute)
-	now := time.Now().UTC()
-	grandparent, _, err := service.RegisterLocal(context.Background(), RegisterParentOpts{Headless: true, Name: "Root", TTL: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
-	headless.SourceSessionID = grandparent.ID
-	headless.Labels[heartbeatAtLabel] = now.Add(-2 * time.Hour).Format(time.RFC3339)
-	if err := reg.PutSession(headless); err != nil {
-		t.Fatal(err)
-	}
-	msg, err := service.RouteChildEvent(context.Background(), ho, coord.Event{Kind: "ask", Meta: map[string]any{"text": "deploy?"}, Seq: 1})
-	if err != nil {
-		t.Fatalf("failover route: %v", err)
-	}
-	stored, err := service.FindMessage(msg.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stored.ParentSessionID != grandparent.ID || stored.IntendedParentSessionID != headless.ID {
-		t.Fatalf("envelope did not fail over: %+v", stored)
-	}
-}
-
-func TestHeadlessParentSupportsStateAndRetirement(t *testing.T) {
+// State transitions survive the hierarchy retirement: a headless mailbox still
+// reports whether it is working or idle, which is what liveness reads.
+func TestHeadlessParentSupportsState(t *testing.T) {
 	service, _, _ := newParentTestService(t)
 	sess, _, err := service.RegisterLocal(context.Background(), RegisterParentOpts{Headless: true, Name: "Apex"})
 	if err != nil {
@@ -227,112 +202,31 @@ func TestHeadlessParentSupportsStateAndRetirement(t *testing.T) {
 	if _, err := service.SetState(sess.ID, "idle"); err != nil {
 		t.Fatalf("set state: %v", err)
 	}
-	gate, err := service.RetirementStatus(context.Background(), sess.ID)
+	got, err := service.Reg.GetSession(sess.ID)
 	if err != nil {
-		t.Fatalf("retirement status: %v", err)
+		t.Fatalf("get session: %v", err)
 	}
-	if gate.Headless == nil || gate.Headless.State != HeadlessFresh {
-		t.Fatalf("retirement gate must report headless health: %+v", gate.Headless)
-	}
-	if _, err := service.Retire(context.Background(), sess.ID, false, true, true); err != nil {
-		t.Fatalf("forced retire: %v", err)
-	}
-	if _, err := service.Reg.GetSession(sess.ID); err == nil {
-		t.Fatal("retired headless parent must be gone from the registry")
+	if !IsHeadlessParent(got) {
+		t.Fatal("registered headless parent lost its headless marker")
 	}
 }
 
-// Adoption is the whole point: an orphaned handoff must be reparentable onto a
-// root that has no pane to project the child into.
-func TestHeadlessParentAdoptsAndReparentsHandoffs(t *testing.T) {
-	service, reg, headless, ho := headlessDeliveryFixture(t, time.Hour)
-	viz := &fakeRetirementViz{}
-	service.Viz = viz
-	other, _, err := service.RegisterLocal(context.Background(), RegisterParentOpts{Headless: true, Name: "Other", TTL: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
-	moved, oldParent, err := service.ReparentChild(other.ID, ho.ID)
-	if err != nil {
-		t.Fatalf("reparent onto headless parent: %v", err)
-	}
-	if oldParent != headless.ID || moved.SourceSessionID != other.ID {
-		t.Fatalf("reparent = %+v old=%s", moved, oldParent)
-	}
-	child, err := reg.GetSession(ho.SessionID)
-	if err != nil || child.SourceSessionID != other.ID {
-		t.Fatalf("child lineage = %+v err=%v", child, err)
-	}
-	if len(viz.presented) != 0 {
-		t.Fatalf("a headless parent has no pane to nest a child under: %+v", viz.presented)
-	}
-}
-
-// A headless root operates through the authenticated command boundary, because
-// nothing ever injected an identity into it. The policy must confine it to its
-// own lineage exactly as it confines a pane manager.
-func TestHeadlessRootAuthorityIsLineageConfined(t *testing.T) {
-	service, reg, headless, ho := headlessDeliveryFixture(t, time.Hour)
-	stranger, _, err := service.RegisterLocal(context.Background(), RegisterParentOpts{Headless: true, Name: "Stranger", TTL: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
+// A manager addresses itself by writing nothing. That rule outlived the
+// authority policy it used to be enforced by; it is argument parsing now.
+func TestParentVerbTargetSelfScoping(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		actor *Session
-		args  []string
-		want  bool
+		name string
+		args []string
+		want string
 	}{
-		{"own inbox", headless, []string{"parent", "inbox", headless.ID}, true},
-		{"own heartbeat", headless, []string{"parent", "heartbeat", headless.ID}, true},
-		{"own child adoption", headless, []string{"parent", "move", headless.ID, ho.ID}, true},
-		{"stranger inbox", stranger, []string{"parent", "inbox", headless.ID}, false},
-		{"stranger heartbeat", stranger, []string{"parent", "heartbeat", headless.ID}, false},
-		{"stranger child", stranger, []string{"parent", "move", stranger.ID, ho.ID}, false},
+		{"own inbox unnamed", []string{"inbox"}, ""},
+		{"own inbox unnamed with flag", []string{"inbox", "--all"}, ""},
+		{"named inbox", []string{"inbox", "sess-other"}, "sess-other"},
+		{"flag first stays self", []string{"--all"}, ""},
+		{"nothing at all", []string{}, ""},
 	} {
-		allowed, reason := authorizeOperation(reg, tc.actor, tc.args)
-		if allowed != tc.want {
-			t.Fatalf("%s: allowed=%v (%s)", tc.name, allowed, reason)
-		}
-	}
-}
-
-// A manager that cannot name itself is not a manager. Its identity arrives from
-// the authenticated boundary, not from an argument it was told to remember, so
-// the verbs whose only subject is the manager itself must work with no subject
-// written down. Confinement is unchanged: naming somebody else is still
-// refused, and it is refused for saying so, not for saying nothing.
-func TestManagerActsOnItselfWithoutNamingItself(t *testing.T) {
-	_, reg, headless, _ := headlessDeliveryFixture(t, time.Hour)
-	now := time.Now().UTC()
-	stranger := &Session{ID: "sess-stranger", Persist: ports.PersistHandle{Name: "stranger"}, CreatedAt: now, UpdatedAt: now}
-	if err := reg.PutSession(stranger); err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		name   string
-		actor  *Session
-		args   []string
-		want   bool
-		reason string
-	}{
-		{"own inbox unnamed", headless, []string{"parent", "inbox"}, true, "manager's own inbox"},
-		{"own inbox unnamed with flag", headless, []string{"parent", "inbox", "--all"}, true, "manager's own inbox"},
-		{"own log unnamed", headless, []string{"parent", "log"}, true, "manager's own log"},
-		{"own status unnamed", headless, []string{"parent", "status"}, true, "manager's own status"},
-		{"own sweep unnamed", headless, []string{"parent", "sweep"}, true, "manager's own sweep"},
-		{"own heartbeat unnamed", headless, []string{"parent", "heartbeat"}, true, "manager's own heartbeat"},
-		{"own inbox named", headless, []string{"parent", "inbox", headless.ID}, true, "manager lineage authority"},
-		{"stranger inbox named", stranger, []string{"parent", "inbox", headless.ID}, false, "parent target is outside caller lineage"},
-		// Destructive and two-positional verbs keep requiring the id, and say
-		// so: "outside caller lineage" for an argument nobody wrote is a
-		// refusal that describes the wrong problem.
-		{"retire unnamed", headless, []string{"parent", "retire"}, false, "parent retire requires a PARENT"},
-		{"state unnamed", headless, []string{"parent", "state"}, false, "parent state requires a PARENT"},
-	} {
-		allowed, reason := authorizeOperation(reg, tc.actor, tc.args)
-		if allowed != tc.want || reason != tc.reason {
-			t.Fatalf("%s: allowed=%v reason=%q want %v %q", tc.name, allowed, reason, tc.want, tc.reason)
+		if got := ParentVerbTarget(tc.args[min(1, len(tc.args)):]); got != tc.want {
+			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
 		}
 	}
 }
