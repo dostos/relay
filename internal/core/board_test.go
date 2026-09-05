@@ -140,7 +140,7 @@ func TestBoardWatchSkipsCallersOwnEvents(t *testing.T) {
 }
 
 // Scope is structural: a board id is derived from the caller's own manager, so
-// siblings share one board and there is no way to name another subtree's.
+// siblings share one board and there is no way to name another mailbox's.
 func TestBoardIsSharedBySiblingsAndSeparatePerManager(t *testing.T) {
 	board, reg := newBoardTestService(t)
 	ctx := context.Background()
@@ -167,7 +167,7 @@ func TestBoardIsSharedBySiblingsAndSeparatePerManager(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(out) != 0 {
-		t.Fatalf("another subtree's board leaked: %+v", out)
+		t.Fatalf("another mailbox's board leaked: %+v", out)
 	}
 }
 
@@ -201,84 +201,5 @@ func TestBoardQueryNarrowsToOneKey(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Key != "gpu" || entries[0].Text != "hamburg:2,3" {
 		t.Fatalf("key filter failed: %+v", entries)
-	}
-}
-
-// A manager gets its whole subtree in one call rather than one query per level.
-func TestBoardQuerySubtreeRollsUpNestedManagers(t *testing.T) {
-	board, reg := newBoardTestService(t)
-	ctx := context.Background()
-	now := time.Now().UTC()
-	// sess-a is itself a manager with two children.
-	for _, id := range []string{"sess-a1", "sess-a2"} {
-		leaf := &Session{
-			ID: id, HostID: "c3", Persist: ports.PersistHandle{Kind: "tmux", Name: id},
-			SourceSessionID: "sess-a", CreatedAt: now,
-		}
-		if err := reg.PutSession(leaf); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// Level 1: sess-a and sess-b post to the manager's board.
-	if _, err := board.Post(ctx, "sess-a", "status", "phase", "capturing"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := board.Post(ctx, "sess-b", "status", "phase", "idle"); err != nil {
-		t.Fatal(err)
-	}
-	// Level 2: the grandchildren post to sess-a's board.
-	if _, err := board.Post(ctx, "sess-a1", "status", "phase", "rendering"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := board.Post(ctx, "sess-a2", "status", "phase", "scoring"); err != nil {
-		t.Fatal(err)
-	}
-
-	entries, err := board.QuerySubtree(ctx, "sess-manager", "status", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 4 {
-		t.Fatalf("want the whole subtree in one call, got %d: %+v", len(entries), entries)
-	}
-	got := map[string]string{}
-	for _, e := range entries {
-		got[e.Node] = e.Text
-	}
-	for node, want := range map[string]string{
-		"sess-a": "capturing", "sess-b": "idle", "sess-a1": "rendering", "sess-a2": "scoring",
-	} {
-		if got[node] != want {
-			t.Fatalf("node %s: want %q, got %q (all=%+v)", node, want, got[node], got)
-		}
-	}
-}
-
-// The rollup descends only; it never reaches a peer's or an ancestor's board.
-func TestBoardQuerySubtreeDoesNotClimb(t *testing.T) {
-	board, reg := newBoardTestService(t)
-	ctx := context.Background()
-	now := time.Now().UTC()
-	grand := &Session{ID: "sess-grand", HostID: "c1", Persist: ports.PersistHandle{Kind: "tmux", Name: "grand"}, CreatedAt: now}
-	if err := reg.PutSession(grand); err != nil {
-		t.Fatal(err)
-	}
-	mgr, _ := reg.GetSession("sess-manager")
-	mgr.SourceSessionID = grand.ID
-	if err := reg.PutSession(mgr); err != nil {
-		t.Fatal(err)
-	}
-	// The manager posts UP to its own peers' board (owned by sess-grand).
-	if _, err := board.Post(ctx, "sess-manager", "status", "phase", "secret-upstream"); err != nil {
-		t.Fatal(err)
-	}
-	entries, err := board.QuerySubtree(ctx, "sess-manager", "status", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range entries {
-		if e.Text == "secret-upstream" {
-			t.Fatalf("rollup climbed to an ancestor board: %+v", e)
-		}
 	}
 }

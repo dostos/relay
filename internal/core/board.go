@@ -8,10 +8,6 @@ import (
 	"time"
 )
 
-// maxBoardWalkDepth bounds the board's walk over launch edges. relay does not
-// enforce a depth limit anywhere else; this is a cycle guard, not a policy.
-const maxBoardWalkDepth = 32
-
 // A board is the shared, categorized coordination surface for the children of
 // one manager. Relay's escalation path is strictly vertical — a child talks
 // only to its parent — so peers that need to coordinate (status, resources,
@@ -20,7 +16,7 @@ const maxBoardWalkDepth = 32
 //
 // Scope is enforced by DERIVATION, not by a permission check: a board id is
 // always computed from the caller's own lineage, so a node cannot name another
-// subtree's board in the first place. There is nothing to spoof.
+// mailbox's board in the first place. There is nothing to spoof.
 //
 // The board is a projection over the existing relayd channel log, so posting
 // is append-only and querying is a fold — no new daemon, no poll loop.
@@ -58,8 +54,10 @@ func normalizeCategory(category string) (string, error) {
 	return category, nil
 }
 
-// resolveBoard finds the board a session may use: the one owned by its
-// manager. A root has no manager and therefore no peers to coordinate with.
+// resolveBoard finds the board a session may use: the one belonging to the
+// mailbox that launched it. That is the same key flat delivery uses, so a
+// session's peers on the board are exactly the siblings that share its mailbox.
+// A session with no launch edge belongs to no mailbox and so has no board.
 func (b *BoardService) resolveBoard(sessionID, category string) (manager *Session, channel string, err error) {
 	if b == nil || b.Reg == nil || b.Msg == nil {
 		return nil, "", fmt.Errorf("board service not configured")
@@ -73,7 +71,7 @@ func (b *BoardService) resolveBoard(sessionID, category string) (manager *Sessio
 		return nil, "", err
 	}
 	if sess.SourceSessionID == "" {
-		return nil, "", fmt.Errorf("session %s is a root and has no peer board", sessionID)
+		return nil, "", fmt.Errorf("session %s belongs to no mailbox and has no board", sessionID)
 	}
 	manager, err = b.Reg.GetSession(sess.SourceSessionID)
 	if err != nil {
@@ -135,70 +133,6 @@ func (b *BoardService) Query(ctx context.Context, sessionID, category, key strin
 	out := make([]BoardEntry, 0, len(latest))
 	for _, entry := range latest {
 		out = append(out, entry)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Node != out[j].Node {
-			return out[i].Node < out[j].Node
-		}
-		return out[i].Key < out[j].Key
-	})
-	return out, nil
-}
-
-// QuerySubtree rolls up every board beneath this session — its own children's
-// board plus those of each descendant manager — in one call.
-//
-// This is the multi-level view: a manager asking "what is my whole subtree
-// doing" would otherwise issue one query per manager and pay for the fan-out
-// in its own context. The tool does the walk; the agent gets one folded answer.
-// Scope still needs no check: the walk starts at the caller and only descends.
-func (b *BoardService) QuerySubtree(ctx context.Context, sessionID, category, key string) ([]BoardEntry, error) {
-	if b == nil || b.Reg == nil || b.Msg == nil {
-		return nil, fmt.Errorf("board service not configured")
-	}
-	category, err := normalizeCategory(category)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := b.Reg.GetSession(sessionID); err != nil {
-		return nil, err
-	}
-	all, err := b.Reg.ListSessions()
-	if err != nil {
-		return nil, err
-	}
-	children := map[string][]*Session{}
-	for _, sess := range all {
-		if sess.SourceSessionID != "" {
-			children[sess.SourceSessionID] = append(children[sess.SourceSessionID], sess)
-		}
-	}
-	key = strings.TrimSpace(key)
-	var out []BoardEntry
-	seen := map[string]bool{}
-	// Breadth-first over managers, bounded like every other lineage walk here.
-	frontier := []string{sessionID}
-	for depth := 0; depth < maxBoardWalkDepth && len(frontier) > 0; depth++ {
-		var next []string
-		for _, managerID := range frontier {
-			kids := children[managerID]
-			if len(kids) == 0 || seen[managerID] {
-				continue
-			}
-			seen[managerID] = true
-			manager, err := b.Reg.GetSession(managerID)
-			if err != nil {
-				continue
-			}
-			entries, err := b.readBoard(ctx, manager, category, key)
-			if err == nil {
-				out = append(out, entries...)
-			}
-			for _, kid := range kids {
-				next = append(next, kid.ID)
-			}
-		}
-		frontier = next
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Node != out[j].Node {

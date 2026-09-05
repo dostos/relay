@@ -2658,12 +2658,9 @@ func (a *App) cmdBoard(ctx context.Context, args []string) int {
 	var session, category, key, text string
 	var fromSeq int64
 	var fromSet bool
-	var subtree bool
 	timeoutSec := 120
 	for i := 0; i < len(rest); i++ {
 		switch rest[i] {
-		case "--subtree":
-			subtree = true
 		case "--session", "-s":
 			i++
 			if i < len(rest) {
@@ -2714,14 +2711,7 @@ func (a *App) cmdBoard(ctx context.Context, args []string) int {
 		}
 		return a.errOut(a.out(map[string]any{"ok": true, "seq": seq}))
 	case "query":
-		query := func() ([]core.BoardEntry, error) {
-			if subtree {
-				// One call for the whole subtree instead of one per level.
-				return a.Boards.QuerySubtree(ctx, caller, category, key)
-			}
-			return a.Boards.Query(ctx, caller, category, key, true)
-		}
-		entries, err := query()
+		entries, err := a.Boards.Query(ctx, caller, category, key, true)
 		if err != nil {
 			return a.fail(err)
 		}

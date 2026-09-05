@@ -3,7 +3,8 @@
 Date: 2026-09-05
 Status: **Done** — branch A (flat inbox). All four passes landed 2026-09-05
 (fa9b02b, 4ed068a, d25a08c, 42926b9, 693cdfb): ~4100 lines removed, 19 test
-packages green. One open question remains: board.go.
+packages green. No open questions: board.go was settled last, scoped to one
+mailbox.
 
 Goal, as stated: (1) retire the permission/ownership machinery, (2) refocus on
 messaging + persistence (tmux) + viz, (3) aim at a Ghostty-based native app that
@@ -139,12 +140,19 @@ and no handoff, and would have been flagged wrongly.
 
 Both verified in code, neither addressed yet.
 
-**`board.go` builds a tree — still open, the one thing this plan did not
-settle.** `resolveBoard` walks `sess.SourceSessionID` to a
-manager (board.go:71-74) and `QuerySubtree` assembles a parent-to-children map
-from the same field (board.go:168-169). The whole verb is named for a subtree.
-This was outside the four passes and needs its own decision: a board scoped to
-one mailbox, or a board scoped to a channel.
+**`board.go` built a tree — settled: one mailbox.** Reading it closely, only
+half of it was tree-shaped. `resolveBoard` already resolved to exactly one
+mailbox: a session's board is the board of the mailbox that launched it, keyed
+on the same launch edge flat delivery uses, so a session's peers are the
+siblings sharing its mailbox. That needed no change beyond wording.
+
+The tree was `QuerySubtree`, which assembled a parent-to-children map and rolled
+up nested managers, plus the `--subtree` flag that reached it. Both are gone,
+along with the depth guard that bounded the walk. `relay board query` returns
+one mailbox's board, which is what post and watch already did.
+
+The isolation property survives and is now the whole point: siblings share one
+board, and there is no way to name another mailbox's.
 
 **`applyAgentChildWorkspaceTrust` is a second permission decision**, living in
 the file this plan calls the messaging engine (parent.go:1519-1551). It
