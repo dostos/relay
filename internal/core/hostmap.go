@@ -147,6 +147,138 @@ func (p *ProfileService) MapRepo(ctx context.Context, t ports.Transport, hostID,
 	return p.Fetch(ctx, hostID)
 }
 
+// UpsertContainerEntry declares a devcontainer in a host.yaml, preserving the
+// rest of the file for the same reason UpsertPathMapEntry does.
+//
+// It writes the minimum that `relay container open` needs: a name and the
+// workspace folder holding .devcontainer. Toolkit and home volumes are NOT
+// invented here -- those are choices about what an agent needs, and guessing
+// them would put volumes on a shared host that nobody asked for.
+func UpsertContainerEntry(document []byte, name, workspaceFolder string) ([]byte, error) {
+	name = strings.TrimSpace(name)
+	workspaceFolder = strings.TrimSpace(workspaceFolder)
+	if name == "" {
+		return nil, fmt.Errorf("container name required")
+	}
+	if workspaceFolder == "" {
+		return nil, fmt.Errorf("workspace_folder required")
+	}
+
+	var root yaml.Node
+	if err := yaml.Unmarshal(document, &root); err != nil {
+		return nil, fmt.Errorf("parse host profile: %w", err)
+	}
+	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
+		return nil, fmt.Errorf("host profile is not a YAML document")
+	}
+	body := root.Content[0]
+	if body.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("host profile is not a mapping")
+	}
+
+	seq := findOrCreateSequence(body, "containers")
+	for _, entry := range seq.Content {
+		if entry.Kind != yaml.MappingNode {
+			continue
+		}
+		if value := mappingValue(entry, "name"); value != nil && value.Value == name {
+			dev := mappingValue(entry, "devcontainer")
+			if dev == nil || dev.Kind != yaml.MappingNode {
+				return nil, fmt.Errorf("container %q already exists and is not a devcontainer; leaving it alone", name)
+			}
+			if folder := mappingValue(dev, "workspace_folder"); folder != nil {
+				folder.Value = workspaceFolder
+				folder.Tag = "!!str"
+				return encodeDocument(&root)
+			}
+			dev.Content = append(dev.Content,
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "workspace_folder"},
+				&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: workspaceFolder})
+			return encodeDocument(&root)
+		}
+	}
+
+	seq.Content = append(seq.Content, &yaml.Node{
+		Kind: yaml.MappingNode,
+		Content: []*yaml.Node{
+			{Kind: yaml.ScalarNode, Tag: "!!str", Value: "name"},
+			{Kind: yaml.ScalarNode, Tag: "!!str", Value: name},
+			{Kind: yaml.ScalarNode, Tag: "!!str", Value: "devcontainer"},
+			{Kind: yaml.MappingNode, Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Tag: "!!str", Value: "workspace_folder"},
+				{Kind: yaml.ScalarNode, Tag: "!!str", Value: workspaceFolder},
+			}},
+		},
+	})
+	return encodeDocument(&root)
+}
+
+// DeclareContainer records a devcontainer in the host's own profile.
+func (p *ProfileService) DeclareContainer(ctx context.Context, t ports.Transport, hostID, name, workspaceFolder string) (*HostProfile, error) {
+	if hostID == "" {
+		return nil, fmt.Errorf("host required")
+	}
+	path := RemoteHostProfilePath()
+	raw, err := t.ReadFile(ctx, path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s on %s: %w", path, hostID, err)
+	}
+	updated, err := UpsertContainerEntry(raw, name, workspaceFolder)
+	if err != nil {
+		return nil, err
+	}
+	if err := t.WriteFile(ctx, path, updated, "644"); err != nil {
+		return nil, fmt.Errorf("write %s on %s: %w", path, hostID, err)
+	}
+	return p.Fetch(ctx, hostID)
+}
+
+// CloneRepoCommand clones a GitHub repo onto a host and reports what it found.
+//
+// It uses the HOST's gh, so the host's own credentials apply and no token from
+// this machine is forwarded to a shared box. An existing checkout is left
+// alone rather than re-cloned: the directory may hold work.
+//
+// The output ends in one machine-readable line, because the caller has to
+// branch on whether the repo carries a .devcontainer and reading that out of
+// git's own chatter would be guesswork.
+func CloneRepoCommand(repo, parent string) (string, error) {
+	if strings.TrimSpace(repo) == "" {
+		return "", fmt.Errorf("repo required")
+	}
+	parentExpr, err := shellquote.PathExpr(parent)
+	if err != nil {
+		return "", err
+	}
+	name := repo
+	if i := strings.LastIndex(repo, "/"); i >= 0 {
+		name = repo[i+1:]
+	}
+	if name == "" || strings.ContainsAny(name, "/ \t\n") {
+		return "", fmt.Errorf("repo %q has no usable name", repo)
+	}
+	// A raw literal: this script is full of shell quoting, and escaping it
+	// through an interpreted Go string is how the last two attempts broke.
+	const script = `set -e
+mkdir -p %[1]s
+cd %[1]s
+if [ -d %[2]s/.git ]; then state=exists; else gh repo clone %[3]s %[2]s >&2; state=cloned; fi
+if [ -d %[2]s/.devcontainer ] || [ -f %[2]s/.devcontainer.json ]; then dev=yes; else dev=no; fi
+printf 'RELAY_CLONE %%s %%s/%%s %%s\n' "$state" "$(pwd)" %[2]s "$dev"`
+	return fmt.Sprintf(script, parentExpr, shellquote.Quote(name), shellquote.Quote(repo)), nil
+}
+
+// ParseCloneResult reads the one line CloneRepoCommand ends with.
+func ParseCloneResult(output string) (state, path string, devcontainer bool, err error) {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) == 4 && fields[0] == "RELAY_CLONE" {
+			return fields[1], fields[2], fields[3] == "yes", nil
+		}
+	}
+	return "", "", false, fmt.Errorf("clone produced no result line")
+}
+
 // RemoteDirsCommand lists the immediate subdirectories of dir on a host.
 //
 // It exists so a client can offer a folder picker without speaking SSH itself.

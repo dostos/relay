@@ -150,3 +150,68 @@ func nonBlankLines(s string) []string {
 	}
 	return out
 }
+
+func TestUpsertContainerDeclaresADevcontainer(t *testing.T) {
+	out, err := UpsertContainerEntry([]byte(commentedProfile), "opaquebench", "~/gh/opaquebench")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+	if !strings.Contains(got, "# beholder lives outside") {
+		t.Errorf("comments erased:\n%s", got)
+	}
+	profile, err := ParseHostProfileYAML(out)
+	if err != nil {
+		t.Fatalf("result no longer parses: %v\n%s", err, got)
+	}
+	if len(profile.Containers) != 1 {
+		t.Fatalf("want one container, got %+v", profile.Containers)
+	}
+	c := profile.Containers[0]
+	if c.Name != "opaquebench" || c.Devcontainer == nil ||
+		c.Devcontainer.WorkspaceFolder != "~/gh/opaquebench" {
+		t.Errorf("declared wrong: %+v", c)
+	}
+	// It must be usable by the verb it exists for.
+	if _, err := DevcontainerUpCommand(&c, false); err != nil {
+		t.Errorf("declared container is not launchable: %v", err)
+	}
+}
+
+// A container someone hand-declared with binds, GPUs and volumes must not be
+// silently rewritten by a drag-and-drop.
+func TestUpsertContainerRefusesToOverwriteANonDevcontainer(t *testing.T) {
+	existing := "version: 1\nhost_id: c1\ncontainers:\n  - name: runner\n    container: bk-pilot\n"
+	if _, err := UpsertContainerEntry([]byte(existing), "runner", "~/gh/runner"); err == nil {
+		t.Error("expected a refusal rather than clobbering an exec-into-existing container")
+	}
+}
+
+func TestCloneCommandIsIdempotentAndReportsDevcontainer(t *testing.T) {
+	got, err := CloneRepoCommand("dostos/forge", "~/gh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "state=exists") {
+		t.Errorf("an existing checkout must not be re-cloned over: %s", got)
+	}
+	if !strings.Contains(got, ".devcontainer") {
+		t.Errorf("devcontainer detection missing: %s", got)
+	}
+	if !strings.Contains(got, "gh repo clone") {
+		t.Errorf("clone uses the host's own gh: %s", got)
+	}
+	if _, err := CloneRepoCommand("", "~/gh"); err == nil {
+		t.Error("expected an error for an empty repo")
+	}
+}
+
+func TestParseCloneResult(t *testing.T) {
+	state, path, dev, err := ParseCloneResult("Cloning...\nRELAY_CLONE cloned /home/x/gh/forge yes\n")
+	if err != nil || state != "cloned" || path != "/home/x/gh/forge" || !dev {
+		t.Fatalf("got %q %q %v %v", state, path, dev, err)
+	}
+	if _, _, _, err := ParseCloneResult("no marker here"); err == nil {
+		t.Error("expected an error when the marker line is absent")
+	}
+}

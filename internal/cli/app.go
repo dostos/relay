@@ -607,6 +607,10 @@ Host profiles (authoritative on each remote ~/.config/relay/host.yaml):
   relay host map -H HOST --match NAME --remote-cwd DIR
                                       Record where a local repo lives on HOST
   relay host ls -H HOST [--path DIR]  List remote directories (for a folder picker)
+  relay host clone -H HOST --repo OWNER/NAME [--parent DIR]
+                                      Clone with the HOST's gh; reports if it has a devcontainer
+  relay host container -H HOST --name NAME --workspace-folder DIR
+                                      Declare a devcontainer so relay container up can launch it
   relay host example -H HOST          Print starter host.yaml
   relay host bootstrap -H HOST        Install host-local event service (unix socket; one quiet SSH)
 
@@ -1036,6 +1040,96 @@ func (a *App) cmdHost(ctx context.Context, args []string) int {
 		return a.errOut(a.out(map[string]any{
 			"ok": true, "host_id": host, "match": match, "remote_cwd": remoteCWD,
 			"path_map": profile.PathMap,
+		}))
+	case "container":
+		// Declares a devcontainer in the host's profile so `relay container up`
+		// can launch it. Only the two fields that verb needs are written:
+		// toolkit and home volumes are decisions about what an agent requires,
+		// and inventing them would put volumes on a shared host nobody asked
+		// for.
+		if host == "" {
+			return a.fail(fmt.Errorf("-H HOST required"))
+		}
+		name, folder := "", ""
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case "--name":
+				i++
+				if i < len(rest) {
+					name = rest[i]
+				}
+			case "--workspace-folder":
+				i++
+				if i < len(rest) {
+					folder = rest[i]
+				}
+			default:
+				return a.fail(rejectUnknownFlag(rest[i]))
+			}
+		}
+		if name == "" || folder == "" {
+			return a.fail(fmt.Errorf("usage: relay host container -H HOST --name NAME --workspace-folder DIR"))
+		}
+		t, err := a.tf(host)
+		if err != nil {
+			return a.fail(err)
+		}
+		profile, err := a.Profiles.DeclareContainer(ctx, t, host, name, folder)
+		if err != nil {
+			return a.fail(err)
+		}
+		a.JSON = true
+		return a.errOut(a.out(map[string]any{
+			"ok": true, "host_id": host, "name": name,
+			"workspace_folder": folder, "containers": profile.Containers,
+		}))
+	case "clone":
+		// Clones with the HOST's gh, so the host's credentials apply and no
+		// token from this machine is forwarded to a shared box.
+		if host == "" {
+			return a.fail(fmt.Errorf("-H HOST required"))
+		}
+		repo, parent := "", "~"
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case "--repo":
+				i++
+				if i < len(rest) {
+					repo = rest[i]
+				}
+			case "--parent":
+				i++
+				if i < len(rest) {
+					parent = rest[i]
+				}
+			default:
+				return a.fail(rejectUnknownFlag(rest[i]))
+			}
+		}
+		if repo == "" {
+			return a.fail(fmt.Errorf("usage: relay host clone -H HOST --repo OWNER/NAME [--parent DIR]"))
+		}
+		cmd, err := core.CloneRepoCommand(repo, parent)
+		if err != nil {
+			return a.fail(err)
+		}
+		t, err := a.tf(host)
+		if err != nil {
+			return a.fail(err)
+		}
+		out, errOut, runErr := t.Run(ctx, "", cmd)
+		state, path, dev, parseErr := core.ParseCloneResult(out)
+		if runErr != nil || parseErr != nil {
+			detail := strings.TrimSpace(errOut)
+			if detail == "" {
+				detail = strings.TrimSpace(out)
+			}
+			return a.fail(fmt.Errorf("clone %s on %s: %s", repo, host, detail))
+		}
+		a.JSON = true
+		return a.errOut(a.out(map[string]any{
+			"ok": true, "host_id": host, "repo": repo,
+			"state": state, "path": path, "devcontainer": dev,
 		}))
 	case "ls":
 		// One level of directories, so a client can offer a remote folder
