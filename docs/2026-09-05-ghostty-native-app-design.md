@@ -39,6 +39,23 @@ Two consequences fall out of that, and they drive the rest of this document:
    libghostty or something else changes one Swift file, not the design. That
    matters, because libghostty's embedding API is not stable (see below).
 
+## Status of the two blockers: both fixed (dee3a62)
+
+This document found two reasons a second presenter could not exist. Both are
+now gone, so stage 1 starts against a seam rather than against a fork of the
+CLI.
+
+`ManagedPane` moved from the cmux package to `ports`, and `relay pane list`
+asserts `ports.PaneLister` instead of an interface literal naming cmux. The
+adapter is selected by `RELAY_PRESENTER`; an unknown value warns loudly and
+leaves the app with no presenter rather than silently falling back.
+
+Doing that surfaced a third thing this document had only counted: cmux was also
+being passed as `DesktopScreen` and `ParentNotifier` by concrete type. Those
+are now discovered by assertion, and every use site already nil-checks and
+returns a named error. That is what makes an incomplete presenter legal, which
+is exactly what stage 1 will be.
+
 ## Correction: build on Ghostty itself
 
 This document was first written assuming the choice was *embed libghostty in a
