@@ -1,9 +1,9 @@
 # relay — retiring ownership, keeping messaging
 
 Date: 2026-09-05
-Status: Accepted — branch A (flat inbox). Three of four passes landed
-2026-09-05 (fa9b02b, 4ed068a, d25a08c): -2761 lines, 19 test packages green.
-One pass remains, scoped at the bottom.
+Status: **Done** — branch A (flat inbox). All four passes landed 2026-09-05
+(fa9b02b, 4ed068a, d25a08c, 42926b9, 693cdfb): ~4100 lines removed, 19 test
+packages green. One open question remains: board.go.
 
 Goal, as stated: (1) retire the permission/ownership machinery, (2) refocus on
 messaging + persistence (tmux) + viz, (3) aim at a Ghostty-based native app that
@@ -106,10 +106,12 @@ worth more than the mechanism that carried it:
 - **A manager still addresses itself by writing nothing.** That was enforced by
   the authority policy; it is argument parsing (`ParentVerbTarget`), and moved.
 
-## Remaining — pass 4: apex
+## Pass 4: apex — landed in 693cdfb
 
-Not started. It is separable and self-contained, but it reaches into three
-files this plan has not yet audited, so it is deliberately a fresh unit of work:
+The instruction that settled it: *"apex 같은 관리자는 이제 필요 없음. 그냥 binary
+자체가 관리자."* There is no governing session; the binary is the manager. That
+retired manager replacement too, which this plan had provisionally kept as
+control-plane authority. With no manager session there is nothing to replace.
 
 | Site | What |
 |---|---|
@@ -119,14 +121,26 @@ files this plan has not yet audited, so it is deliberately a fresh unit of work:
 | `session.go` | `UnobservableGovernedChildren` |
 | `ancestor.go` | `AncestorChain` — its last caller is the apex code above |
 
-Nothing live depends on it: `relay root status` reports `no apex designated` on
-this control plane, so the retirement is not a production change.
+Nothing live depended on it: `relay root status` reported `no apex designated`
+before removal, so this was not a production change.
+
+Two things that sound like the retired concept were kept, and the commit says
+why: `relay root control-plane` and `relay root rules` govern nothing, and
+`authority_lock.go` is a state-file write lock that merely shares the name.
+
+Two doctor checks were deleted rather than rewritten. `governed_event_channels`
+keyed off a label only enrollment ever set, so it had already become a check
+that could never fire. Rewriting it would have meant guessing a new predicate:
+"a launched session that should have an event stream" is not the same set as
+"a session with a launch edge", because interactive sessions have the latter
+and no handoff, and would have been flagged wrongly.
 
 ## Two dependencies this plan missed, found by a survey of the kept surface
 
 Both verified in code, neither addressed yet.
 
-**`board.go` builds a tree.** `resolveBoard` walks `sess.SourceSessionID` to a
+**`board.go` builds a tree — still open, the one thing this plan did not
+settle.** `resolveBoard` walks `sess.SourceSessionID` to a
 manager (board.go:71-74) and `QuerySubtree` assembles a parent-to-children map
 from the same field (board.go:168-169). The whole verb is named for a subtree.
 This was outside the four passes and needs its own decision: a board scoped to
