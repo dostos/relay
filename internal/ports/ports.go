@@ -226,3 +226,31 @@ type Coord interface {
 	// (used by Persistence sensors). Validates session and kind defensively.
 	SensorCommand(session, kind string) (string, error)
 }
+
+// ManagedPane is one presenter-owned surface binding, as reported by
+// `relay pane list`.
+//
+// It lives here rather than in the cmux adapter because the CLI reads it
+// through a capability assertion on the Viz port. While the type was
+// cmux-specific, that assertion named the cmux package, so no second presenter
+// could ever satisfy it however completely it implemented the behaviour.
+type ManagedPane struct {
+	SessionID       string    `json:"session_id"`
+	SourceSessionID string    `json:"source_session_id,omitempty"`
+	PersistName     string    `json:"persist_name,omitempty"`
+	Target          string    `json:"target,omitempty"`
+	Surface         string    `json:"surface"`
+	Pane            string    `json:"pane,omitempty"`
+	Workspace       string    `json:"workspace,omitempty"`
+	Mode            string    `json:"mode,omitempty"`
+	State           string    `json:"state"` // live | disconnected
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+// PaneLister is the optional Viz capability behind `relay pane list`.
+// A presenter that can enumerate its surfaces implements it; one that cannot
+// is refused by name rather than silently returning nothing.
+type PaneLister interface {
+	ManagedPanes(ctx context.Context) ([]ManagedPane, error)
+}

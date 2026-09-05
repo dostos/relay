@@ -54,11 +54,39 @@ type App struct {
 	tf          core.TransportFactory
 }
 
+// PresenterEnv selects which presenter backs the Viz port. cmux is the default
+// and the only one built in today; the variable exists so a second presenter
+// can be introduced without editing this constructor, and so an unknown value
+// fails loudly at startup instead of silently falling back to cmux.
+const PresenterEnv = "RELAY_PRESENTER"
+
+// newPresenter resolves the Viz adapter. An unrecognised name is a fatal
+// configuration error rather than a default: a user who asked for a presenter
+// that does not exist wants to hear about it, not to get the old one.
+func newPresenter() (ports.Viz, error) {
+	switch name := strings.TrimSpace(os.Getenv(PresenterEnv)); name {
+	case "", "cmux":
+		return cmux.New(), nil
+	default:
+		return nil, fmt.Errorf("unknown presenter %q in %s (known: cmux)", name, PresenterEnv)
+	}
+}
+
 // New constructs the default App (SSH + tmux + cmux + relayd coord).
 func New() *App {
 	reg := &core.Registry{}
 	persist := tmux.New()
-	viz := cmux.New()
+	viz, vizErr := newPresenter()
+	if vizErr != nil {
+		ui.Warn(vizErr.Error())
+	}
+	// A presenter is a Viz first and a set of optional capabilities second.
+	// These two are discovered rather than required, so a presenter that cannot
+	// capture a screen or notify a mailbox still constructs -- the services
+	// that need them nil-check and degrade, which is what lets a second
+	// presenter exist before it is complete.
+	screen, _ := viz.(core.DesktopScreen)
+	notifier, _ := viz.(core.ParentNotifier)
 	coord := sshcoord.New()
 	localHostID := core.LocalHostIDFromProfile()
 	tf := func(hostID string) (ports.Transport, error) {
@@ -80,7 +108,7 @@ func New() *App {
 		NewTransport: tf,
 		Persist:      persist,
 		Viz:          viz,
-		Screen:       viz,
+		Screen:       screen,
 	}
 	handoffs := &core.HandoffService{
 		Sessions:     sessions,
@@ -93,7 +121,7 @@ func New() *App {
 	}
 	msgs := &core.MsgService{Coord: coord, NewTransport: tf}
 	policies := &core.PolicyService{}
-	parents := &core.ParentService{Reg: reg, Sessions: sessions, Coord: coord, Viz: viz, Notifier: viz, Policies: policies, NewTransport: tf}
+	parents := &core.ParentService{Reg: reg, Sessions: sessions, Coord: coord, Viz: viz, Notifier: notifier, Policies: policies, NewTransport: tf}
 	handoffs.ParentRouter = parents
 	boot := &core.BootstrapService{NewTransport: tf}
 	auth := &core.AuthService{
@@ -3349,9 +3377,7 @@ func (a *App) cmdViz(ctx context.Context, args []string) int {
 		a.JSON = true
 		return a.errOut(a.out(map[string]any{"ok": true, "seq": seq, "kind": "retire_control"}))
 	case "list":
-		manager, ok := a.Viz.(interface {
-			ManagedPanes(context.Context) ([]cmux.ManagedPane, error)
-		})
+		manager, ok := a.Viz.(ports.PaneLister)
 		if !ok {
 			return a.fail(fmt.Errorf("viz adapter does not expose managed panes"))
 		}

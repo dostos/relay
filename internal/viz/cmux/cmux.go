@@ -75,21 +75,9 @@ type binding struct {
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
-// ManagedPane is the inspectable desktop-owned pane record returned by
-// `relay pane list`.
-type ManagedPane struct {
-	SessionID       string    `json:"session_id"`
-	SourceSessionID string    `json:"source_session_id,omitempty"`
-	PersistName     string    `json:"persist_name,omitempty"`
-	Target          string    `json:"target,omitempty"`
-	Surface         string    `json:"surface"`
-	Pane            string    `json:"pane,omitempty"`
-	Workspace       string    `json:"workspace,omitempty"`
-	Mode            string    `json:"mode,omitempty"`
-	State           string    `json:"state"` // live | disconnected
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
-}
+// ManagedPane is the presenter-neutral pane record. The canonical type lives
+// in ports so the CLI's capability assertion does not name this package.
+type ManagedPane = ports.ManagedPane
 
 type surfaceLocation struct {
 	Workspace string
