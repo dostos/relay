@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -521,34 +520,6 @@ func effectiveLiveHandoff(reg *Registry, ho *Handoff) (*Handoff, error) {
 	copy.SourceHostID = sess.SourceHostID
 	copy.SourcePersistName = sess.SourcePersistName
 	return &copy, nil
-}
-
-// UnobservableGovernedChildren finds topology edges advertised as governed but
-// lacking a live handoff, which is the owner of sensors, event cursors, and the
-// watcher. A live tmux pane alone is not an event channel.
-func (s *SessionService) UnobservableGovernedChildren() ([]string, error) {
-	sessions, err := s.Reg.ListSessions()
-	if err != nil {
-		return nil, err
-	}
-	handoffs, err := s.Reg.ListHandoffs()
-	if err != nil {
-		return nil, err
-	}
-	observable := map[string]bool{}
-	for _, ho := range handoffs {
-		if !handoffTerminal(ho) {
-			observable[ho.SessionID] = true
-		}
-	}
-	var out []string
-	for _, sess := range sessions {
-		if sess.SourceSessionID != "" && sess.Labels["governed"] == "true" && !observable[sess.ID] {
-			out = append(out, sess.ID)
-		}
-	}
-	sort.Strings(out)
-	return out, nil
 }
 
 // SendManagedChild lets an authenticated manager communicate with exactly one

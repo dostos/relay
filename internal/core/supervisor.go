@@ -131,11 +131,11 @@ func (s *SupervisorService) NeedsWatch() ([]*Handoff, error) {
 		if err != nil {
 			continue
 		}
+		// A handoff with no launch edge addresses no mailbox, so nothing can
+		// route its escalations. The apex was the one exception; there is no
+		// apex now.
 		if effective.SourceSessionID == "" {
-			sess, getErr := s.Reg.GetSession(effective.SessionID)
-			if getErr != nil || sess.Labels[ApexLabel] != "true" {
-				continue
-			}
+			continue
 		}
 		out = append(out, effective)
 	}

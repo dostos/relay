@@ -506,34 +506,6 @@ func TestAutomaticDeliveryBackoffIsDurableAndCapped(t *testing.T) {
 	}
 }
 
-func TestFailedEnvelopeDoesNotBlockDueSibling(t *testing.T) {
-	service, notifier, reg := newParentTestService(t)
-	now := time.Now().UTC()
-	apex := &Session{ID: "sess-apex", HostID: LocalHostID, Persist: ports.PersistHandle{Kind: "tmux", Name: "apex"}, Labels: map[string]string{ApexLabel: "true"}, CreatedAt: now}
-	_ = reg.PutSession(apex)
-	for _, handoffID := range []string{"ho-stuck", "ho-ready"} {
-		_ = reg.PutHandoff(&Handoff{ID: handoffID, SessionID: apex.ID, HostID: apex.HostID, Kind: KindAgent, Status: StatusRunning, CreatedAt: now})
-	}
-	stuck := &ParentMessage{V: 1, ID: "pm-stuck", CorrelationID: "stuck", ParentSessionID: apex.ID, ChildSessionID: apex.ID, HandoffID: "ho-stuck", EventSeq: 1, Kind: "result", Text: "stuck", State: ParentMessagePending, CreatedAt: now}
-	ready := &ParentMessage{V: 1, ID: "pm-ready", CorrelationID: "ready", ParentSessionID: apex.ID, ChildSessionID: apex.ID, HandoffID: "ho-ready", EventSeq: 2, Kind: "result", Text: "ready", State: ParentMessagePending, CreatedAt: now.Add(time.Second)}
-	if err := writeParentMessage(stuck, true); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeParentMessage(ready, true); err != nil {
-		t.Fatal(err)
-	}
-	notifier.failNotices = map[string]bool{stuck.ID: true}
-
-	delivered, err := service.DeliverPending(context.Background(), apex.ID)
-	if delivered != 1 || err == nil || !strings.Contains(err.Error(), stuck.ID) {
-		t.Fatalf("delivered=%d err=%v", delivered, err)
-	}
-	storedReady, findErr := service.FindMessage(ready.ID)
-	if findErr != nil || storedReady.DeliveredAt == nil || len(notifier.notices) != 2 {
-		t.Fatalf("ready=%+v notices=%d err=%v", storedReady, len(notifier.notices), findErr)
-	}
-}
-
 func TestUncertainSubmissionIsNotRetypedAcrossSupervisorRetries(t *testing.T) {
 	service, notifier, reg := newParentTestService(t)
 	service.Policies = &PolicyService{Path: filepath.Join(t.TempDir(), "missing-policy.yaml")}

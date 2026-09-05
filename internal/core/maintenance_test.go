@@ -127,33 +127,6 @@ func TestGCRefusesToReapManagerWithLiveChild(t *testing.T) {
 	}
 }
 
-func TestGCDiagnosesDanglingLineageWithoutChangingAuthority(t *testing.T) {
-	t.Setenv("RELAY_STATE_DIR", t.TempDir())
-	reg := &Registry{}
-	now := time.Now().UTC()
-	apex := &Session{ID: "sess-apex", HostID: "home", Persist: ports.PersistHandle{Name: "apex-v3"}, Labels: map[string]string{ApexLabel: "true"}, CreatedAt: now}
-	orphan := &Session{ID: "sess-orphan", SourceSessionID: "sess-dead", CreatedByHandoffID: "ho-orphan", CreatedAt: now}
-	root := &Session{ID: "sess-intentional-root", CreatedAt: now}
-	for _, sess := range []*Session{apex, orphan, root} {
-		if err := reg.PutSession(sess); err != nil {
-			t.Fatal(err)
-		}
-	}
-	m := &MaintenanceService{Reg: reg}
-	dangling := m.danglingLineage()
-	if len(dangling) != 1 || dangling[0] != orphan.ID {
-		t.Fatalf("dangling=%v", dangling)
-	}
-	gotOrphan, _ := reg.GetSession(orphan.ID)
-	gotRoot, _ := reg.GetSession(root.ID)
-	if gotOrphan.SourceSessionID != "sess-dead" {
-		t.Fatalf("diagnostic changed authority: %+v", gotOrphan)
-	}
-	if gotRoot.SourceSessionID != "" {
-		t.Fatalf("intentional root was annexed: %+v", gotRoot)
-	}
-}
-
 func itoa(n int64) string {
 	neg := n < 0
 	if neg {

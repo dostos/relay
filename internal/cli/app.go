@@ -424,13 +424,6 @@ func (a *App) Run(args []string) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	// Complete any durable authority transition before another command can
-	// observe or mutate a half-replaced hierarchy.
-	if a.Roots != nil && a.Parents != nil {
-		if _, err := a.Roots.RecoverReplacement(ctx, a.Parents); err != nil {
-			return a.fail(fmt.Errorf("recover authority replacement: %w", err))
-		}
-	}
 	if _, err := core.RecoverSessionDeletions(ctx, a.Reg, a.Viz); err != nil {
 		return a.fail(fmt.Errorf("recover session deletion: %w", err))
 	}
@@ -2590,18 +2583,13 @@ func (a *App) cmdPolicy(args []string) int {
 	}
 }
 
-// Caller authorization is performed once by the authenticated bridge policy.
-// This compatibility helper remains while parent verbs are kept mechanically
-// uniform; service methods below enforce only operation invariants.
-// cmdRoot owns the apex lifecycle: which session governs, which roots are
-// enrolled under it, where their rules live, and what it decided while the
-// human was away. Relay stays model-free — the judgment lives in the apex
-// agent (share/roles/relay-conductor.md), not here.
+// cmdRoot is what is left after the apex retired: the control-plane
+// declaration for this machine, and where a project's rules file lives.
 func (a *App) cmdRoot(ctx context.Context, args []string) int {
 	a.JSON = true
 	a.CompactJSON = true
 	if len(args) == 0 {
-		return a.fail(fmt.Errorf("usage: relay root adopt|replace|release|enroll|unenroll|status|rules|digest …"))
+		return a.fail(fmt.Errorf("usage: relay root control-plane|rules …"))
 	}
 	sub, rest := args[0], args[1:]
 	if sub == "control-plane" {
@@ -2617,98 +2605,14 @@ func (a *App) cmdRoot(ctx context.Context, args []string) int {
 		}
 		return a.errOut(a.out(map[string]any{"ok": true, "control_plane": cp}))
 	}
-	if sub == "replace" {
-		if len(rest) != 2 || strings.HasPrefix(rest[0], "-") || strings.HasPrefix(rest[1], "-") {
-			return a.fail(fmt.Errorf("usage: relay root replace OLD_SESSION NEW_SESSION"))
-		}
-		result, err := a.Roots.Replace(ctx, a.Parents, rest[0], rest[1])
-		if err != nil {
-			return a.fail(err)
-		}
-		return a.errOut(a.out(map[string]any{"ok": true, "replacement": result}))
-	}
 	positional := ""
-	after := int64(0)
 	for i := 0; i < len(rest); i++ {
-		switch rest[i] {
-		case "--after":
-			i++
-			if i < len(rest) {
-				after, _ = strconv.ParseInt(rest[i], 10, 64)
-			}
-		default:
-			if strings.HasPrefix(rest[i], "-") {
-				return a.fail(fmt.Errorf("unknown flag %q", rest[i]))
-			}
-			positional = rest[i]
+		if strings.HasPrefix(rest[i], "-") {
+			return a.fail(fmt.Errorf("unknown flag %q", rest[i]))
 		}
+		positional = rest[i]
 	}
 	switch sub {
-	case "adopt":
-		if positional == "" {
-			return a.fail(fmt.Errorf("usage: relay root adopt SESSION"))
-		}
-		sess, err := a.Roots.Adopt(positional)
-		if err != nil {
-			return a.fail(err)
-		}
-		return a.errOut(a.out(map[string]any{"ok": true, "apex": sess.ID}))
-	case "release":
-		if positional == "" {
-			return a.fail(fmt.Errorf("usage: relay root release SESSION"))
-		}
-		sess, err := a.Roots.Release(positional)
-		if err != nil {
-			return a.fail(err)
-		}
-		return a.errOut(a.out(map[string]any{"ok": true, "released": sess.ID}))
-	case "enroll", "unenroll":
-		if positional == "" {
-			return a.fail(fmt.Errorf("usage: relay root %s SESSION", sub))
-		}
-		act := a.Roots.Enroll
-		if sub == "unenroll" {
-			act = a.Roots.Unenroll
-		}
-		sess, err := act(positional)
-		if err != nil {
-			return a.fail(err)
-		}
-		out := map[string]any{"ok": true, "session_id": sess.ID, "governed": sub == "enroll"}
-		if sub == "enroll" {
-			// Never let an enroll imply autonomy the deployment cannot deliver.
-			cp := core.DescribeControlPlane()
-			out["control_plane"] = cp
-			if cp.Warning != "" {
-				out["warning"] = cp.Warning
-			}
-		}
-		return a.errOut(a.out(out))
-	case "status":
-		apex, err := a.Roots.Apex()
-		if err != nil {
-			return a.fail(err)
-		}
-		governed, err := a.Roots.Governed()
-		if err != nil {
-			return a.fail(err)
-		}
-		ids := make([]string, 0, len(governed))
-		for _, sess := range governed {
-			ids = append(ids, sess.ID)
-		}
-		// Report whether the apex agent is actually working. A configured but
-		// inert apex is indistinguishable from a healthy one otherwise.
-		readiness := a.Roots.AgentReadinessFor(ctx, a.Sessions, apex.ID)
-		out := map[string]any{
-			"ok": true, "apex": apex.ID, "governed": ids,
-			"agent":         readiness,
-			"control_plane": core.DescribeControlPlane(),
-		}
-		if readiness.State != core.AgentReady {
-			out["ok"] = false
-		}
-		return a.errOut(a.out(out))
 	case "rules":
 		if positional == "" {
 			return a.fail(fmt.Errorf("usage: relay root rules PROJECT"))
@@ -2719,14 +2623,8 @@ func (a *App) cmdRoot(ctx context.Context, args []string) int {
 		}
 		_, statErr := os.Stat(path)
 		return a.errOut(a.out(map[string]any{"ok": true, "path": path, "exists": statErr == nil}))
-	case "digest":
-		digest, err := a.Roots.Digest(a.Parents, after)
-		if err != nil {
-			return a.fail(err)
-		}
-		return a.errOut(a.out(digest))
 	default:
-		return a.fail(fmt.Errorf("usage: relay root adopt|release|enroll|unenroll|status|rules|digest …"))
+		return a.fail(fmt.Errorf("usage: relay root control-plane|rules …"))
 	}
 }
 
@@ -4058,18 +3956,18 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 		})
 		authorityOK, authorityDetail := false, "authority command transport unavailable"
 		if ok {
-			code, stdout, stderr, err := forwarder.ForwardAuthorityCommand(ctx, []string{"root", "status"})
+			code, stdout, stderr, err := forwarder.ForwardAuthorityCommand(ctx, []string{"parent", "list"})
 			switch {
 			case err != nil:
 				authorityDetail = err.Error()
 			case code != 0:
-				authorityDetail = fmt.Sprintf("root status exited %d: %s", code, strings.TrimSpace(stderr))
+				authorityDetail = fmt.Sprintf("parent list exited %d: %s", code, strings.TrimSpace(stderr))
 			default:
 				var result struct {
 					OK bool `json:"ok"`
 				}
 				if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-					authorityDetail = "invalid root status response: " + err.Error()
+					authorityDetail = "invalid parent list response: " + err.Error()
 				} else {
 					authorityOK = result.OK
 					authorityDetail = "authenticated home command boundary reachable"
@@ -4089,20 +3987,6 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 			} else {
 				checks = append(checks, check{"handoff_watchers", false,
 					"NOT routing escalations: " + strings.Join(ids, ", ")})
-			}
-		}
-		if apex, err := a.Roots.Apex(); err == nil {
-			ready := a.Roots.AgentReadinessFor(ctx, a.Sessions, apex.ID)
-			checks = append(checks, check{"apex_agent", ready.State == core.AgentReady,
-				string(ready.State) + " " + ready.Reason})
-		}
-		if a.Sessions != nil {
-			if missing, err := a.Sessions.UnobservableGovernedChildren(); err != nil {
-				checks = append(checks, check{"governed_event_channels", false, "inspection failed: " + err.Error()})
-			} else if len(missing) > 0 {
-				checks = append(checks, check{"governed_event_channels", false, "no live handoff event stream: " + strings.Join(missing, ", ")})
-			} else {
-				checks = append(checks, check{"governed_event_channels", true, "all governed children observable"})
 			}
 		}
 		if sessions, err := a.Reg.ListSessions(); err != nil {

@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+// maxBoardWalkDepth bounds the board's walk over launch edges. relay does not
+// enforce a depth limit anywhere else; this is a cycle guard, not a policy.
+const maxBoardWalkDepth = 32
+
 // A board is the shared, categorized coordination surface for the children of
 // one manager. Relay's escalation path is strictly vertical — a child talks
 // only to its parent — so peers that need to coordinate (status, resources,
@@ -174,7 +178,7 @@ func (b *BoardService) QuerySubtree(ctx context.Context, sessionID, category, ke
 	seen := map[string]bool{}
 	// Breadth-first over managers, bounded like every other lineage walk here.
 	frontier := []string{sessionID}
-	for depth := 0; depth < maxAncestorDepth && len(frontier) > 0; depth++ {
+	for depth := 0; depth < maxBoardWalkDepth && len(frontier) > 0; depth++ {
 		var next []string
 		for _, managerID := range frontier {
 			kids := children[managerID]

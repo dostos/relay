@@ -316,3 +316,20 @@ func appendLedgerLocked(record map[string]any) error {
 	}
 	return f.Sync()
 }
+
+// DirectChildren lists the sessions a session launched. This is the launch
+// edge, not an ownership edge: it survived the hierarchy retirement because
+// teardown still has to know whether anything it started is still running.
+func (r *Registry) DirectChildren(sessionID string) ([]*Session, error) {
+	sessions, err := r.ListSessions()
+	if err != nil {
+		return nil, err
+	}
+	var children []*Session
+	for _, sess := range sessions {
+		if sess.SourceSessionID == sessionID {
+			children = append(children, sess)
+		}
+	}
+	return children, nil
+}

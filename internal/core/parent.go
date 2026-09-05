@@ -919,7 +919,9 @@ func (p *ParentService) deliverMessage(ctx context.Context, parent *Session, ho 
 	notice := ParentNotice{MessageID: msg.ID, Kind: msg.Kind, Child: childName, Text: msg.Text, Action: action}
 	var err error
 	claimed := false
-	rootToHuman := parent.ID == ho.SessionID && parent.Labels[ApexLabel] == "true"
+	// An apex used to be able to be its own handoff's destination, notified
+	// rather than typed into. Nothing is its own destination now.
+	rootToHuman := false
 	if rootToHuman {
 		if p.Notifier == nil {
 			return &parentDeliveryError{err: fmt.Errorf("no human notification path for apex %s", parent.ID)}
@@ -1524,7 +1526,7 @@ func (p *ParentService) applyAgentChildWorkspaceTrust(ctx context.Context, ho *H
 		return msg, false
 	}
 	parent, err := p.Reg.GetSession(ho.SourceSessionID)
-	if err != nil || parent == nil || (parent.Labels["agent"] == "" && parent.Labels[ApexLabel] != "true") {
+	if err != nil || parent == nil || parent.Labels["agent"] == "" {
 		return msg, false
 	}
 	child, err := p.Reg.GetSession(ho.SessionID)
@@ -1630,11 +1632,7 @@ func (p *ParentService) Watch(ctx context.Context, handoffID string) error {
 		return err
 	}
 	if ho.SourceSessionID == "" {
-		if sess.Labels[ApexLabel] == "true" {
-			// Intentional roots route only to their bound human authority surface.
-		} else {
-			return fmt.Errorf("handoff %s has no parent session", handoffID)
-		}
+		return fmt.Errorf("handoff %s addresses no mailbox", handoffID)
 	}
 	if handoffTerminal(ho) {
 		return nil

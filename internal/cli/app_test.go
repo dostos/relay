@@ -283,7 +283,7 @@ func TestLocalCLIForwardsAuthenticatedRequestAndConfirmsResponse(t *testing.T) {
 	}
 	server := &bridge.Server{
 		SockPath: core.DesktopBridgeSocketPath(), RelayBin: relayBin, Build: coord.Build,
-		Authorize: core.AuthorizeBridgeSource,
+		Authorize:  core.AuthorizeBridgeSource,
 		ReceiptDir: core.CommandReceiptDir(),
 	}
 	done := make(chan error, 1)
