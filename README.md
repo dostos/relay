@@ -159,7 +159,7 @@ relay service run|status                    # unified home service and component
 relay resume --session NAME --host HOST     # what a Forge tab runs
 relay pane classify < TEXT                  # readiness of pane text you already hold (no ssh)
 relay session readiness ID [--lines N]      # capture + classify one put-away session
-relay session list|get --json --readiness   # every session with a readiness object
+relay session list|get --json --readiness [--readiness-lines N]   # every session with a readiness object
 ```
 
 ### Readiness for presenters

@@ -34,9 +34,11 @@ const (
 
 // AgentReadiness reports an agent pane's state and why.
 type AgentReadiness struct {
-	State  AgentState    `json:"state"`
-	Reason string        `json:"reason,omitempty"`
-	Gate   *SecurityGate `json:"gate,omitempty"`
+	State AgentState `json:"state"`
+	// Reason and Gate are always present in JSON (empty string / null) so a
+	// presenter reads one shape for every state instead of probing for keys.
+	Reason string        `json:"reason"`
+	Gate   *SecurityGate `json:"gate"`
 }
 
 type GateChoice struct {

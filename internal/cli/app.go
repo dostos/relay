@@ -167,7 +167,10 @@ func (a *App) forwardThroughDesktopBridge(args []string) (int, bool) {
 		}
 		// Signals are host-local hook events. Sending them through the desktop
 		// bridge would add latency and break if the pane's attach is reconnecting.
-		if arg == "signal" || arg == "hook" || arg == "ask" {
+		// `pane classify` reads its input from STDIN, which the bridge request
+		// (argv + source only) cannot carry: forwarded, it would classify
+		// nothing. It is a pure local function and always runs here.
+		if arg == "signal" || arg == "hook" || arg == "ask" || arg == "pane" {
 			return 0, false
 		}
 		break

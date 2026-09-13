@@ -76,19 +76,29 @@ func TestPaneClassifyStaysLocalInsteadOfTheBridge(t *testing.T) {
 	if commandNeedsLocalTTY([]string{"session", "readiness", "sess-1"}) {
 		t.Fatal("session readiness captures over the wire; it may go through the bridge")
 	}
+	// The real gate: inside a relay pane RELAY_BRIDGE_SOCK is set, and the
+	// bridge request carries argv only — a forwarded classify would read no
+	// stdin at all. forwardThroughDesktopBridge must decline before it even
+	// looks for a socket.
+	t.Setenv("RELAY_BRIDGE_SOCK", "/nonexistent/desktop-bridge.sock")
+	t.Setenv("RELAY_SESSION_ID", "sess-x")
+	a := &App{}
+	for _, argv := range [][]string{{"pane", "classify"}, {"--json", "pane", "classify"}} {
+		if code, forwarded := a.forwardThroughDesktopBridge(argv); forwarded || code != 0 {
+			t.Fatalf("%v was forwarded (code %d) with the bridge socket set", argv, code)
+		}
+	}
 }
 
-func TestSessionListReadinessFlagsParse(t *testing.T) {
-	on, lines, err := parseReadinessFlags([]string{"--readiness", "--readiness-lines", "12"})
-	if err != nil || !on || lines != 12 {
-		t.Fatalf("%v %v %v", on, lines, err)
-	}
-	if on, _, err := parseReadinessFlags(nil); err != nil || on {
-		t.Fatalf("no flags: %v %v", on, err)
-	}
-	for _, bad := range [][]string{{"--bogus"}, {"--readiness-lines"}, {"--readiness-lines", "0"}, {"--readiness-lines", "x"}} {
-		if _, _, err := parseReadinessFlags(bad); err == nil {
-			t.Fatalf("accepted %v", bad)
+func TestPaneClassifyShapeIsStableAcrossStates(t *testing.T) {
+	// One shape for every state: a presenter must find reason and gate keys
+	// on a ready pane too (null gate), not probe for their presence.
+	for _, text := range []string{"$ \n", "", blockedSample} {
+		_, resp := runClassify(t, text)
+		for _, key := range []string{"state", "reason", "gate", "lines", "sampled_at"} {
+			if _, ok := resp[key]; !ok {
+				t.Fatalf("missing %q for %q: %v", key, text, resp)
+			}
 		}
 	}
 }

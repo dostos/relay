@@ -45,8 +45,10 @@ func TestClassifyTextMirrorsTheClassifierAndNamesEmptyInput(t *testing.T) {
 			t.Errorf("json missing %s: %s", key, b)
 		}
 	}
-	if strings.Contains(string(b), `"gate"`) {
-		t.Errorf("no gate must omit the key: %s", b)
+	// One shape for every state: a ready pane carries `"gate":null`, so a
+	// presenter never has to probe for the key's presence.
+	if !strings.Contains(string(b), `"gate":null`) {
+		t.Errorf("no gate must still carry the key as null: %s", b)
 	}
 }
 
