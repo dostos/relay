@@ -1,6 +1,12 @@
 # relay — retiring ownership, keeping messaging
 
 Date: 2026-09-05
+
+> **Superseded in part (2026-09-13):** the "keep messaging" half is replaced by
+> `dostos-workspace/docs/superpowers/specs/2026-09-13-agent-infra-one-owner-per-axis.md`.
+> The constraint this plan cited for keeping it (hermes holding a headless
+> root) had ended on 2026-08-26; the delegation handshake retires as one
+> unit once its remaining consumer (agent-command-center) is migrated.
 Status: **Done** — branch A (flat inbox). All four passes landed 2026-09-05
 (fa9b02b, 4ed068a, d25a08c, 42926b9, 693cdfb): ~4100 lines removed, 19 test
 packages green. No open questions: board.go was settled last, scoped to one
