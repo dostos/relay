@@ -1,5 +1,7 @@
 # relay — session + handoff control plane
 
+> **Retired 2026-09-13.** The delegation verbs this document describes (`agent`, `handoff`, `parent`, `msg`, `board`, `ask`/`resolve`, `policy`, `root`, `events`, `gc`, `history`, `mcp`) were removed as one unit; see the workspace's one-owner-per-axis decision (`dostos-workspace/docs/superpowers/specs/2026-09-13-agent-infra-one-owner-per-axis.md`). Kept for the record.
+
 Date: 2026-07-24  
 Status: Implemented (v0.1.0)
 

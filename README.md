@@ -25,15 +25,11 @@ relay is the thin control plane for that. cmux stays the windowing surface; rela
 
 ### 1) Remote coding agent that survives cmux quit
 
-Hand a goal to Claude / Codex / cursor-agent on a lab box. Close cmux. Reopen later — Vault runs `relay resume --session …` and the pane is back in the same tmux session.
+Start Claude / Codex / cursor-agent in a durable session on a lab box. Close cmux. Reopen later — Vault runs `relay resume --session …` and the pane is back in the same tmux session.
 
 ```bash
-relay agent start host-a cursor-agent -- "fix the flaky eval; keep tests green"
-# → {"next":"wait","argv":["relay","agent","wait",…]}
-relay agent wait ho-… [--timeout 120]
-
-# Resume a saved terminal goal without copying its prompt or lineage:
-relay agent restart ho-…
+relay session create -H host-a --name eval -- cursor-agent "fix the flaky eval; keep tests green"
+relay resume --session eval --host host-a      # from any pane, later
 ```
 
 ### 2) Project workspace with several durable remotes
@@ -65,14 +61,6 @@ cmux:
 ```bash
 # inside c3/research
 relay c1 followup
-
-# anywhere in the relay control plane
-relay history
-# c3/research (human)
-# └─[relay]→ c1/followup (human)
-
-# an agent handoff records the agent and ho-… edge as well
-relay agent start c1 codex --name analysis -- "continue the analysis"
 ```
 
 Child placement follows the recorded session binding, not whichever pane is
@@ -80,287 +68,6 @@ currently focused. The first child splits `right` from its parent; later
 children of that parent split `down` from the newest live sibling. Explicit
 `--workspace` / `--pane` placement overrides the default. Inspect the
 session-keyed records with `relay pane list`.
-
-Local agent panes are also first-class sessions. Starting a handoff from cmux
-auto-registers the caller as its parent; an explicit migration is:
-
-```bash
-relay parent register --name personal-db-main --repo ./projects/infrastructure/workspace-search
-relay parent bind sess-… --surface surface:…  # cmux restarted the root pane
-relay parent link sess-… ho-…        # adopt existing work
-relay parent move sess-… ho-…        # explicitly repair a wrong parent edge
-relay resolve pm-… -- approve         # the only decision handshake
-relay log 0                            # optional compact delta; save returned cursor
-```
-
-### Headless roots
-
-A manager does not have to be a pane. A coordinator that runs as a long-lived
-service — a container, a daemon — registers as a **headless root**:
-
-```bash
-relay parent register --headless --name Apex --ttl 15m   # idempotent; re-run on every start
-relay parent heartbeat                                   # renew declared liveness
-relay parent inbox                                       # also renews it
-```
-
-`inbox`, `log`, `status`, `sweep` and `heartbeat` name no manager because there
-is only one they could mean: the authenticated caller. A manager gets its
-identity from the command boundary, not from an id it was told to memorise, so
-these read and prove *itself*. Naming another manager still works when it is
-inside your own subtree, and is still refused — explicitly — when it is not.
-
-Two things differ from a pane parent, and only two:
-
-* **Delivery is the durable inbox.** There is no composer to type into, so an
-  envelope is delivered the moment it is durably written, recorded as
-  `headless_inbox_confirmed`. `--wake inject|notify` need a surface, so they
-  degrade to the inbox and the registration says which mode was asked for.
-* **Liveness is declared, not observed.** Relay classifies a pane by looking at
-  it; it cannot look at a service. So a headless root is live only while its
-  heartbeat is inside the declared TTL. Past that it is treated exactly like an
-  absent pane: delivery reports the target unavailable, attention envelopes fail
-  over to an ancestor, and an envelope with nowhere to go stays **pending and
-  visible** rather than being marked delivered into a service nobody is running.
-  `relay parent list` reports every headless root's heartbeat state alongside it.
-
-### Managers under managers
-
-A headless manager does not have to be a root. `--under` registers it as the
-child of another manager, which is the "channel agent" shape: it supervises its
-own children — status, capture, direct, restart — while governance (holds,
-approvals, the last escalation stop) stays with the manager above it.
-
-```bash
-relay parent register --headless --name chan-gazer --under sess-apex…   # a parent, not a root
-relay parent adopt sess-chan-gazer… sess-project…                       # give a session a manager
-relay parent list --under sess-chan-gazer…                              # its own subtree
-```
-
-`relay parent link|move` name a **handoff**, because a handoff is normally what
-creates a child. A session adopted from an already-running tmux
-(`relay session adopt`) has no handoff, so those verbs had nothing to name and
-such a session could never leave the top of the tree. `relay parent adopt`
-addresses the **session** instead, and refuses rather than guesses:
-
-* moving a session that already has a manager requires `--from CURRENT`, and
-  the name must be right;
-* `--from` on a session with no manager is refused, because the caller believes
-  something about the tree that is not true;
-* a session whose lineage is owned by a **live handoff** is not adoptable here
-  at all — moving the session record alone would leave the handoff's event
-  stream escalating to the old manager. The refusal names `relay parent move`.
-
-Authority is unchanged in shape: a caller may create a manager only inside its
-own subtree (`--under` is mandatory for an authenticated non-human caller —
-omitting it asks for a new *root*, which is the one thing lineage confinement
-exists to prevent), may adopt only into its own subtree, and may take a child
-only from its own subtree.
-
-Three details are load-bearing rather than incidental:
-
-* Registration is authorized on `--under` but acts on `--name`, and a name is a
-  guessable durable identity. So registration **never** changes lineage on
-  convergence — not even from "no manager" to "some manager". The only session
-  it can converge onto is one already reporting to the named manager, and so
-  already inside the caller's subtree. Re-homing is `parent adopt`, always.
-* `--under`, `--name` and `--from` must appear exactly once with a non-blank
-  value, refused identically by the policy and by the command. The policy reads
-  the first occurrence and an ordinary parse loop keeps the last, so a repeated
-  flag is otherwise authorized against one value and executed with another.
-* An **unmanaged** session is not claimable by an ordinary manager. `parent
-  link` allows that for an unowned handoff, but most sessions in a registry have
-  no manager, so the same rule for sessions is a reach across the whole fleet —
-  and it does not stop at reading, because a session in your lineage can be
-  `exec`'d. Which session belongs to which manager is a declared fact applied by
-  the writer that owns the registry; over the bridge, only the governing apex
-  may claim one.
-
-The holder process usually lives somewhere other than the authority host. It
-operates the root through the ordinary authenticated command boundary, using an
-identity issued at registration (`--print-identity`) and confined by the same
-lineage policy as any other manager. Where that boundary listens is
-`RELAY_BRIDGE_SOCK`, honoured by both the server and the client so an authority
-can publish it somewhere a co-located holder can actually reach; a host that
-owns the authority but has no cmux and no reason to open ssh tunnels serves it
-with `relay service boundary run --no-control`.
-
-This is a durable control plane for **long-lived, goal-based handoff and
-orchestration**, not a transcript or chat bus. Correlated control envelopes
-survive agent exits, SSH reconnects, nested relays, and cmux restarts until the
-goal is resolved and terminal.
-
-The lineage is a strict management tree. A child can address only its
-authenticated immediate parent. Remote parents are agent managers: they
-resolve or escalate one level. Only a local cmux root receives human-facing
-notifications, so descendants cannot bypass their manager and interrupt the
-human directly.
-
-Escalation is delivered to the nearest **live** ancestor. A manager that
-cannot receive the envelope — laptop asleep, cmux quit, SSH dropped — is
-passed over so the child never stalls on a sleeping manager. A live manager
-is never skipped, so this adds resilience without weakening the tree: the
-envelope still travels the lineage, one unresolved ask per handoff is
-preserved across the failover, and the skipped manager is recorded on the
-message (`intended_parent_session_id`) alongside who actually ruled
-(`resolved_by_session_id`).
-
-### Autonomous mode
-
-Park an always-on agent at the top of the tree and enrolled roots keep working
-while you are away. Because escalation goes to the nearest *live* ancestor, a
-sleeping laptop is simply skipped and the question lands on the apex instead of
-stalling:
-
-```bash
-relay agent start home claude -- "$(cat share/roles/relay-conductor.md)"
-relay root adopt sess-…            # designate that session as the apex
-relay root enroll sess-beholder    # this root's subtree is now governed
-relay root rules beholder          # where its human-authored rules live
-relay root digest                  # what needed you vs. what it ruled
-```
-
-The apex rules against **human-authored per-project rules** and holds anything
-they do not clearly permit — silence in the rules is a "no". Mode is
-structural, not a flag: a subtree is governed exactly when it has an agent-root
-ancestor, so `relay root unenroll` is the entire off switch. The apex must
-itself be a root, so you remain the last escalation stop.
-
-Relay stays model-free throughout. It owns enrollment, rule resolution, and the
-audit; the judgment lives in the portable role at
-[`share/roles/relay-conductor.md`](share/roles/relay-conductor.md).
-
-For goal-driven delegation, `relay agent protocol` is the authoritative native
-contract. The repository's vendor-neutral
-[`relay-goal-handoff`](skills/relay-goal-handoff/SKILL.md) is an optional human
-and manager reference for goal shaping and CLI selection; installation does
-not inject it into any agent runtime, and Relay correctness never depends on
-the skill being loaded.
-
-**Governance runs where the control plane runs.** The registry, the parent
-inboxes, and the watcher processes all live on the machine that started the
-work — so if that machine sleeps, the router sleeps with it and an escalation
-raised meanwhile is not routed until it wakes. `relay root enroll` and `relay
-root status` report this rather than let an enroll imply autonomy the
-deployment cannot deliver. For genuinely unattended operation, start governed
-work from a session on an always-on host and declare that durable machine
-policy once with `relay root control-plane --always-on`. Use `--sleepable` if
-the machine's availability changes. Relay deliberately does not infer this
-policy from a running process or socket. See
-[`docs/superpowers/specs/2026-08-01-relay-autonomous-D-control-plane-locality.md`](docs/superpowers/specs/2026-08-01-relay-autonomous-D-control-plane-locality.md).
-
-### Home service and watcher health
-
-The always-on home authority independently supervises the event coordinator,
-authenticated command boundary/forwarders, and watcher reconciler in one
-process. A component failure restarts only that component, but aggregate health
-stays red until all components are live, ready, on the same build, and able to
-make durable effects.
-
-```bash
-relay service run          # service-manager entrypoint
-relay service status       # per-component health receipt
-relay doctor               # also flags old split authority processes
-```
-
-Use `share/systemd/relay.service` on the authoritative host. The old
-`relayd.service`, `relay-control.service`, and `relay-supervisor.service` are
-migration inputs, not peers: only one authority may own the canonical sockets
-and state. See [`docs/unified-service.md`](docs/unified-service.md).
-
-Escalation is vertical, but peers often need to coordinate without asking
-anyone to decide anything. The children of one manager share a **board** — a
-categorized surface for status, resources, and artifacts:
-
-```bash
-relay board post -c status -k phase -- "scoring, 40% done"
-relay board query -c status          # peers' current state, compact JSON
-relay board query -c status --subtree # a manager's whole subtree, one call
-relay board watch -c status          # zero-token wait for the next update
-```
-
-A board holds *state*, not conversation: re-posting a key supersedes it, and a
-query folds to the latest value per node and key, so an agent pays for current
-state rather than history. Scope needs no permission check — a board id is
-derived from the caller's own lineage, so a node cannot name another subtree's
-board, and identity comes from the authenticated bridge envelope rather than an
-argument.
-
-`relay session adopt` also provisions an owner-only bridge identity so an
-already-running agent can discover Relay from its tmux pane without receiving
-a secret in its prompt. Repair a session adopted by an older Relay release in
-place with `relay session bridge sess-…`; no agent or tmux restart is needed.
-
-Each supported delegated CLI starts in its autonomous permission mode
-(`cursor-agent --force`, Codex approval bypass, or Claude permission bypass),
-so routine tool calls do not consume parent turns. This does not bypass login,
-folder-trust, onboarding, or confirmation gates: launch readiness classifies
-those panes, emits `permission_required`, and sends neither the goal nor Enter.
-Each child also has one detached blocking event watcher. Agent hooks publish
-`permission_required`,
-`result`, and `exit`; the tmux-idle sensor supplies the `ask` fallback for
-agents without an input hook. Relay deduplicates by handoff/sequence, collapses
-repeated idle samples into one unresolved attention envelope per child, stores
-it durably while the parent is disconnected, and wakes the exact parent pane
-once after delivery succeeds. Rebinding a parent retries its undelivered inbox;
-it never replays the sensor samples.
-No transcript is forwarded. Relay adds one compact instruction to the child
-goal: when blocked on manager input, declare the question with `relay ask
-"<question>"`. This emits explicit event text; tmux scraping remains only the
-fallback for agents that ignore it. Set `relay_hooks: off` only when an agent
-runtime cannot execute hooks.
-
-Managers that need durable context use `relay log N` and persist the returned
-`next` cursor. The authenticated session supplies the parent identity. The log
-records only meaningful request, resolution, result, and policy transitions
-with a bounded summary; it never stores or replays a conversation transcript or
-idle sensor samples.
-
-Informational `note`, `progress`, `result`, and `exit` events acknowledge
-themselves after verified delivery to a ready manager. Only unresolved input
-reaches a manager, and it takes one
-`relay resolve` call to continue the child; there is no receipt acknowledgement
-round trip.
-
-A handoff launched inside the hierarchy returns `managed: true` and no
-`next`/`argv`: Relay's detached watcher already owns the wait. This prevents a
-parent agent from starting a second blocking wait against the same child.
-
-The desktop policy gate removes redundant hook/fallback pings automatically
-and can answer stable CLI prompts with explicit literal-guarded rules. It
-normalizes bounded hook fields (`agent`, `host`, `text`, and `command`) so a
-provider can change its raw hook payload without changing the policy file.
-Unknown provider prompts and genuine goal decisions still continue one level
-up to the immediate manager; optional literal-guarded policy rules can handle
-stable fallback prompts.
-
-```bash
-relay policy list
-relay policy check --kind ask --agent cursor-agent \
-  --text "Run this command?" --command "git status"
-relay policy add cursor-read --kind ask --agent cursor-agent \
-  --contains "Run this command?" --contains "git status" --reply y
-relay policy remove cursor-read
-```
-
-All `--contains` literals must match, case-insensitively. Policies are
-desktop-local in `~/.config/relay/policy.yaml`; automatic decisions remain
-auditable in the communication log. Built-ins coalesce repeated
-idle samples while one ask/permission decision is pending, a tmux-idle
-fallback after an outstanding permission event, and an `exit` shortly after a
-`result`; they never grant permission themselves.
-
-Closing a local parent is deliberately gated:
-
-```bash
-relay parent complete sess-…
-relay parent status sess-…                # dry-run reasons
-relay parent retire sess-…                # closes only when eligible
-```
-
-Retirement requires every child terminal, no unresolved input, all
-scoped Git roots clean with no commits ahead of upstream, and an explicit
-`idle` or `complete` parent state. `session destroy` cannot bypass this gate.
 
 ### 3) Bring a new machine online
 
@@ -372,26 +79,6 @@ relay targets --json
 relay host discover -H host-a --json
 relay host init -H host-a --apply   # installs relay + compatibility symlink
 ```
-
-### 4) Orchestrator loop (no poll loops)
-
-`relay agent` is the self-describing agent protocol. Run `relay agent protocol`
-for its compact rules, then follow JSON `next` / `argv` only — never
-`events tail -f` in a tight loop and never attach an agent to a session.
-
-Managed Codex and Claude launches receive Relay as an invocation-local MCP
-stdio tool and receive their initial goal through the provider's native prompt
-argument. Cursor reads its user MCP inventory; register Relay without replacing
-other servers, then approve that one server explicitly:
-
-```bash
-relay mcp install cursor
-cursor-agent mcp enable relay
-```
-
-The MCP adapter exposes one `relay` tool whose `argv` is sent through the same
-authenticated home boundary as the CLI. It contains no parallel policy or
-runtime-specific orchestration instructions.
 
 ## Install
 
@@ -416,7 +103,7 @@ relay host init -H HOST --apply
 
 # run work
 relay HOST NAME                     # current pane → named remote tmux
-relay agent start HOST claude -- "…"
+relay session create -H HOST --name work -- claude   # or any CLI as the pane's command
 # or attach an existing tmux session
 relay session adopt -H HOST --name my-tmux
 relay viz present sess-…          # opens a cmux split; ◆ RELAY tab title
@@ -443,7 +130,7 @@ relay viz restore                 # optional manual path
 | Layer | Role |
 |-------|------|
 | **cmux** | Workspaces, splits, tabs, Vault resume UI |
-| **relay CLI** | Session/handoff IDs, `viz present`, branding, agent JSON API |
+| **relay CLI** | Session ids, `viz present`, branding, `--json` output for other programs |
 | **control bridge** | Unix-socket daemon on the control host; serializes authenticated remote requests |
 | **cmux client** | Optional visualization endpoint; executes cmux operations but owns no agent lifecycle |
 | **tmux** (remote) | Durable process surface |
@@ -455,7 +142,7 @@ During the control-plane migration, the desktop bridge is started on demand by `
 `~/.local/state/relay/desktop-bridge.sock` (0600). Each attached pane uses SSH
 stream-local reverse forwarding to expose a per-session socket under `/tmp` on
 the remote host. Requests carry a per-session token, and the bridge allowlist
-is limited to named-session and handoff operations. There is no TCP listener or
+is limited to named-session operations. There is no TCP listener or
 inbound connection to the laptop; the forward lives and reconnects with the
 pane's dedicated SSH connection.
 
@@ -532,27 +219,23 @@ to enable chaining.
 ```text
 relay targets / host discover / host init   # new machine
 relay HOST NAME                             # named tmux in current cmux pane
-relay session … / session adopt             # durable tmux
-relay agent start|wait|send|capture|done    # orchestrator API
-relay parent register|inbox|reply|ack       # durable parent communication
-relay parent register --headless --name N   # a root that is a service, not a pane
-relay parent register --headless --under P  # a managing parent under P, not a second root
-relay parent adopt PARENT SESSION [--from]  # give a handoff-less session a manager
-relay parent list --under PARENT            # one manager's own subtree
-relay parent heartbeat PARENT               # renew a headless root's liveness
-relay board post|query|watch                # manager-scoped peer coordination
-relay root adopt|enroll|status|digest       # always-on apex (autonomous mode)
-relay service run|status                    # unified authority and component health
-relay parent status|retire                  # guarded local-pane cleanup
-relay history                               # source → destination lineage
-relay pane list                             # owned surface/workspace/pane + parent + liveness
-relay pane rename SESSION_ID NAME           # durable display alias; leaves tmux identity intact
-relay session rename SESSION_ID NAME        # true tmux/checkpoint rename; keeps session id + lineage
+relay session … / session adopt             # durable tmux (create takes -- ARGV for the pane's command)
+relay container up|down|status|stop|start   # devcontainer or image-backed instance
+relay auth status|login|copy                # agent CLI logins on a host
+relay service run|status                    # unified home service and component health
+relay pane list / pane rename               # owned surface/workspace/pane + liveness
 relay viz present|brand|save|restore        # cmux surface
 relay resume --session NAME                 # Vault target
 ```
 
-Details: [`docs/2026-07-24-relay-design.md`](docs/2026-07-24-relay-design.md).
+Retired 2026-09-13 (workspace decision *one owner per axis*): the delegation
+handshake — `agent`, `handoff`, `parent`, `resolve`, `ask`, `signal`, `board`,
+`policy`, `msg`, `events`, `log`, `root`, `gc`, `history`, `mcp`. A unit of
+delegated work is blacksmith's; relay is the session substrate. `resume
+reap|prune` cover what `gc` did for sessions.
+
+Details: [`docs/2026-07-24-relay-design.md`](docs/2026-07-24-relay-design.md)
+(historical; the delegation half is retired).
 
 ## Develop
 

@@ -1,4 +1,0 @@
-interface:
-  display_name: "Relay Goal Handoff"
-  short_description: "Delegate goals without micromanagement"
-  default_prompt: "Use $relay-goal-handoff to delegate this goal through Relay with the right CLI and hierarchy."

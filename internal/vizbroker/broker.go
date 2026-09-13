@@ -193,7 +193,7 @@ func authoritySnapshot() ([]ports.Presentation, error) {
 		if session == nil {
 			return nil, fmt.Errorf("session registry contains incomplete visualization identity")
 		}
-		if core.IsHeadlessParent(session) {
+		if session.Persist.Kind == "headless" { // a pre-retirement registry row; nothing to present
 			continue
 		}
 		if session.ID == "" || session.HostID == "" || session.Persist.Name == "" {

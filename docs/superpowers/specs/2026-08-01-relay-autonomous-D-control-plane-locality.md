@@ -1,5 +1,7 @@
 # relay — autonomous mode, Part D: control-plane locality
 
+> **Retired 2026-09-13.** The delegation verbs this document describes (`agent`, `handoff`, `parent`, `msg`, `board`, `ask`/`resolve`, `policy`, `root`, `events`, `gc`, `history`, `mcp`) were removed as one unit; see the workspace's one-owner-per-axis decision (`dostos-workspace/docs/superpowers/specs/2026-09-13-agent-infra-one-owner-per-axis.md`). Kept for the record.
+
 Date: 2026-08-01
 Status: **Direction chosen 2026-08-02: home owns control; Mac is viz-only.** Migration is incremental so there is never more than one authoritative writer.
 

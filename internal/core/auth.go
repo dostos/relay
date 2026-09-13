@@ -191,21 +191,6 @@ func (s *AuthService) Status(ctx context.Context, hostID, agentFilter string) ([
 			CopyOK:  len(CredentialPaths(spec)) > 0,
 		})
 	}
-	// Annotate with remaining weekly usage when a hook is configured.
-	if hint, ok := LoadUsageHint(ctx, usageHookFor(profile)); ok {
-		for i := range rows {
-			key := rows[i].Agent
-			if profile != nil {
-				if spec, findErr := profile.FindAgent(rows[i].Agent); findErr == nil && strings.TrimSpace(spec.UsageKey) != "" {
-					key = strings.TrimSpace(spec.UsageKey)
-				}
-			}
-			if v, known := hint.Remaining(key); known {
-				vv := v
-				rows[i].WeeklyRemaining = &vv
-			}
-		}
-	}
 	return rows, nil
 }
 

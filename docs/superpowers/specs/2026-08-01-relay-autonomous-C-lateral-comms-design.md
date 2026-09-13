@@ -1,5 +1,7 @@
 # relay — autonomous mode, Part C: lateral child-to-child communication
 
+> **Retired 2026-09-13.** The delegation verbs this document describes (`agent`, `handoff`, `parent`, `msg`, `board`, `ask`/`resolve`, `policy`, `root`, `events`, `gc`, `history`, `mcp`) were removed as one unit; see the workspace's one-owner-per-axis decision (`dostos-workspace/docs/superpowers/specs/2026-09-13-agent-infra-one-owner-per-axis.md`). Kept for the record.
+
 Date: 2026-08-01
 Status: Implemented (Layer 2 boards). `relay board post|query|watch`, `--subtree` rollup, and agent-protocol entries landed. Layer 1 remains the pre-existing raw `relay msg`; no separate free-bus surface was added, since boards covered the real need.
 Series: Part **C** of Autonomous Mode (A → B → C). **Orthogonal** to A/B — it rides the same tree + relayd substrate and is independent of the escalation changes, but is sequenced last. See A for the shared model.

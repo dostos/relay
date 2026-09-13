@@ -20,13 +20,12 @@ type Session struct {
 	CreatedAt     time.Time           `json:"created_at"`
 	UpdatedAt     time.Time           `json:"updated_at"`
 	VizSurfaceRef string              `json:"viz_surface_ref,omitempty"`
-	// SourceSessionID and CreatedByHandoffID form the durable relay lineage.
-	// They are snapshots rather than pointers into a live pane lifecycle, so
-	// history remains meaningful after sessions are finalized.
-	SourceSessionID    string `json:"source_session_id,omitempty"`
-	SourceHostID       string `json:"source_host_id,omitempty"`
-	SourcePersistName  string `json:"source_persist_name,omitempty"`
-	CreatedByHandoffID string `json:"created_by_handoff_id,omitempty"`
+	// SourceSessionID records the pane a session was started from (the
+	// launch edge). It is a fact about how the session came to be, not an
+	// ownership relation: nothing routes or refuses on it.
+	SourceSessionID   string `json:"source_session_id,omitempty"`
+	SourceHostID      string `json:"source_host_id,omitempty"`
+	SourcePersistName string `json:"source_persist_name,omitempty"`
 }
 
 const (
@@ -34,88 +33,6 @@ const (
 	LocalPersistKind = "cmux"
 	ParentRole       = "parent"
 )
-
-// HandoffKind is agent (interactive CLI) or job (long command).
-type HandoffKind string
-
-const (
-	KindAgent HandoffKind = "agent"
-	KindJob   HandoffKind = "job"
-)
-
-// HandoffStatus is the durable state machine.
-type HandoffStatus string
-
-const (
-	StatusPending    HandoffStatus = "pending"
-	StatusRunning    HandoffStatus = "running"
-	StatusNeedsInput HandoffStatus = "needs_input"
-	StatusDone       HandoffStatus = "done"
-	StatusFailed     HandoffStatus = "failed"
-	StatusAbandoned  HandoffStatus = "abandoned"
-)
-
-// EffectState records independently observable launch and goal-delivery
-// effects. A process can be launched while its interactive goal is not yet
-// delivered; jobs never have a separate delivery effect.
-type EffectState string
-
-const (
-	EffectPending       EffectState = "pending"
-	EffectAcknowledged  EffectState = "acknowledged"
-	EffectFailed        EffectState = "failed"
-	EffectBlocked       EffectState = "blocked"
-	EffectDenied        EffectState = "denied"
-	EffectNotApplicable EffectState = "not_applicable"
-)
-
-// Handoff is a long-lived, goal-driven remote work unit bound to a session.
-// Its lineage and event cursors survive agent and transport lifetimes.
-type Handoff struct {
-	ID                 string        `json:"id"`
-	SessionID          string        `json:"session_id"`
-	HostID             string        `json:"host_id"`
-	Kind               HandoffKind   `json:"kind"`
-	Status             HandoffStatus `json:"status"`
-	LaunchState        EffectState   `json:"launch_state,omitempty"`
-	DeliveryState      EffectState   `json:"delivery_state,omitempty"`
-	PresentationState  EffectState   `json:"presentation_state,omitempty"`
-	LaunchError        string        `json:"launch_error,omitempty"`
-	DeliveryError      string        `json:"delivery_error,omitempty"`
-	PresentationError  string        `json:"presentation_error,omitempty"`
-	FailureStage       string        `json:"failure_stage,omitempty"`
-	FailureError       string        `json:"failure_error,omitempty"`
-	RetrySafe          bool          `json:"retry_safe,omitempty"`
-	FailureNoticeState EffectState   `json:"failure_notice_state,omitempty"`
-	FailureNoticeError string        `json:"failure_notice_error,omitempty"`
-	FailureEventState  EffectState   `json:"failure_event_state,omitempty"`
-	FailureEventError  string        `json:"failure_event_error,omitempty"`
-	CleanupError       string        `json:"cleanup_error,omitempty"`
-	TerminalExitCode   *int          `json:"terminal_exit_code,omitempty"`
-	TerminalCapture    string        `json:"terminal_capture,omitempty"`
-	PendingGate        *SecurityGate `json:"pending_gate,omitempty"`
-	Goal               string        `json:"goal,omitempty"`
-	Agent              string        `json:"agent,omitempty"`
-	Command            string        `json:"command,omitempty"`
-	Name               string        `json:"name,omitempty"`
-	RepoRef            string        `json:"repo_ref,omitempty"`
-	RemoteCWD          string        `json:"remote_cwd,omitempty"`
-	Container          string        `json:"container,omitempty"`
-	NoPane             bool          `json:"no_pane,omitempty"`
-	Silence            int           `json:"silence,omitempty"`
-	RestartedFromID    string        `json:"restarted_from_id,omitempty"`
-	EventsPath         string        `json:"events_path"`
-	LastSeq            int64         `json:"last_seq"`
-	ParentSeq          int64         `json:"parent_seq,omitempty"`
-	ExitCode           *int          `json:"exit_code,omitempty"`
-	Outcome            string        `json:"outcome,omitempty"`
-	CreatedAt          time.Time     `json:"created_at"`
-	UpdatedAt          time.Time     `json:"updated_at"`
-	EndedAt            *time.Time    `json:"ended_at,omitempty"`
-	SourceSessionID    string        `json:"source_session_id,omitempty"`
-	SourceHostID       string        `json:"source_host_id,omitempty"`
-	SourcePersistName  string        `json:"source_persist_name,omitempty"`
-}
 
 // Event is one line from the remote JSONL event log.
 // Event is the coordination event on the relayd bus. It is an alias for

@@ -458,30 +458,6 @@ func (v *Viz) ForgetBinding(sessionID string) error {
 	return err
 }
 
-// NotifyParent is presentation only: it emits a desktop notification/flash.
-// Authoritative message delivery goes through core.SessionService.Send.
-func (v *Viz) NotifyParent(ctx context.Context, sessionID string, notice core.ParentNotice) error {
-	b, err := v.lookup(sessionID)
-	if err != nil {
-		return err
-	}
-	if v.locationOfSurface(ctx, b.Surface).Workspace == "" {
-		return fmt.Errorf("parent surface %s is not live", b.Surface)
-	}
-	body := compactNotice(notice)
-	args := []string{"notify", "--title", "Relay: " + notice.Kind, "--body", body, "--surface", b.Surface}
-	if b.Workspace != "" {
-		args = append(args, "--workspace", b.Workspace)
-	}
-	_, _ = v.run(ctx, args...)
-	flash := []string{"trigger-flash", "--surface", b.Surface}
-	if b.Workspace != "" {
-		flash = append(flash, "--workspace", b.Workspace)
-	}
-	_, _ = v.run(ctx, flash...)
-	return nil
-}
-
 // SendScreen implements core.ScreenSender for legacy cmux-persisted sessions.
 // The control plane calls this through SessionService; Viz supplies only the
 // surface-specific keystroke adapter.
@@ -529,18 +505,6 @@ func surfaceCommand(command, surface, workspace string, tail ...string) []string
 		args = append(args, "--workspace", workspace)
 	}
 	return append(args, tail...)
-}
-
-func compactNotice(n core.ParentNotice) string {
-	// Share core's cap rather than keeping a second, smaller one here: two
-	// independent limits meant the body was truncated twice, so raising the
-	// core limit silently did nothing.
-	text := strings.Join(strings.Fields(n.Text), " ")
-	if len(text) > core.ParentTextLimit {
-		text = text[:core.ParentTextLimit-1] + "…"
-	}
-	n.Text = text
-	return core.FormatParentNotice(n)
 }
 
 // BindSurface makes an existing cmux surface authoritative for a relay

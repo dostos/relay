@@ -1,5 +1,7 @@
 # relay — autonomous mode, Part B: agent apex ("root mode"), rules & audit
 
+> **Retired 2026-09-13.** The delegation verbs this document describes (`agent`, `handoff`, `parent`, `msg`, `board`, `ask`/`resolve`, `policy`, `root`, `events`, `gc`, `history`, `mcp`) were removed as one unit; see the workspace's one-owner-per-axis decision (`dostos-workspace/docs/superpowers/specs/2026-09-13-agent-infra-one-owner-per-axis.md`). Kept for the record.
+
 Date: 2026-08-01
 Status: Implemented (apex lifecycle + conductor role). Phase 3 ergonomics landed early as `relay root adopt|enroll|unenroll|status|rules|digest`; the role ships at `share/roles/relay-conductor.md`. Not yet exercised against a real always-on host.
 Series: Part **B** of Autonomous Mode (A → B → C). **Depends on Part A** (nearest-live-ancestor escalation): B assumes an escalation reliably reaches the nearest live ancestor. See A for the shared model.

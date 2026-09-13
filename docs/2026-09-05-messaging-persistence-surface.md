@@ -1,5 +1,7 @@
 # relay — the kept surface: session, message, surface
 
+> **Retired 2026-09-13.** The delegation verbs this document describes (`agent`, `handoff`, `parent`, `msg`, `board`, `ask`/`resolve`, `policy`, `root`, `events`, `gc`, `history`, `mcp`) were removed as one unit; see the workspace's one-owner-per-axis decision (`dostos-workspace/docs/superpowers/specs/2026-09-13-agent-infra-one-owner-per-axis.md`). Kept for the record.
+
 Date: 2026-09-05
 Scope: a map of what CLI verbs and code paths exist today, so the kept surface
 can be consolidated around three nouns: **session** (tmux, attach, detach),

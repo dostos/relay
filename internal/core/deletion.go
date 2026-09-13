@@ -39,7 +39,7 @@ func DeleteSessionsProjected(ctx context.Context, reg *Registry, viz ports.Viz, 
 	return deleteSessionsProjected(ctx, reg, viz, sessions, suppressProjection, teardown, nil, teardown != nil)
 }
 
-type deletionAuthorizer func(*Session, []*Handoff) error
+type deletionAuthorizer func(*Session) error
 
 func deleteSessionsProjected(ctx context.Context, reg *Registry, viz ports.Viz, sessions []*Session, suppressProjection bool, teardown func() error, authorize deletionAuthorizer, cleanupIdentity bool) error {
 	if reg == nil || len(sessions) == 0 {
@@ -60,10 +60,6 @@ func deleteSessionsProjected(ctx context.Context, reg *Registry, viz ports.Viz, 
 		}
 	}
 	defer unlock()
-	handoffs, err := reg.ListHandoffs()
-	if err != nil {
-		return err
-	}
 	intents := make([]SessionDeletion, 0, len(sessions))
 	paths := make([]string, 0, len(sessions))
 	for i, requested := range sessions {
@@ -79,20 +75,8 @@ func deleteSessionsProjected(ctx context.Context, reg *Registry, viz ports.Viz, 
 			return fmt.Errorf("session deletion requires non-nil sessions")
 		}
 		if authorize != nil {
-			if err := authorize(sess, handoffs); err != nil {
+			if err := authorize(sess); err != nil {
 				return err
-			}
-		}
-		children, childErr := reg.DirectChildren(sess.ID)
-		if childErr != nil {
-			return childErr
-		}
-		if len(children) > 0 {
-			return fmt.Errorf("session %s still manages %d direct child session(s)", sess.ID, len(children))
-		}
-		for _, handoff := range handoffs {
-			if handoff.SourceSessionID == sess.ID && !handoffTerminal(handoff) {
-				return fmt.Errorf("session %s still owns nonterminal handoff %s", sess.ID, handoff.ID)
 			}
 		}
 		intent := SessionDeletion{

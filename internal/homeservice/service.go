@@ -4,7 +4,6 @@ package homeservice
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -72,7 +71,6 @@ func New() *Service {
 	s.Components = []Component{
 		{Name: "event_coordinator", Run: runEventCoordinator},
 		{Name: "command_boundary", Run: runCommandBoundary},
-		{Name: "watcher_reconciler", Run: runWatcherReconciler},
 	}
 	return s
 }
@@ -395,28 +393,6 @@ func serveCommandBoundary(ctx context.Context, ready func(bool), withControl boo
 		_ = server.Close()
 		return err
 	}
-}
-
-func runWatcherReconciler(ctx context.Context, ready func(bool)) error {
-	app := cli.New()
-	supervisor := &core.SupervisorService{
-		Reg: app.Reg, Parents: app.Parents, Interval: time.Second,
-		ReconcileHandoffs: func(ctx context.Context) (int, error) {
-			return app.Handoffs.Reconcile(ctx)
-		},
-		RepairSensors: func(ctx context.Context, sessionID string) error {
-			return app.Handoffs.ReinstallSensors(ctx, sessionID, 0)
-		},
-	}
-	if _, err := supervisor.Reconcile(ctx); err != nil {
-		return err
-	}
-	ready(true)
-	err := supervisor.Run(ctx)
-	if errors.Is(err, context.Canceled) {
-		return nil
-	}
-	return err
 }
 
 func serveSocketComponent(ctx context.Context, serve func() error, closeServer func() error, probe func() error, ready func(bool)) error {

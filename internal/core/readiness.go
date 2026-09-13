@@ -1,7 +1,7 @@
 package core
 
 import (
-	"context"
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -254,14 +254,18 @@ func ClassifyAgentPane(capture string) AgentReadiness {
 	return AgentReadiness{State: AgentReady}
 }
 
-// AgentReadinessFor captures a session's pane and classifies it.
-func (r *RootService) AgentReadinessFor(ctx context.Context, sessions *SessionService, sessionID string) AgentReadiness {
-	if sessions == nil {
-		return AgentReadiness{State: AgentUnknown, Reason: "no session service to inspect the pane"}
+// formatSecurityGate renders a gate as one line, so two captures of the same
+// prompt compare equal and a changed prompt does not.
+func formatSecurityGate(gate *SecurityGate) string {
+	if gate == nil {
+		return "security decision required"
 	}
-	capture, err := sessions.Capture(ctx, sessionID, 40)
-	if err != nil {
-		return AgentReadiness{State: AgentUnknown, Reason: "could not capture the pane: " + err.Error()}
+	parts := []string{gate.Reason}
+	if gate.Directory != "" {
+		parts = append(parts, "directory: "+gate.Directory)
 	}
-	return ClassifyAgentPane(capture)
+	for _, choice := range gate.Choices {
+		parts = append(parts, fmt.Sprintf("%d. %s", choice.Index, choice.Label))
+	}
+	return strings.Join(parts, " | ")
 }

@@ -487,8 +487,7 @@ func serializeInvocation(argv []string) bool {
 	}
 	if len(filtered) == 2 {
 		reserved := map[string]bool{
-			"agent": true, "handoff": true, "history": true, "help": true, "version": true, "targets": true,
-			"resolve": true, "log": true,
+			"help": true, "version": true, "targets": true,
 		}
 		if !reserved[filtered[0]] {
 			return true
@@ -497,15 +496,7 @@ func serializeInvocation(argv []string) bool {
 	if len(filtered) < 2 {
 		return false
 	}
-	if filtered[0] == "resolve" {
-		return true
-	}
-	switch filtered[0] + " " + filtered[1] {
-	case "agent start", "agent done", "handoff finalize", "handoff reconcile", "parent reply", "parent ack", "parent state", "parent retire", "session cleanup":
-		return true
-	}
-	// `relay handoff -H …` is the launch form; its second token is a flag.
-	return filtered[0] == "handoff" && strings.HasPrefix(filtered[1], "-")
+	return false
 }
 
 func desktopInvokeEnv(env []string) []string {

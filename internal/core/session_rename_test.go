@@ -58,9 +58,6 @@ func TestSessionRenameKeepsIdentityAndRetargetsDurableState(t *testing.T) {
 	}
 	RememberResume(sess)
 	RememberPane("surface:187", sess, true)
-	if err := AppendSessionStart(sess); err != nil {
-		t.Fatal(err)
-	}
 	persist := &renamePersistence{}
 	service := &SessionService{
 		Reg: reg, Persist: persist,
@@ -93,9 +90,5 @@ func TestSessionRenameKeepsIdentityAndRetargetsDurableState(t *testing.T) {
 	pane, err := ReadPaneBinding("surface:187")
 	if err != nil || pane.PersistName != "beholder" {
 		t.Fatalf("pane binding = %+v, err %v", pane, err)
-	}
-	graph, err := LoadHistory()
-	if err != nil || len(graph.Nodes) != 1 || graph.Nodes[0].PersistName != "beholder" {
-		t.Fatalf("history = %+v, err %v", graph, err)
 	}
 }

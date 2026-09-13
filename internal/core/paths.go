@@ -38,8 +38,6 @@ func ConfigRoot() string {
 	return filepath.Join(xdg, AppName)
 }
 
-func PolicyPath() string { return filepath.Join(ConfigRoot(), "policy.yaml") }
-
 func SessionsPath() string             { return filepath.Join(StateRoot(), "sessions.json") }
 func ProjectionOnlyMarkerPath() string { return filepath.Join(StateRoot(), ".viz-projection-only") }
 func AuthorityDeletionDir() string     { return filepath.Join(StateRoot(), "authority-deletions") }
@@ -53,7 +51,6 @@ func HomeServiceHealthPath() string { return filepath.Join(StateRoot(), "service
 func HomeServiceLockPath() string   { return filepath.Join(StateRoot(), "service.lock") }
 func HomeClientTokenPath() string   { return filepath.Join(StateRoot(), "home-client.token") }
 func HandoffsDir() string           { return filepath.Join(StateRoot(), "handoffs") }
-func LedgerPath() string            { return filepath.Join(StateRoot(), "handoffs", "ledger.jsonl") }
 
 // DesktopBridgeSocketPath is where the authenticated command boundary listens,
 // and where a client dials it. RELAY_BRIDGE_SOCK overrides both ends together
@@ -72,9 +69,6 @@ func BridgeTokensDir() string     { return filepath.Join(StateRoot(), "bridge-to
 func BridgeIdentitiesDir() string { return filepath.Join(StateRoot(), "bridge-identities") }
 func ParentInboxDir() string      { return filepath.Join(StateRoot(), "parent-inbox") }
 func ParentWatchDir() string      { return filepath.Join(StateRoot(), "parent-watch") }
-func ParentWatchLockPath(handoffID string) string {
-	return filepath.Join(ParentWatchDir(), sanitizeID(handoffID)+".lock")
-}
 func ProfileCacheDir() string {
 	return filepath.Join(StateRoot(), "hosts")
 }

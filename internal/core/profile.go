@@ -79,18 +79,9 @@ type PathMapEntry struct {
 type HostDefaults struct {
 	PreferredAgent string `yaml:"preferred_agent,omitempty" json:"preferred_agent,omitempty"`
 	// ExhaustedAgent is an explicit launch profile used when PreferredAgent's
-	// known usage falls below UsageMinRemaining (for example, provider Auto).
 	ExhaustedAgent string `yaml:"exhausted_agent,omitempty" json:"exhausted_agent,omitempty"`
 	SilenceSec     int    `yaml:"silence_sec,omitempty" json:"silence_sec,omitempty"`
 	WorkspaceHint  string `yaml:"workspace_hint,omitempty" json:"workspace_hint,omitempty"`
-	// UsageHook is a command relay runs locally to learn each agent's remaining
-	// weekly headroom; its stdout must be JSON like
-	// {"agents":{"cursor-agent":{"weekly_remaining":42}}}. Empty disables the
-	// usage hint (RELAY_USAGE_HOOK env is used as a machine-wide fallback).
-	UsageHook string `yaml:"usage_hook,omitempty" json:"usage_hook,omitempty"`
-	// UsageMinRemaining is the weekly % LEFT below which an agent is treated as
-	// exhausted during auto-selection (default 5 when unset).
-	UsageMinRemaining int `yaml:"usage_min_remaining,omitempty" json:"usage_min_remaining,omitempty"`
 }
 
 // ProbeResult records a capability probe for one agent.
@@ -225,158 +216,6 @@ func (a *AgentSpec) InnerCommand() string {
 		return "ccs " + strings.TrimPrefix(a.Name, "ccs:")
 	}
 	return a.Name
-}
-
-// LaunchCommand builds the remote shell command to start an agent with a goal.
-// Always runs under a login interactive shell so nvm/cargo/~/.local/bin are on PATH.
-func (a *AgentSpec) LaunchCommand(goal string) string {
-	return wrapLoginShell(a.launchScript(goal))
-}
-
-// launchScript returns the exact agent payload before the one login-shell
-// boundary is added. Handoff terminal instrumentation stores this payload in a
-// temporary script, avoiding semantic re-parsing through nested `bash -lc`
-// command strings.
-func (a *AgentSpec) launchScript(goal string) string {
-	inner := a.InnerCommand()
-	if len(a.Args) > 0 {
-		inner = strings.TrimSpace(inner) + " " + shellJoin(a.Args)
-	}
-	inner = withAutonomousPermissions(*a, inner)
-	inner = withAgentRelayMCP(*a, inner)
-	if strings.EqualFold(a.RelayHooks, "off") {
-		if a.SupportsNativePrompt() && strings.TrimSpace(goal) != "" {
-			inner += " " + shellQuote(goal)
-		}
-		return inner
-	}
-	inner = withAgentRelayHooks(*a, inner)
-	if a.SupportsNativePrompt() && strings.TrimSpace(goal) != "" {
-		// All supported providers accept an initial positional prompt. Keep it
-		// after provider options so goal delivery is one acknowledged launch
-		// effect instead of a second, UI-dependent composer mutation.
-		inner += " " + shellQuote(goal)
-	}
-	// Every CLI, including agents without a hook API, gets a terminal signal.
-	// Provider hooks add permission/result events; tmux silence remains the
-	// bounded fallback for unsupported CLIs.
-	script := inner + `; relay_agent_rc=$?; "$HOME/.local/bin/relay" signal exit --text "agent exited" --correlation terminal >/dev/null 2>&1 || true; exit $relay_agent_rc`
-	return script
-}
-
-// isCodexFamily reports whether this agent is the official Codex CLI or a
-// codex-multi-auth wrapper / account agent (codex:1, codex-multi-auth-codex, …).
-func isCodexFamily(a AgentSpec) bool {
-	if a.Name == "codex" || strings.HasPrefix(a.Name, "codex:") {
-		return true
-	}
-	fields := strings.Fields(a.InnerCommand())
-	if len(fields) == 0 {
-		return false
-	}
-	base := strings.ToLower(path.Base(fields[0]))
-	return base == "codex" || base == "codex-multi-auth-codex" || base == "mcodex"
-}
-
-func withAgentRelayMCP(a AgentSpec, inner string) string {
-	fields := strings.Fields(a.InnerCommand())
-	if len(fields) == 0 {
-		return inner
-	}
-	base := strings.ToLower(path.Base(fields[0]))
-	switch {
-	case isCodexFamily(a):
-		commandCfg := `mcp_servers.relay.command="relay"`
-		argsCfg := `mcp_servers.relay.args=["mcp","serve"]`
-		// Codex deliberately filters the environment of stdio MCP servers.
-		// Whitelist only Relay's managed-session identity and tmux recovery
-		// handle; without this the tool can read global protocol but cannot emit
-		// an event for the handoff that invoked it.
-		envCfg := `mcp_servers.relay.env_vars=["RELAY_SESSION_ID","RELAY_SESSION_HOST","RELAY_SESSION_NAME","RELAY_BRIDGE_SOCK","RELAY_SOURCE_TOKEN","TMUX_PANE"]`
-		return inner + " -c " + shellQuote(commandCfg) + " -c " + shellQuote(argsCfg) + " -c " + shellQuote(envCfg)
-	case base == "claude" || a.Name == "claude" || base == "ccs" || strings.HasPrefix(a.Name, "ccs:"):
-		config := map[string]any{"mcpServers": map[string]any{"relay": map[string]any{"type": "stdio", "command": "relay", "args": []string{"mcp", "serve"}}}}
-		raw, _ := json.Marshal(config)
-		return inner + " --mcp-config " + shellQuote(string(raw))
-	default:
-		// Cursor loads the explicitly installed ~/.cursor/mcp.json entry. Relay
-		// never passes --approve-mcps, which would approve unrelated servers.
-		return inner
-	}
-}
-
-// SupportsNativePrompt reports whether this configured launch command has a
-// stable initial-prompt argv contract. Profiles wrapping the known provider
-// binaries inherit support from the binary name; unfamiliar CLIs retain the
-// confirmed-composer fallback.
-func (a *AgentSpec) SupportsNativePrompt() bool {
-	if a == nil {
-		return false
-	}
-	if isCodexFamily(*a) {
-		return true
-	}
-	fields := strings.Fields(a.InnerCommand())
-	if len(fields) == 0 {
-		return false
-	}
-	base := strings.ToLower(path.Base(fields[0]))
-	return base == "cursor-agent" || base == "claude" || base == "ccs"
-}
-
-// withAutonomousPermissions gives every managed agent the provider's
-// full-access mode. Trust, login, and security gates remain separately
-// classified and are never answered by Relay.
-func withAutonomousPermissions(a AgentSpec, inner string) string {
-	base := strings.ToLower(path.Base(strings.Fields(a.InnerCommand())[0]))
-	hasArg := func(want ...string) bool {
-		for _, field := range strings.Fields(inner) {
-			for _, candidate := range want {
-				if field == candidate {
-					return true
-				}
-			}
-		}
-		return false
-	}
-	switch {
-	case base == "cursor-agent" || a.Name == "cursor-agent":
-		if !hasArg("--force", "-f", "--yolo") {
-			inner += " --force"
-		}
-	case isCodexFamily(a):
-		if !hasArg("--dangerously-bypass-approvals-and-sandbox", "--ask-for-approval", "-a") {
-			inner += " --dangerously-bypass-approvals-and-sandbox"
-		}
-	case base == "claude" || a.Name == "claude" || base == "ccs" || strings.HasPrefix(a.Name, "ccs:"):
-		if !hasArg("--dangerously-skip-permissions", "--permission-mode") {
-			inner += " --dangerously-skip-permissions"
-		}
-	}
-	return inner
-}
-
-func withAgentRelayHooks(a AgentSpec, inner string) string {
-	base := strings.ToLower(path.Base(strings.Fields(a.InnerCommand())[0]))
-	permission := `$HOME/.local/bin/relay hook --kind permission_required`
-	result := `$HOME/.local/bin/relay hook --kind result`
-	switch {
-	case isCodexFamily(a):
-		permissionCfg := `hooks.PermissionRequest=[{hooks=[{type="command",command='''` + permission + `''',timeout=120000}]}]`
-		resultCfg := `hooks.Stop=[{hooks=[{type="command",command='''` + result + `''',timeout=120000}]}]`
-		return inner + " -c " + shellQuote(permissionCfg) + " -c " + shellQuote(resultCfg)
-	case base == "claude" || a.Name == "claude" || base == "ccs" || strings.HasPrefix(a.Name, "ccs:"):
-		settings := map[string]any{
-			"hooks": map[string]any{
-				"PermissionRequest": []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": permission, "timeout": 120}}}},
-				"Stop":              []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": result, "timeout": 120}}}},
-			},
-		}
-		raw, _ := json.Marshal(settings)
-		return inner + " --settings " + shellQuote(string(raw))
-	default:
-		return inner
-	}
 }
 
 // wrapLoginShell ensures remotes see a full user PATH (nvm, ~/.local/bin, …).
@@ -790,4 +629,18 @@ defaults:
   # usage_hook: agent-usage --json
   # usage_min_remaining: 5
 `, hostID)
+}
+
+// isCodexFamily reports whether an agent name or command is codex or one of
+// its account-routing wrappers.
+func isCodexFamily(a AgentSpec) bool {
+	if a.Name == "codex" || strings.HasPrefix(a.Name, "codex:") {
+		return true
+	}
+	fields := strings.Fields(a.InnerCommand())
+	if len(fields) == 0 {
+		return false
+	}
+	base := strings.ToLower(path.Base(fields[0]))
+	return base == "codex" || base == "codex-multi-auth-codex" || base == "mcodex"
 }

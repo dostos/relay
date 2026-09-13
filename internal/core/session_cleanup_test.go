@@ -8,25 +8,17 @@ import (
 	"github.com/dostos/relay/internal/ports"
 )
 
-func cleanupFixture(t *testing.T, withActiveHandoff bool) (*SessionService, *Registry) {
+func cleanupFixture(t *testing.T) (*SessionService, *Registry) {
 	t.Helper()
 	t.Setenv("RELAY_STATE_DIR", t.TempDir())
 	reg := &Registry{}
-	manager := &Session{ID: "sess-manager", HostID: "home", Persist: ports.PersistHandle{Kind: "tmux", Name: "manager"}}
 	child := &Session{
-		ID: "sess-child", HostID: "worker", SourceSessionID: manager.ID,
+		ID: "sess-child", HostID: "worker",
 		Persist: ports.PersistHandle{Kind: "tmux", Name: "failed-child"},
-		Labels:  map[string]string{"role": "handoff"}, CreatedByHandoffID: "ho-child",
+		Labels:  map[string]string{"role": "interactive"},
 	}
-	for _, session := range []*Session{manager, child} {
-		if err := reg.PutSession(session); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if withActiveHandoff {
-		if err := reg.PutHandoff(&Handoff{ID: "ho-child", SessionID: child.ID, SourceSessionID: manager.ID, Status: StatusRunning}); err != nil {
-			t.Fatal(err)
-		}
+	if err := reg.PutSession(child); err != nil {
+		t.Fatal(err)
 	}
 	return &SessionService{
 		Reg: reg, Persist: &renamePersistence{},
@@ -34,28 +26,8 @@ func cleanupFixture(t *testing.T, withActiveHandoff bool) (*SessionService, *Reg
 	}, reg
 }
 
-func TestCleanupFailedChildRetiresMissingHandoffArtifact(t *testing.T) {
-	service, reg := cleanupFixture(t, false)
-	if err := service.CleanupFailedChild(context.Background(), "sess-manager", "sess-child"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := reg.GetSession("sess-child"); err == nil {
-		t.Fatal("failed child remains authoritative")
-	}
-}
-
-func TestCleanupFailedChildRefusesActiveAndUnrelatedSessions(t *testing.T) {
-	service, _ := cleanupFixture(t, true)
-	if err := service.CleanupFailedChild(context.Background(), "sess-manager", "sess-child"); err == nil {
-		t.Fatal("active handoff child was cleaned")
-	}
-	if err := service.CleanupFailedChild(context.Background(), "sess-other", "sess-child"); err == nil {
-		t.Fatal("unrelated manager cleaned child")
-	}
-}
-
 func TestDestroyKeepRemotePreservesResumeAndBridgeIdentity(t *testing.T) {
-	service, _ := cleanupFixture(t, false)
+	service, _ := cleanupFixture(t)
 	service.Viz = &deletionViz{}
 	child, err := service.Reg.GetSession("sess-child")
 	if err != nil {

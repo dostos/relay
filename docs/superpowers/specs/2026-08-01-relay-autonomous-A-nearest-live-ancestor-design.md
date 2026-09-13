@@ -1,5 +1,7 @@
 # relay — autonomous mode, Part A: nearest-live-ancestor escalation
 
+> **Retired 2026-09-13.** The delegation verbs this document describes (`agent`, `handoff`, `parent`, `msg`, `board`, `ask`/`resolve`, `policy`, `root`, `events`, `gc`, `history`, `mcp`) were removed as one unit; see the workspace's one-owner-per-axis decision (`dostos-workspace/docs/superpowers/specs/2026-09-13-agent-infra-one-owner-per-axis.md`). Kept for the record.
+
 Date: 2026-08-01
 Status: Proposed
 Series: Autonomous Mode is three separable specs, sequenced **A → B → C**. **A (this doc)** is the foundational spine — it generalizes escalation delivery. **B** parks an always-on agent at the apex (depends on A). **C** adds lateral child-to-child comms (orthogonal). A carries the shared conceptual model; B and C reference it.

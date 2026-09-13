@@ -1,5 +1,7 @@
 # Continuous operations brief
 
+> **Retired 2026-09-13.** The delegation verbs this document describes (`agent`, `handoff`, `parent`, `msg`, `board`, `ask`/`resolve`, `policy`, `root`, `events`, `gc`, `history`, `mcp`) were removed as one unit; see the workspace's one-owner-per-axis decision (`dostos-workspace/docs/superpowers/specs/2026-09-13-agent-infra-one-owner-per-axis.md`). Kept for the record.
+
 Operating brief for the always-on agent on `home` that watches the relay tree
 and keeps improving relay. Written 2026-08-02. The handoff goal points here so
 the goal itself stays short; read this once per session, not per tick.

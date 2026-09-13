@@ -86,7 +86,7 @@ relay container up -H hamburg --container oqb --recreate --reprovision
 relay container status -H hamburg --container oqb
 relay container down -H hamburg --container oqb      # named volumes survive
 relay session create -H hamburg --container oqb [--ephemeral]
-relay agent start hamburg claude --container oqb -- "run the smoke suite"
+relay session create -H hamburg --container oqb -- claude "run the smoke suite"   # the pane runs the CLI
 ```
 
 ## Lifetime

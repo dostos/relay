@@ -22,18 +22,14 @@ type File struct {
 type Bundle struct {
 	V        int               `json:"v"`
 	Sessions []*core.Session   `json:"sessions"`
-	Handoffs []*core.Handoff   `json:"handoffs"`
 	Tokens   map[string][]byte `json:"tokens,omitempty"`
 	Files    []File            `json:"files,omitempty"`
-	Ledger   []json.RawMessage `json:"ledger,omitempty"`
 }
 
 type Summary struct {
 	Sessions int `json:"sessions"`
-	Handoffs int `json:"handoffs"`
 	Tokens   int `json:"tokens"`
 	Files    int `json:"files"`
-	Ledger   int `json:"ledger"`
 }
 
 func Export(reg *core.Registry) (*Bundle, error) {
@@ -41,11 +37,7 @@ func Export(reg *core.Registry) (*Bundle, error) {
 	if err != nil {
 		return nil, err
 	}
-	handoffs, err := reg.ListHandoffs()
-	if err != nil {
-		return nil, err
-	}
-	bundle := &Bundle{V: 1, Sessions: sessions, Handoffs: handoffs, Tokens: map[string][]byte{}}
+	bundle := &Bundle{V: 1, Sessions: sessions, Tokens: map[string][]byte{}}
 	entries, _ := os.ReadDir(core.BridgeTokensDir())
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".token" {
@@ -53,36 +45,6 @@ func Export(reg *core.Registry) (*Bundle, error) {
 		}
 		if raw, readErr := os.ReadFile(filepath.Join(core.BridgeTokensDir(), entry.Name())); readErr == nil {
 			bundle.Tokens[entry.Name()] = raw
-		}
-	}
-	for _, root := range []string{"parent-inbox", "conductor"} {
-		base := filepath.Join(core.StateRoot(), root)
-		_ = filepath.WalkDir(base, func(path string, d os.DirEntry, walkErr error) error {
-			if walkErr != nil || d.IsDir() {
-				return nil
-			}
-			rel, relErr := filepath.Rel(core.StateRoot(), path)
-			if relErr != nil {
-				return nil
-			}
-			if raw, readErr := os.ReadFile(path); readErr == nil {
-				bundle.Files = append(bundle.Files, File{Path: rel, Data: raw})
-			}
-			return nil
-		})
-	}
-	if file, openErr := os.Open(core.LedgerPath()); openErr == nil {
-		defer file.Close()
-		scanner := bufio.NewScanner(file)
-		scanner.Buffer(make([]byte, 64*1024), 4<<20)
-		for scanner.Scan() {
-			line := append([]byte(nil), scanner.Bytes()...)
-			if json.Valid(line) {
-				bundle.Ledger = append(bundle.Ledger, json.RawMessage(line))
-			}
-		}
-		if err := scanner.Err(); err != nil {
-			return nil, fmt.Errorf("read control ledger: %w", err)
 		}
 	}
 	return bundle, nil
@@ -112,19 +74,6 @@ func Import(reg *core.Registry, bundle *Bundle) (*Summary, error) {
 		}
 		summary.Sessions++
 	}
-	for _, incoming := range bundle.Handoffs {
-		if incoming == nil || incoming.ID == "" {
-			continue
-		}
-		current, err := reg.GetHandoff(incoming.ID)
-		if err == nil && !incoming.UpdatedAt.After(current.UpdatedAt) {
-			continue
-		}
-		if err := reg.PutHandoff(incoming); err != nil {
-			return nil, err
-		}
-		summary.Handoffs++
-	}
 	for name, token := range bundle.Tokens {
 		if len(token) == 0 {
 			// Revoked/partially cleaned identities sometimes leave an empty token
@@ -148,34 +97,6 @@ func Import(reg *core.Registry, bundle *Bundle) (*Summary, error) {
 		}
 		summary.Tokens++
 	}
-	for _, file := range bundle.Files {
-		clean := filepath.Clean(file.Path)
-		if clean != file.Path || strings.HasPrefix(clean, "..") || (!strings.HasPrefix(clean, "parent-inbox"+string(filepath.Separator)) && !strings.HasPrefix(clean, "conductor"+string(filepath.Separator))) {
-			return nil, fmt.Errorf("invalid control file %q", file.Path)
-		}
-		dst := filepath.Join(core.StateRoot(), clean)
-		if filepath.Ext(dst) == ".jsonl" {
-			if err := mergeJSONL(dst, file.Data); err != nil {
-				return nil, err
-			}
-		} else if _, err := os.Stat(dst); os.IsNotExist(err) {
-			if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-				return nil, err
-			}
-			if err := os.WriteFile(dst, file.Data, 0o600); err != nil {
-				return nil, err
-			}
-		}
-		summary.Files++
-	}
-	ledgerRaw := make([]byte, 0)
-	for _, line := range bundle.Ledger {
-		ledgerRaw = append(ledgerRaw, append(line, '\n')...)
-	}
-	if err := mergeJSONL(core.LedgerPath(), ledgerRaw); err != nil {
-		return nil, err
-	}
-	summary.Ledger = len(bundle.Ledger)
 	return summary, nil
 }
 

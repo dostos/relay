@@ -67,8 +67,6 @@ func Command(args []string) int {
 			return 0
 		}
 		return compatibilityComponentCommand("boundary", rest, runCommandBoundary)
-	case "watcher":
-		return compatibilityComponentCommand("watcher", args[1:], runWatcherReconciler)
 	default:
 		fmt.Fprintf(os.Stderr, "relay service: unknown command %q\n", args[0])
 		return 2

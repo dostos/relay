@@ -11,7 +11,6 @@ import (
 	"github.com/dostos/relay/internal/cli"
 	"github.com/dostos/relay/internal/compat"
 	"github.com/dostos/relay/internal/homeservice"
-	"github.com/dostos/relay/internal/mcpserver"
 	cmuxviz "github.com/dostos/relay/internal/viz/cmux"
 	"github.com/dostos/relay/internal/vizbroker"
 )
@@ -29,13 +28,6 @@ func main() {
 	}
 	if len(args) > 0 && args[0] == "service" {
 		os.Exit(homeservice.Command(args[1:]))
-	}
-	if len(args) > 0 && args[0] == "mcp" {
-		os.Exit(mcpserver.Command(args[1:]))
-	}
-	if len(args) == 1 && args[0] == "supervise" {
-		fmt.Fprintln(os.Stderr, "relay supervise is deprecated; watcher ownership moves to relay service run after unit migration")
-		os.Exit(homeservice.Command([]string{"watcher", "run"}))
 	}
 	if len(args) > 0 && args[0] == "viz-broker" {
 		os.Exit(vizbroker.Command(args[1:]))

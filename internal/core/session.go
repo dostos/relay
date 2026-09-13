@@ -31,6 +31,8 @@ type SessionService struct {
 	// Screen is the optional desktop pane I/O capability. Control-plane send
 	// and capture use it without assigning communication ownership to Viz.
 	Screen DesktopScreen
+	// Coord is the host-local event service the tmux sensors emit through.
+	Coord ports.Coord
 }
 
 // ScreenCapturer is an optional Viz capability: reading a pane's visible text.
@@ -68,16 +70,15 @@ func newID(prefix string) string {
 
 // CreateOpts configures session creation.
 type CreateOpts struct {
-	HostID             string
-	Name               string // optional persist name; default derived
-	RepoRef            string // local git root
-	RemoteCWD          string // optional override (skips path_map)
-	Command            string // optional initial command; default interactive shell
-	Labels             map[string]string
-	SourceSessionID    string
-	SourceHostID       string
-	SourcePersistName  string
-	CreatedByHandoffID string
+	HostID            string
+	Name              string // optional persist name; default derived
+	RepoRef           string // local git root
+	RemoteCWD         string // optional override (skips path_map)
+	Command           string // optional initial command; default interactive shell
+	Labels            map[string]string
+	SourceSessionID   string
+	SourceHostID      string
+	SourcePersistName string
 	// Container binds this session to a declared `containers:` entry: the pane's
 	// shell runs via `docker exec` while tmux stays on the host, so a container
 	// recreate leaves the pane intact.
@@ -228,19 +229,18 @@ func (s *SessionService) Create(ctx context.Context, opts CreateOpts) (*Session,
 	s.applyChrome(ctx, t, h)
 	now := time.Now().UTC()
 	sess := &Session{
-		ID:                 sessionID,
-		HostID:             opts.HostID,
-		RemoteCWD:          cwd,
-		Persist:            h,
-		RepoRef:            opts.RepoRef,
-		Labels:             opts.Labels,
-		CreatedAt:          now,
-		UpdatedAt:          now,
-		SourceSessionID:    opts.SourceSessionID,
-		SourceHostID:       opts.SourceHostID,
-		SourcePersistName:  opts.SourcePersistName,
-		CreatedByHandoffID: opts.CreatedByHandoffID,
-		Container:          cref,
+		ID:                sessionID,
+		HostID:            opts.HostID,
+		RemoteCWD:         cwd,
+		Persist:           h,
+		RepoRef:           opts.RepoRef,
+		Labels:            opts.Labels,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+		SourceSessionID:   opts.SourceSessionID,
+		SourceHostID:      opts.SourceHostID,
+		SourcePersistName: opts.SourcePersistName,
+		Container:         cref,
 	}
 	if err := provisionBridgeIdentity(ctx, t, sess, bridgeToken); err != nil {
 		_ = s.Persist.Destroy(ctx, t, h)
@@ -254,7 +254,6 @@ func (s *SessionService) Create(ctx context.Context, opts CreateOpts) (*Session,
 		return nil, err
 	}
 	RememberResume(sess)
-	_ = AppendSessionStart(sess)
 	return sess, nil
 }
 
@@ -309,18 +308,17 @@ func (s *SessionService) Adopt(ctx context.Context, opts CreateOpts) (*Session, 
 		return nil, err
 	}
 	sess := &Session{
-		ID:                 sessionID,
-		HostID:             opts.HostID,
-		RemoteCWD:          cwd,
-		Persist:            h,
-		RepoRef:            opts.RepoRef,
-		Labels:             labels,
-		CreatedAt:          now,
-		UpdatedAt:          now,
-		SourceSessionID:    opts.SourceSessionID,
-		SourceHostID:       opts.SourceHostID,
-		SourcePersistName:  opts.SourcePersistName,
-		CreatedByHandoffID: opts.CreatedByHandoffID,
+		ID:                sessionID,
+		HostID:            opts.HostID,
+		RemoteCWD:         cwd,
+		Persist:           h,
+		RepoRef:           opts.RepoRef,
+		Labels:            labels,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+		SourceSessionID:   opts.SourceSessionID,
+		SourceHostID:      opts.SourceHostID,
+		SourcePersistName: opts.SourcePersistName,
 	}
 	if err := provisionBridgeIdentity(ctx, t, sess, bridgeToken); err != nil {
 		forgetBridgeToken(sessionID)
@@ -332,7 +330,6 @@ func (s *SessionService) Adopt(ctx context.Context, opts CreateOpts) (*Session, 
 		return nil, err
 	}
 	RememberResume(sess)
-	_ = AppendSessionStart(sess)
 	return sess, nil
 }
 
@@ -393,12 +390,6 @@ func (s *SessionService) Rename(ctx context.Context, id, name string) (*Session,
 	if err != nil {
 		return nil, err
 	}
-	if isLocalParent(sess) {
-		return nil, fmt.Errorf("local parent identity is pane-owned; re-register it with relay parent register")
-	}
-	if IsHeadlessParent(sess) {
-		return nil, fmt.Errorf("headless parent identity IS its registration name; re-register it with relay parent register --headless --name")
-	}
 	safe, err := shellquote.SanitizeSessionName(name)
 	if err != nil {
 		return nil, err
@@ -434,9 +425,6 @@ func (s *SessionService) Rename(ctx context.Context, id, name string) (*Session,
 	}
 	if _, err := RenamePaneBindingsForPersist(old.Name, sess); err != nil {
 		return sess, fmt.Errorf("session renamed, but pane history update failed: %w", err)
-	}
-	if err := AppendSessionRename(sess.ID, old.Name, safe); err != nil {
-		return sess, fmt.Errorf("session renamed, but lineage update failed: %w", err)
 	}
 	if _, err := s.ProvisionBridge(ctx, sess.ID); err != nil {
 		return sess, fmt.Errorf("session renamed, but bridge identity update failed: %w", err)
@@ -505,75 +493,6 @@ func (s *SessionService) Send(ctx context.Context, id, text string, enter bool) 
 		return sender.SendScreen(ctx, sess.ID, text, enter)
 	}
 	return s.Persist.Send(ctx, t, sess.Persist, text, enter)
-}
-
-// ManagedSendReceipt separates composer delivery from response observability.
-// A handoff owns sensors, the event stream, and its watcher; a bare session
-// edge owns none of them even when its pane is live.
-type ManagedSendReceipt struct {
-	Submitted   bool   `json:"submitted"`
-	Delivery    string `json:"delivery"`
-	EventStream string `json:"event_stream"`
-	HandoffID   string `json:"handoff_id,omitempty"`
-}
-
-// effectiveLiveHandoff derives routing from the live session edge. The session
-// registry is the authority for where a handoff currently reports; the
-// handoff's own record is a historical launch snapshot and must not become a
-// second live source of truth once a headless manager re-registers --under
-// somewhere else.
-func effectiveLiveHandoff(reg *Registry, ho *Handoff) (*Handoff, error) {
-	if ho == nil {
-		return nil, fmt.Errorf("handoff required")
-	}
-	copy := *ho
-	sess, err := reg.GetSession(ho.SessionID)
-	if err != nil {
-		if handoffTerminal(ho) {
-			return &copy, nil
-		}
-		return nil, err
-	}
-	copy.SourceSessionID = sess.SourceSessionID
-	copy.SourceHostID = sess.SourceHostID
-	copy.SourcePersistName = sess.SourcePersistName
-	return &copy, nil
-}
-
-// SendManagedChild lets an authenticated manager communicate with exactly one
-// immediate interactive child. By default it requires an observable handoff
-// event channel so composer success cannot imply a response path that does not
-// exist. deliveryOnly is an explicit opt-in for intentionally unmanaged panes.
-func (s *SessionService) SendManagedChild(ctx context.Context, managerID, childID, text string, deliveryOnly bool) (*ManagedSendReceipt, error) {
-	if strings.TrimSpace(managerID) == "" {
-		return nil, fmt.Errorf("authenticated manager required")
-	}
-	child, err := s.Reg.GetSession(childID)
-	if err != nil {
-		return nil, err
-	}
-	if child.SourceSessionID != managerID {
-		return nil, fmt.Errorf("session %s is not an immediate child of %s", childID, managerID)
-	}
-	receipt := &ManagedSendReceipt{Delivery: "composer_confirmed", EventStream: "absent"}
-	handoffs, err := s.Reg.ListHandoffs()
-	if err != nil {
-		return nil, err
-	}
-	for _, ho := range handoffs {
-		if ho.SessionID == childID && !handoffTerminal(ho) {
-			receipt.EventStream, receipt.HandoffID = "active", ho.ID
-			break
-		}
-	}
-	if receipt.EventStream != "active" && !deliveryOnly {
-		return receipt, fmt.Errorf("session %s has no observable handoff event channel; use --delivery-only only when composer delivery without a response stream is intentional", childID)
-	}
-	if err := s.Send(ctx, childID, text, true); err != nil {
-		return receipt, err
-	}
-	receipt.Submitted = true
-	return receipt, nil
 }
 
 func (s *SessionService) Exec(ctx context.Context, id, command string) (stdout, stderr string, err error) {
@@ -709,56 +628,6 @@ func (s *SessionService) ResolveGateChoice(ctx context.Context, id string, expec
 	return resolver.ResolveGateChoice(ctx, t, sess.Persist, offset)
 }
 
-// CleanupFailedChild lets an authenticated manager retire only its own failed
-// direct handoff child. Authorization and deletion reservation share the same
-// authority transaction, preventing lineage races.
-func (s *SessionService) CleanupFailedChild(ctx context.Context, managerID, childID string) error {
-	var current *Session
-	authorize := func(sess *Session, handoffs []*Handoff) error {
-		if _, err := s.Reg.GetSession(managerID); err != nil {
-			return fmt.Errorf("authenticated manager is no longer authoritative: %w", err)
-		}
-		if sess.SourceSessionID != managerID {
-			return fmt.Errorf("session cleanup is limited to an authenticated manager's direct children")
-		}
-		if sess.CreatedByHandoffID == "" || sess.Labels["role"] != "handoff" {
-			return fmt.Errorf("session %s is not a handoff child", sess.ID)
-		}
-		for _, handoff := range handoffs {
-			if handoff.ID == sess.CreatedByHandoffID && !handoffTerminal(handoff) {
-				return fmt.Errorf("session %s belongs to active handoff %s", sess.ID, handoff.ID)
-			}
-		}
-		current = sess
-		return nil
-	}
-	teardown := func() error {
-		if current == nil {
-			return fmt.Errorf("session cleanup authorization did not resolve target")
-		}
-		t, err := s.transportFor(current)
-		if err != nil {
-			return err
-		}
-		exists, err := s.Persist.Exists(ctx, t, current.Persist)
-		if err != nil {
-			return err
-		}
-		if exists {
-			if err := s.Persist.Destroy(ctx, t, current.Persist); err != nil {
-				return err
-			}
-		}
-		clearBridgeIdentity(ctx, t, current.ID)
-		return nil
-	}
-	target := []*Session{{ID: childID}}
-	if err := deleteSessionsProjected(ctx, s.Reg, s.Viz, target, false, teardown, authorize, true); err != nil {
-		return err
-	}
-	return nil
-}
-
 // ReplaceCreate kills any existing remote session with opts.Name (and local
 // registry rows for it), then Create. Used by ephemeral flows like auth login.
 func (s *SessionService) ReplaceCreate(ctx context.Context, opts CreateOpts) (*Session, error) {
@@ -791,9 +660,6 @@ func (s *SessionService) KillPersist(ctx context.Context, hostID, persistName st
 	var matching []*Session
 	for _, sess := range list {
 		if sess.HostID == hostID && sess.Persist.Name == safe {
-			if err := s.validateLeaf(sess); err != nil {
-				return err
-			}
 			matching = append(matching, sess)
 		}
 	}
@@ -812,30 +678,7 @@ func (s *SessionService) KillPersist(ctx context.Context, hostID, persistName st
 }
 
 func (s *SessionService) deleteLeafProjected(ctx context.Context, sess *Session) error {
-	if err := s.validateLeaf(sess); err != nil {
-		return err
-	}
 	return DeleteSessionProjected(ctx, s.Reg, s.Viz, sess, false)
-}
-
-func (s *SessionService) validateLeaf(sess *Session) error {
-	children, err := s.Reg.DirectChildren(sess.ID)
-	if err != nil {
-		return err
-	}
-	if len(children) > 0 {
-		return fmt.Errorf("session %s still manages %d direct child session(s)", sess.ID, len(children))
-	}
-	handoffs, err := s.Reg.ListHandoffs()
-	if err != nil {
-		return err
-	}
-	for _, handoff := range handoffs {
-		if handoff.SourceSessionID == sess.ID && !handoffTerminal(handoff) {
-			return fmt.Errorf("session %s still owns nonterminal handoff %s", sess.ID, handoff.ID)
-		}
-	}
-	return nil
 }
 
 // RemoteLiveness is the result of probing whether persist names actually have a
@@ -984,4 +827,37 @@ func (s *SessionService) reapEphemeralContainer(ctx context.Context, t ports.Tra
 	if _, _, err := t.Run(ctx, "", down); err != nil {
 		ui.Warn(fmt.Sprintf("ephemeral container %s left running on %s: %v", sess.Container.Ref, sess.HostID, err))
 	}
+}
+
+// ReinstallSensors refreshes a session's tmux idle/exit hooks (quiet emit
+// through the host-local event service). The event stream is the session's
+// own persist name.
+func (s *SessionService) ReinstallSensors(ctx context.Context, sessionID string, silence int) error {
+	if s.Coord == nil {
+		return fmt.Errorf("coord adapter not configured")
+	}
+	sess, err := s.Get(sessionID)
+	if err != nil {
+		return err
+	}
+	if silence <= 0 {
+		if p, err := s.Profiles.Get(ctx, sess.HostID, true); err == nil && p.Defaults.SilenceSec > 0 {
+			silence = p.Defaults.SilenceSec
+		}
+	}
+	if silence <= 0 {
+		silence = 45
+	}
+	t, err := s.NewTransport(sess.HostID)
+	if err != nil {
+		return err
+	}
+	if err := s.Coord.Ensure(ctx, t); err != nil {
+		return err
+	}
+	stream := sess.Persist.Name
+	emitFactory := func(kind string) (string, error) {
+		return s.Coord.SensorCommand(stream, kind)
+	}
+	return s.Persist.InstallSensors(ctx, t, sess.Persist, silence, emitFactory)
 }

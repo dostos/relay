@@ -335,12 +335,14 @@ func TestDesktopInvokeEnvDropsStaleCmuxCaller(t *testing.T) {
 }
 
 func TestSerializeInvocationDoesNotBlockWaits(t *testing.T) {
-	for _, argv := range [][]string{{"c1", "named"}, {"agent", "start", "c1", "codex", "--", "x"}, {"agent", "done", "ho-1"}, {"resolve", "pm-1", "yes"}, {"session", "cleanup", "sess-child"}} {
+	for _, argv := range [][]string{{"c1", "named"}} {
 		if !serializeInvocation(argv) {
 			t.Fatalf("expected %v to serialize", argv)
 		}
 	}
-	for _, argv := range [][]string{{"agent", "wait", "ho-1"}, {"agent", "capture", "ho-1"}, {"log", "0"}, {"history"}} {
+	// The retired delegation verbs are ordinary unknown commands now and
+	// must not take the serialization lock either.
+	for _, argv := range [][]string{{"agent", "wait", "ho-1"}, {"resolve", "pm-1", "yes"}, {"history"}} {
 		if serializeInvocation(argv) {
 			t.Fatalf("expected %v not to serialize", argv)
 		}

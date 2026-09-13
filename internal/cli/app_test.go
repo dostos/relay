@@ -89,34 +89,6 @@ func (v projectedPaneViz) ProjectionSessions(context.Context) ([]ports.Projected
 	return v.panes, v.err
 }
 
-func TestProjectionOnlyCLIUsesSnapshotOnlyForSessionList(t *testing.T) {
-	state := t.TempDir()
-	t.Setenv("RELAY_STATE_DIR", state)
-	if err := os.WriteFile(filepath.Join(state, ".viz-projection-only"), []byte("projection only\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	a := New()
-	a.Viz = projectedPaneViz{panes: []ports.ProjectedSession{{SessionID: "sess-live", TmuxName: "apex", Surface: "surface:1"}}}
-	out := captureStdout(t, func() {
-		if code := a.Run([]string{"--json", "session", "list"}); code != 0 {
-			t.Fatalf("session list code=%d", code)
-		}
-	})
-	if !strings.Contains(out, `"sess-live"`) {
-		t.Fatalf("session projection missing from %q", out)
-	}
-	for _, args := range [][]string{{"--json", "handoff", "list"}, {"--json", "parent", "inbox", "sess-parent"}, {"--json", "history"}} {
-		out := captureStdout(t, func() {
-			if code := a.Run(args); code == 0 {
-				t.Fatalf("%v unexpectedly succeeded", args)
-			}
-		})
-		if !strings.Contains(out, core.ErrProjectionOnlyAuthority.Error()) {
-			t.Fatalf("%v did not fail closed: %q", args, out)
-		}
-	}
-}
-
 func TestStaleQueuedPresentationsDistinguishesPendingFromInert(t *testing.T) {
 	now := time.Now().UTC()
 	sessions := []*core.Session{
@@ -240,29 +212,6 @@ func TestSourceEnvironmentUsesAuthenticatedRegistryIdentity(t *testing.T) {
 	}
 }
 
-func TestCurrentParentIDUsesRelaySessionIdentity(t *testing.T) {
-	t.Setenv(bridge.SourceSessionEnv, "")
-	t.Setenv("RELAY_SESSION_ID", "sess-apex")
-	a := New()
-	got, err := a.currentParentID()
-	if err != nil || got != "sess-apex" {
-		t.Fatalf("parent=%q err=%v", got, err)
-	}
-}
-
-func TestOnlyInteractiveCommandsBypassStatelessServiceTransport(t *testing.T) {
-	for _, args := range [][]string{{"session", "attach", "sess-1"}, {"resume"}, {"resume", "--session", "worker"}} {
-		if !commandNeedsLocalTTY(args) {
-			t.Fatalf("interactive command %v was marked forwardable", args)
-		}
-	}
-	for _, args := range [][]string{{"session", "list"}, {"agent", "protocol"}, {"resume", "list", "--probe"}, {"root", "status"}} {
-		if commandNeedsLocalTTY(args) {
-			t.Fatalf("stateless command %v was kept local", args)
-		}
-	}
-}
-
 func TestLocalCLIForwardsAuthenticatedRequestAndConfirmsResponse(t *testing.T) {
 	root, err := os.MkdirTemp("/tmp", "relay-cli-")
 	if err != nil {
@@ -314,40 +263,6 @@ func TestLocalCLIForwardsAuthenticatedRequestAndConfirmsResponse(t *testing.T) {
 	}
 }
 
-func TestProjectionClientForwardsAuthorityCommandToHome(t *testing.T) {
-	state := t.TempDir()
-	t.Setenv("RELAY_STATE_DIR", state)
-	t.Setenv(bridge.SocketEnv, "")
-	t.Setenv(bridge.LocalInvokeEnv, "")
-	if err := os.WriteFile(filepath.Join(state, ".viz-projection-only"), []byte("projection only\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	a := New()
-	a.Viz = authorityForwardViz{}
-	out := captureStdout(t, func() {
-		if code := a.Run([]string{"handoff", "list"}); code != 0 {
-			t.Fatalf("handoff list code=%d", code)
-		}
-	})
-	if out != "forwarded-from-home\n" {
-		t.Fatalf("forwarded output=%q", out)
-	}
-}
-
-func TestProjectionClientKeepsLocalInventoryCommandsLocal(t *testing.T) {
-	for _, args := range [][]string{{"targets"}, {"doctor"}, {"session", "list"}, {"resume", "list"}, {"viz", "list"}, {"agent", "protocol"}, {"host", "ensure"}, {"host", "ensure", "-H", "local"}} {
-		if !projectionClientCommandStaysLocal(args) {
-			t.Fatalf("command %v should stay on visualization client", args)
-		}
-	}
-	if projectionClientCommandStaysLocal([]string{"handoff", "list"}) {
-		t.Fatal("authority command was kept on visualization client")
-	}
-	if projectionClientCommandStaysLocal([]string{"host", "discover", "-H", "local"}) {
-		t.Fatal("host discover should still forward through the desktop bridge")
-	}
-}
-
 func TestProjectionClientDoctorChecksHomeWithoutLocalAuthority(t *testing.T) {
 	state := t.TempDir()
 	t.Setenv("RELAY_STATE_DIR", state)
@@ -389,81 +304,6 @@ func TestLegacyAuthorityProcessDetectionIgnoresDiagnosticCommands(t *testing.T) 
 	}
 }
 
-func TestApplyHandoffSourceResolvesBoundaryAuthorizedParent(t *testing.T) {
-	t.Setenv("RELAY_STATE_DIR", t.TempDir())
-	t.Setenv(bridge.SourceSessionEnv, "sess-manager")
-	now := time.Now().UTC()
-	a := New()
-	for _, sess := range []*core.Session{
-		{ID: "sess-manager", HostID: "c3", Persist: ports.PersistHandle{Kind: "tmux", Name: "manager"}, CreatedAt: now},
-		{ID: "sess-root", HostID: core.LocalHostID, Persist: ports.PersistHandle{Kind: core.LocalPersistKind, Name: "root"}, Labels: map[string]string{"role": core.ParentRole}, CreatedAt: now},
-	} {
-		if err := a.Reg.PutSession(sess); err != nil {
-			t.Fatal(err)
-		}
-	}
-	opts := core.HandoffOpts{SourceSessionID: "sess-root", Workspace: "workspace:1", Pane: "surface:1"}
-	if _, err := a.applyHandoffSource(context.Background(), &opts); err != nil || opts.SourceHostID != core.LocalHostID || opts.SourcePersistName != "root" {
-		t.Fatalf("authorized parent was not resolved: opts=%+v err=%v", opts, err)
-	}
-
-	opts.SourceSessionID = "sess-manager"
-	if _, err := a.applyHandoffSource(context.Background(), &opts); err != nil {
-		t.Fatalf("direct child rejected: %v", err)
-	}
-}
-
-func TestParentSendRefusesSilentZeroEventChannel(t *testing.T) {
-	t.Setenv("RELAY_STATE_DIR", t.TempDir())
-	t.Setenv(bridge.SourceSessionEnv, "sess-manager")
-	now := time.Now().UTC()
-	a := New()
-	for _, sess := range []*core.Session{
-		{ID: "sess-manager", HostID: core.LocalHostID, Persist: ports.PersistHandle{Kind: core.LocalPersistKind, Name: "manager"}, Labels: map[string]string{"role": core.ParentRole}, CreatedAt: now},
-		{ID: "sess-child", HostID: "c3", SourceSessionID: "sess-manager", Persist: ports.PersistHandle{Kind: "tmux", Name: "engram"}, Labels: map[string]string{"governed": "true"}, CreatedAt: now},
-	} {
-		if err := a.Reg.PutSession(sess); err != nil {
-			t.Fatal(err)
-		}
-	}
-	out := captureStdout(t, func() {
-		if code := a.Run([]string{"--json", "parent", "send", "sess-child", "--", "continue"}); code == 0 {
-			t.Fatal("zero-event send unexpectedly succeeded")
-		}
-	})
-	if !strings.Contains(out, "no observable handoff event channel") || !strings.Contains(out, "--delivery-only") {
-		t.Fatalf("missing fail-loud route: %q", out)
-	}
-}
-
-func TestControlPlaneDeclarationRequiresHumanAndPersists(t *testing.T) {
-	state, config := t.TempDir(), t.TempDir()
-	t.Setenv("RELAY_STATE_DIR", state)
-	t.Setenv("RELAY_CONFIG_DIR", config)
-	t.Setenv("RELAY_CONTROL_PLANE_ALWAYS_ON", "")
-	if err := os.WriteFile(filepath.Join(config, "host.yaml"), []byte("version: 1\nhost_id: home-relay\nagents: []\npath_map: []\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	a := New()
-	now := time.Now().UTC()
-	apex := &core.Session{ID: "sess-apex", HostID: "home-relay", Persist: ports.PersistHandle{Kind: "tmux", Name: "apex"}, Labels: map[string]string{"apex": "true"}, CreatedAt: now}
-	if err := a.Reg.PutSession(apex); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv(bridge.SourceSessionEnv, apex.ID)
-	if code := a.Run([]string{"root", "control-plane", "--always-on"}); code == 0 {
-		t.Fatal("agent was allowed to declare machine availability")
-	}
-	t.Setenv(bridge.SourceSessionEnv, "")
-	if code := a.Run([]string{"root", "control-plane", "--always-on"}); code != 0 {
-		t.Fatalf("human declaration exit=%d", code)
-	}
-	cp := core.DescribeControlPlane()
-	if !cp.AlwaysOn || cp.DeclaredBy != "host_config" {
-		t.Fatalf("control plane=%+v", cp)
-	}
-}
-
 func TestUnknownFlagRejected(t *testing.T) {
 	a := New()
 	if code := a.Run([]string{"session", "create", "--bogus", "x"}); code == 0 {
@@ -491,264 +331,20 @@ func TestJSONErrorShape(t *testing.T) {
 	}
 }
 
-func TestAgentProtocolIsCompactAndSelfDescribing(t *testing.T) {
-	a := New()
-	out := captureStdout(t, func() {
-		if code := a.Run([]string{"agent"}); code != 0 {
-			t.Fatalf("agent protocol exit=%d", code)
+func TestRetiredDelegationVerbsAreUnknownCommands(t *testing.T) {
+	// The delegation handshake retired as one unit (workspace decision
+	// 2026-09-13); none of its verbs may resolve to anything, and none may be
+	// mistaken for `relay HOST NAME` (which needs exactly two words).
+	for _, argv := range [][]string{{"agent", "protocol"}, {"parent", "list"}, {"handoff", "list"}, {"msg", "read", "x"}, {"resolve", "pm-1", "--", "yes"}, {"ask", "q"}, {"board", "query"}, {"root", "status"}, {"policy", "list"}, {"gc"}, {"events", "tail"}, {"history"}, {"supervise"}, {"log", "0"}} {
+		a := New()
+		a.JSON = true
+		out := captureStdout(t, func() {
+			if code := a.Run(argv); code == 0 {
+				t.Fatalf("%v should not be a command any more", argv)
+			}
+		})
+		if !strings.Contains(out, "unknown command") {
+			t.Fatalf("%v: expected an unknown-command error, got %q", argv, out)
 		}
-	})
-	if bytes.Count([]byte(out), []byte("\n")) != 1 || len(out) > 600 {
-		t.Fatalf("protocol is not compact: %d bytes: %q", len(out), out)
-	}
-	var resp map[string]any
-	if err := json.Unmarshal([]byte(out), &resp); err != nil {
-		t.Fatal(err)
-	}
-	if resp["purpose"] != "long-lived goal handoff and orchestration" {
-		t.Fatalf("unexpected protocol: %v", resp)
-	}
-}
-
-func TestAgentStatusRejectsRemovedHandoffFlag(t *testing.T) {
-	a := New()
-	out := captureStdout(t, func() {
-		if code := a.Run([]string{"agent", "status", "--handoff", "ho-1"}); code == 0 {
-			t.Fatal("removed --handoff syntax was accepted")
-		}
-	})
-	if !bytes.Contains([]byte(out), []byte("agent status HANDOFF")) {
-		t.Fatalf("missing positional usage: %q", out)
-	}
-}
-
-func TestAgentStartRejectsRemovedAgentAndGoalFlags(t *testing.T) {
-	a := New()
-	out := captureStdout(t, func() {
-		if code := a.Run([]string{"agent", "start", "c1", "--agent", "codex", "--goal", "x"}); code == 0 {
-			t.Fatal("removed --agent/--goal syntax was accepted")
-		}
-	})
-	if !bytes.Contains([]byte(out), []byte("unknown flag")) {
-		t.Fatalf("missing removed-flag error: %q", out)
-	}
-}
-
-func TestAgentRestartRejectsUnknownFlagsBeforeLaunch(t *testing.T) {
-	t.Setenv("RELAY_STATE_DIR", t.TempDir())
-	now := time.Now().UTC()
-	a := New()
-	if err := a.Reg.PutHandoff(&core.Handoff{ID: "ho-old", HostID: "c3", Kind: core.KindAgent, Status: core.StatusDone, Outcome: "done", Goal: "goal", Agent: "codex", CreatedAt: now, UpdatedAt: now}); err != nil {
-		t.Fatal(err)
-	}
-	out := captureStdout(t, func() {
-		if code := a.Run([]string{"agent", "restart", "ho-old", "--bogus"}); code == 0 {
-			t.Fatal("unknown restart flag accepted")
-		}
-	})
-	if !bytes.Contains([]byte(out), []byte("unknown flag")) {
-		t.Fatalf("restart error=%q", out)
-	}
-}
-
-func TestHandoffListOmitsLargePayloadsUnlessFull(t *testing.T) {
-	t.Setenv("RELAY_STATE_DIR", t.TempDir())
-	now := time.Now().UTC()
-	a := New()
-	largeGoal := strings.Repeat("large-goal-", 1000)
-	if err := a.Reg.PutHandoff(&core.Handoff{ID: "ho-large", HostID: "c3", Kind: core.KindAgent, Status: core.StatusRunning, Goal: largeGoal, Command: largeGoal, CreatedAt: now, UpdatedAt: now}); err != nil {
-		t.Fatal(err)
-	}
-	summary := captureStdout(t, func() {
-		if code := a.Run([]string{"handoff", "list"}); code != 0 {
-			t.Fatalf("handoff list code=%d", code)
-		}
-	})
-	if !strings.Contains(summary, "ho-large") || strings.Contains(summary, "large-goal-") {
-		t.Fatalf("handoff summary=%q", summary)
-	}
-	full := captureStdout(t, func() {
-		if code := a.Run([]string{"handoff", "list", "--full"}); code != 0 {
-			t.Fatalf("full handoff list code=%d", code)
-		}
-	})
-	if !strings.Contains(full, "large-goal-") {
-		t.Fatal("full handoff list omitted goal")
-	}
-}
-
-func TestParentMessageArgsArePositional(t *testing.T) {
-	id, text := parentMessageArgs([]string{"pm-1", "--", "approve", "once"})
-	if id != "pm-1" || text != "approve once" {
-		t.Fatalf("got id=%q text=%q", id, text)
-	}
-	if id, _ := parentMessageArgs([]string{"--message", "pm-1"}); id != "" {
-		t.Fatalf("removed --message syntax was accepted: %q", id)
-	}
-}
-
-func TestParentLogReturnsCursorDelta(t *testing.T) {
-	t.Setenv("RELAY_STATE_DIR", t.TempDir())
-	msg := &core.ParentMessage{
-		ID: "pm-1", CorrelationID: "corr-1", ParentSessionID: "sess-parent",
-		ChildSessionID: "sess-child", HandoffID: "ho-1", Kind: "result", Text: "checkpoint complete",
-	}
-	if err := core.AppendCommunication(msg, "request", ""); err != nil {
-		t.Fatal(err)
-	}
-	a := New()
-	out := captureStdout(t, func() {
-		if code := a.Run([]string{"parent", "log", "sess-parent", "--after", "0", "--limit", "1"}); code != 0 {
-			t.Fatalf("parent log exit=%d", code)
-		}
-	})
-	for _, want := range []string{`"next_after":1`, `"summary":"checkpoint complete"`, `"message_id":"pm-1"`} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("parent log missing %s: %s", want, out)
-		}
-	}
-}
-
-// The command has to resolve the same manager the boundary authorized:
-// the authenticated source identity, never an ambient guess. Otherwise
-// "my own inbox" is authorized against one session and read from another.
-func TestParentSelfVerbsResolveTheAuthenticatedManager(t *testing.T) {
-	t.Setenv("RELAY_STATE_DIR", t.TempDir())
-	t.Setenv(bridge.SourceSessionEnv, "sess-parent")
-	msg := &core.ParentMessage{
-		ID: "pm-1", CorrelationID: "corr-1", ParentSessionID: "sess-parent",
-		ChildSessionID: "sess-child", HandoffID: "ho-1", Kind: "ask", Text: "which branch?",
-	}
-	if err := core.AppendCommunication(msg, "request", ""); err != nil {
-		t.Fatal(err)
-	}
-	a := New()
-	inbox := captureStdout(t, func() {
-		if code := a.Run([]string{"parent", "inbox"}); code != 0 {
-			t.Fatalf("parent inbox exit=%d", code)
-		}
-	})
-	if !strings.Contains(inbox, `"parent_session_id":"sess-parent"`) {
-		t.Fatalf("unnamed inbox resolved the wrong manager: %s", inbox)
-	}
-	log := captureStdout(t, func() {
-		if code := a.Run([]string{"parent", "log", "--limit", "1"}); code != 0 {
-			t.Fatalf("parent log exit=%d", code)
-		}
-	})
-	if !strings.Contains(log, `"parent_session_id":"sess-parent"`) {
-		t.Fatalf("unnamed log resolved the wrong manager: %s", log)
-	}
-	// A named manager still wins over the caller's own identity: this is a
-	// default, not an override.
-	named := captureStdout(t, func() {
-		_ = a.Run([]string{"parent", "inbox", "sess-other"})
-	})
-	if !strings.Contains(named, `"parent_session_id":"sess-other"`) {
-		t.Fatalf("named manager was overridden by the caller identity: %s", named)
-	}
-}
-
-func TestCommunicationLogInfersAuthenticatedManager(t *testing.T) {
-	t.Setenv("RELAY_STATE_DIR", t.TempDir())
-	t.Setenv(bridge.SourceSessionEnv, "sess-parent")
-	msg := &core.ParentMessage{
-		ID: "pm-1", CorrelationID: "pm-1", ParentSessionID: "sess-parent",
-		ChildSessionID: "sess-child", HandoffID: "ho-1", Kind: "result", Text: "checkpoint complete",
-	}
-	if err := core.AppendCommunication(msg, "event", ""); err != nil {
-		t.Fatal(err)
-	}
-	a := New()
-	out := captureStdout(t, func() {
-		if code := a.Run([]string{"log", "0"}); code != 0 {
-			t.Fatalf("log exit=%d", code)
-		}
-	})
-	for _, want := range []string{`"next":1`, `"action":"event"`, `"summary":"checkpoint complete"`} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("compact log missing %s: %s", want, out)
-		}
-	}
-	for _, redundant := range []string{"parent_session_id", "correlation_id"} {
-		if strings.Contains(out, redundant) {
-			t.Fatalf("compact log leaked %s: %s", redundant, out)
-		}
-	}
-}
-
-func TestPolicyCLIAddCheckRemove(t *testing.T) {
-	t.Setenv("RELAY_CONFIG_DIR", t.TempDir())
-	a := New()
-	add := captureStdout(t, func() {
-		if code := a.Run([]string{"policy", "add", "cursor-read", "--kind", "ask", "--agent", "cursor-agent", "--contains", "Run this command?", "--contains", "git status", "--reply", "y"}); code != 0 {
-			t.Fatalf("add exit=%d", code)
-		}
-	})
-	if !bytes.Contains([]byte(add), []byte(`"ok":true`)) {
-		t.Fatalf("add=%q", add)
-	}
-	check := captureStdout(t, func() {
-		if code := a.Run([]string{"policy", "check", "--kind", "ask", "--source", "idle", "--agent", "cursor-agent", "--text", "Run this command?", "--command", "git status"}); code != 0 {
-			t.Fatalf("check exit=%d", code)
-		}
-	})
-	if !bytes.Contains([]byte(check), []byte(`"rule_id":"cursor-read"`)) {
-		t.Fatalf("check=%q", check)
-	}
-	remove := captureStdout(t, func() {
-		if code := a.Run([]string{"policy", "remove", "cursor-read"}); code != 0 {
-			t.Fatalf("remove exit=%d", code)
-		}
-	})
-	if !bytes.Contains([]byte(remove), []byte(`"removed":"cursor-read"`)) {
-		t.Fatalf("remove=%q", remove)
-	}
-}
-
-func TestPolicyCLIRejectsUnguardedReply(t *testing.T) {
-	t.Setenv("RELAY_CONFIG_DIR", t.TempDir())
-	a := New()
-	out := captureStdout(t, func() {
-		if code := a.Run([]string{"policy", "add", "unsafe", "--kind", "permission_required", "--reply", "y"}); code == 0 {
-			t.Fatal("unguarded reply policy accepted")
-		}
-	})
-	if !bytes.Contains([]byte(out), []byte("permission decisions require explicit relay resolve")) {
-		t.Fatalf("unexpected error=%q", out)
-	}
-}
-
-func TestCompactHookFieldBoundsProviderPayloads(t *testing.T) {
-	got := compactHookField("  Run\n this\tcommand?  ", 12)
-	if got != "Run this co…" {
-		t.Fatalf("compact field=%q", got)
-	}
-}
-
-func TestBoardCallerRefusesToActAsAnotherSession(t *testing.T) {
-	t.Setenv(bridge.SourceSessionEnv, "sess-me")
-	// A bridge-authenticated agent always acts as itself.
-	got, err := boardCaller("")
-	if err != nil || got != "sess-me" {
-		t.Fatalf("want the authenticated session, got %q (%v)", got, err)
-	}
-	// Naming itself explicitly is fine.
-	if got, err := boardCaller("sess-me"); err != nil || got != "sess-me" {
-		t.Fatalf("self-reference must be allowed, got %q (%v)", got, err)
-	}
-	// Naming a peer must be refused.
-	if _, err := boardCaller("sess-someone-else"); err == nil {
-		t.Fatal("an agent must not be able to act as another session")
-	}
-}
-
-func TestBoardCallerRequiresSessionOutsideBridge(t *testing.T) {
-	t.Setenv(bridge.SourceSessionEnv, "")
-	if _, err := boardCaller(""); err == nil {
-		t.Fatal("outside a relay pane the caller must be named explicitly")
-	}
-	if got, err := boardCaller("sess-local"); err != nil || got != "sess-local" {
-		t.Fatalf("local operator use must work, got %q (%v)", got, err)
 	}
 }

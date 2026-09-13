@@ -19,28 +19,6 @@ func TestProjectionOnlyRegistryReadNeverReportsAuthoritativeEmpty(t *testing.T) 
 	}
 }
 
-func TestProjectionOnlyAuthorityFamiliesFailClosed(t *testing.T) {
-	state := t.TempDir()
-	t.Setenv("RELAY_STATE_DIR", state)
-	if err := os.WriteFile(filepath.Join(state, ".viz-projection-only"), []byte("projection only\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	reg := &Registry{}
-	parents := &ParentService{Reg: reg}
-	checks := []func() error{
-		func() error { _, err := reg.ListHandoffs(); return err },
-		func() error { _, err := reg.GetHandoff("ho-missing"); return err },
-		func() error { _, err := parents.ListMessages("sess-parent", true); return err },
-		func() error { _, err := parents.FindMessage("msg-missing"); return err },
-		func() error { _, err := LoadHistory(); return err },
-	}
-	for i, check := range checks {
-		if err := check(); !errors.Is(err, ErrProjectionOnlyAuthority) {
-			t.Fatalf("check %d returned %v, want ErrProjectionOnlyAuthority", i, err)
-		}
-	}
-}
-
 func TestRetireLocalAuthorityQuarantinesSymlink(t *testing.T) {
 	state := t.TempDir()
 	t.Setenv("RELAY_STATE_DIR", state)
