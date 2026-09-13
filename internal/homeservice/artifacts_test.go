@@ -45,7 +45,7 @@ func TestServiceAndMigrationArtifactsUsePrimaryBinary(t *testing.T) {
 }
 
 func TestCompatibilityRemovalRequiresUnitsAndClientFloor(t *testing.T) {
-	raw, err := os.ReadFile("../../docs/unified-service.md")
+	raw, err := os.ReadFile("../../docs/archive/unified-service.md") // archived 2026-09-13; the relayd compatibility condition still lives there
 	if err != nil {
 		t.Fatal(err)
 	}
