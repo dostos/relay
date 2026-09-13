@@ -10,15 +10,21 @@ import (
 )
 
 func TestProposedAccountAgentsSkipsExisting(t *testing.T) {
-	tr := &matchTransport{
-		id: "c1",
-		rules: []struct{ contain, out string }{
-			{contain: "ccs auth list", out: "│ hcs │\n│ personal │\n"},
-			{contain: "codex-multi-auth list --json", out: `{"accounts":[{"index":0,"label":"A (a@example.com)","enabled":true},{"index":1,"label":"B","enabled":true}]}`},
-		},
+	fa := &fakeAccounts{logins: `[
+		{"backend":"claude","name":"hcs","handle":"/h/hcs","enabled":true,"usable":true},
+		{"backend":"claude","name":"personal","handle":"/h/personal","enabled":true,"usable":true},
+		{"backend":"codex","name":"A (a@example.com)","handle":"0","enabled":true,"usable":true},
+		{"backend":"codex","name":"B","handle":"1","enabled":true,"usable":true},
+		{"backend":"cursor-agent","name":"host","handle":"host","enabled":true,"usable":false}
+	]`}
+	existing := []AgentSpec{{Name: "ccs:personal", Command: "claude"}}
+	proposed, skipped, err := proposedAccountAgents(context.Background(), fa.run, "c1", existing)
+	if err != nil {
+		t.Fatal(err)
 	}
-	existing := []AgentSpec{{Name: "ccs:personal", Command: "ccs personal"}}
-	proposed, skipped := proposedAccountAgents(context.Background(), tr, existing)
+	if len(fa.calls) != 1 || strings.Join(fa.calls[0], " ") != "--json --host c1 logins" {
+		t.Fatalf("asked the catalog with %v", fa.calls)
+	}
 	var pnames, snames []string
 	for _, a := range proposed {
 		pnames = append(pnames, a.Name)
@@ -30,6 +36,9 @@ func TestProposedAccountAgentsSkipsExisting(t *testing.T) {
 				t.Fatal("must not use switch")
 			}
 		}
+		if strings.HasPrefix(a.Name, "ccs:") && a.Command != "claude" {
+			t.Fatalf("a ccs profile runs claude, never `ccs <profile>`: %#v", a)
+		}
 	}
 	for _, a := range skipped {
 		snames = append(snames, a.Name)
@@ -38,11 +47,24 @@ func TestProposedAccountAgentsSkipsExisting(t *testing.T) {
 	if !strings.Contains(joined, "ccs:hcs") || !strings.Contains(joined, "codex:a@example.com") || !strings.Contains(joined, "codex:2") {
 		t.Fatalf("proposed=%v", pnames)
 	}
-	if strings.Contains(joined, "ccs:personal") {
-		t.Fatalf("personal should be skipped, proposed=%v", pnames)
+	if strings.Contains(joined, "ccs:personal") || strings.Contains(joined, "cursor-agent") {
+		t.Fatalf("personal is skipped and a host login is not an account: proposed=%v", pnames)
 	}
 	if !strings.Contains(strings.Join(snames, ","), "ccs:personal") {
 		t.Fatalf("skipped=%v", snames)
+	}
+}
+
+func TestEnsureWithoutTheCLISaysSoInsteadOfGuessing(t *testing.T) {
+	tr := &ensureTransport{id: "c1", rules: ensureHappyRules(), profile: "version: 1\nhost_id: c1\n"}
+	svc := &EnsureService{NewTransport: func(string) (ports.Transport, error) { return tr, nil },
+		Accounts: (&fakeAccounts{err: ErrAccountsCLIMissing}).run}
+	_, err := svc.Ensure(context.Background(), "c1", EnsureOptions{})
+	if err == nil || !strings.Contains(err.Error(), "agent-accounts is not installed") {
+		t.Fatalf("expected the install hint, got %v", err)
+	}
+	if len(tr.writes) != 0 {
+		t.Fatal("must not write without the catalog")
 	}
 }
 
@@ -108,10 +130,19 @@ func (e *ensureTransport) WriteFile(_ context.Context, _ string, data []byte, _ 
 func (e *ensureTransport) Interactive(context.Context, string) error  { return nil }
 func (e *ensureTransport) InteractiveCommand(remoteCmd string) string { return remoteCmd }
 
+// happyAccounts is the catalog the happy-path ensure tests see: one ccs
+// profile and one codex account, both usable.
+func happyAccounts() *fakeAccounts {
+	return &fakeAccounts{
+		logins: `[{"backend":"claude","name":"hcs","handle":"/h/hcs","enabled":true,"usable":true},
+		          {"backend":"codex","name":"A (a@example.com)","handle":"0","enabled":true,"usable":true}]`,
+		status: `[{"backend":"claude","name":"hcs","handle":"/h/hcs","state":"ok","confidence":"local-expiry","detail":"token valid"},
+		          {"backend":"codex","name":"A (a@example.com)","handle":"0","state":"ok","confidence":"declared","detail":"ready"}]`,
+	}
+}
+
 func ensureHappyRules() []struct{ contain, out string } {
 	return []struct{ contain, out string }{
-		{contain: "codex-multi-auth list --json", out: `{"accounts":[{"index":0,"label":"A (a@example.com)","enabled":true}]}`},
-		{contain: "ccs auth list", out: "│ hcs │\n"},
 		{contain: "codex-multi-auth rotation status", out: "Runtime rotation proxy: enabled\nStored setting: enabled\n"},
 		{contain: `'\''codex-multi-auth-codex'\''`, out: "PRESENT"},
 		{contain: `'\''codex-multi-auth'\''`, out: "PRESENT"},
@@ -127,7 +158,7 @@ func TestEnsureDryRunDoesNotWrite(t *testing.T) {
 		rules:   ensureHappyRules(),
 		profile: "version: 1\nhost_id: c1\nagents:\n  - name: claude\n    command: claude\n",
 	}
-	svc := &EnsureService{NewTransport: func(string) (ports.Transport, error) { return tr, nil }}
+	svc := &EnsureService{NewTransport: func(string) (ports.Transport, error) { return tr, nil }, Accounts: happyAccounts().run}
 	res, err := svc.Ensure(context.Background(), "c1", EnsureOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -149,7 +180,7 @@ func TestEnsureApplyWritesMergedProfile(t *testing.T) {
 		rules:   ensureHappyRules(),
 		profile: "version: 1\nhost_id: c1\nagents:\n  - name: claude\n    command: claude\ndefaults:\n  preferred_agent: claude\n  silence_sec: 10\n",
 	}
-	svc := &EnsureService{NewTransport: func(string) (ports.Transport, error) { return tr, nil }}
+	svc := &EnsureService{NewTransport: func(string) (ports.Transport, error) { return tr, nil }, Accounts: happyAccounts().run}
 	res, err := svc.Ensure(context.Background(), "c1", EnsureOptions{Apply: true})
 	if err != nil {
 		t.Fatal(err)
@@ -173,8 +204,6 @@ func TestEnsureMissingWrapperFails(t *testing.T) {
 	tr := &ensureTransport{
 		id: "c1",
 		rules: []struct{ contain, out string }{
-			{contain: "codex-multi-auth list --json", out: `{"accounts":[{"index":0,"label":"A (a@example.com)","enabled":true}]}`},
-			{contain: "ccs auth list", out: ""},
 			{contain: "codex-multi-auth rotation status", out: "Runtime rotation proxy: enabled\n"},
 			{contain: `'\''codex-multi-auth-codex'\''`, out: "MISSING"},
 			{contain: `'\''codex-multi-auth'\''`, out: "PRESENT"},
@@ -182,7 +211,7 @@ func TestEnsureMissingWrapperFails(t *testing.T) {
 		},
 		profile: "version: 1\nhost_id: c1\nagents:\n  - name: claude\n    command: claude\n",
 	}
-	svc := &EnsureService{NewTransport: func(string) (ports.Transport, error) { return tr, nil }}
+	svc := &EnsureService{NewTransport: func(string) (ports.Transport, error) { return tr, nil }, Accounts: happyAccounts().run}
 	res, err := svc.Ensure(context.Background(), "c1", EnsureOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -200,7 +229,7 @@ func TestEnsureMissingWrapperFails(t *testing.T) {
 
 func TestEnsureApplyRequiresProfile(t *testing.T) {
 	tr := &ensureTransport{id: "c1", rules: ensureHappyRules(), profile: ""}
-	svc := &EnsureService{NewTransport: func(string) (ports.Transport, error) { return tr, nil }}
+	svc := &EnsureService{NewTransport: func(string) (ports.Transport, error) { return tr, nil }, Accounts: happyAccounts().run}
 	res, err := svc.Ensure(context.Background(), "c1", EnsureOptions{Apply: true})
 	if err != nil {
 		t.Fatal(err)

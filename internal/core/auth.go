@@ -22,9 +22,13 @@ type AuthStatusRow struct {
 	Detail  string `json:"detail,omitempty"`
 	Login   string `json:"login_cmd,omitempty"`
 	CopyOK  bool   `json:"copy_supported"`
-	// WeeklyRemaining is the account's remaining weekly usage (0–100, % LEFT)
-	// when a usage hook is configured; nil when unknown or no hook.
-	WeeklyRemaining *int `json:"weekly_remaining,omitempty"`
+	// Backend, Handle, State and Confidence are the catalog's own fields for a
+	// login (see AccountStatus); empty for an agent the catalog does not
+	// govern, whose row is a presence probe only.
+	Backend    string `json:"backend,omitempty"`
+	Handle     string `json:"handle,omitempty"`
+	State      string `json:"state,omitempty"`
+	Confidence string `json:"confidence,omitempty"`
 }
 
 // AuthLoginResult is returned after opening an interactive login pane.
@@ -58,6 +62,17 @@ type AuthService struct {
 	Sessions     *SessionService
 	Viz          ports.Viz
 	NewTransport TransportFactory
+	// Accounts asks agent-accounts which logins exist and how they are. Nil
+	// means the default runner (the installed CLI); a missing CLI is an error,
+	// never a fallback to relay's own discovery.
+	Accounts AccountsRunner
+}
+
+func (s *AuthService) accounts() AccountsRunner {
+	if s.Accounts != nil {
+		return s.Accounts
+	}
+	return DefaultAccountsRunner()
 }
 
 // SpecForAgent builds a spec from a name, preferring host.yaml when available.
@@ -72,7 +87,9 @@ func SpecForAgent(profile *HostProfile, name string) (AgentSpec, error) {
 		}
 	}
 	if strings.HasPrefix(name, "ccs:") {
-		return AgentSpec{Name: name, Command: "ccs " + strings.TrimPrefix(name, "ccs:")}, nil
+		// A ccs profile IS a claude login; the profile home is the activation.
+		// Never `ccs <profile> …` as a wrapper (agent-accounts' never_wrap).
+		return AgentSpec{Name: name, Command: "claude"}, nil
 	}
 	if strings.HasPrefix(name, "codex:") {
 		sel := strings.TrimPrefix(name, "codex:")
@@ -129,67 +146,56 @@ func CredentialPaths(spec AgentSpec) []string {
 	}
 }
 
-// Status probes agents on a host (host.yaml list, or a single --agent).
+// Status reports every login's auth health on a host, as agent-accounts sees
+// it, plus a presence-only row for any host.yaml agent the catalog does not
+// govern. --agent narrows to one name (a relay agent name, or a backend).
 func (s *AuthService) Status(ctx context.Context, hostID, agentFilter string) ([]AuthStatusRow, error) {
 	if hostID == "" {
 		return nil, fmt.Errorf("host required")
 	}
-	t, err := s.NewTransport(hostID)
+	statuses, err := AccountStatuses(ctx, s.accounts(), hostID)
 	if err != nil {
 		return nil, err
 	}
-	profile, _ := s.Profiles.Get(ctx, hostID, true)
-
-	var specs []AgentSpec
-	if agentFilter != "" {
-		spec, err := SpecForAgent(profile, agentFilter)
-		if err != nil {
-			return nil, err
-		}
-		specs = []AgentSpec{spec}
-	} else if profile != nil && len(profile.Agents) > 0 {
-		specs = append(specs, profile.Agents...)
-		// Also surface discovered CCS / multi-auth accounts not yet in host.yaml.
-		for _, prof := range listCCSProfiles(ctx, t) {
-			name := "ccs:" + prof
-			if hasAgent(specs, name) {
+	var rows []AuthStatusRow
+	covered := map[string]bool{}
+	for _, st := range statuses {
+		row := statusRowForLogin(st)
+		covered[row.Agent] = true
+		rows = append(rows, row)
+	}
+	// host.yaml may declare agents the catalog knows nothing about (a custom
+	// wrapper, a bare `claude`). They still get a row, but only for presence:
+	// relay does not judge a login it did not ask the catalog about.
+	if profile, perr := s.Profiles.Get(ctx, hostID, true); perr == nil && profile != nil {
+		var t ports.Transport
+		for _, spec := range profile.Agents {
+			if covered[spec.Name] || strings.HasPrefix(spec.Name, "ccs:") || strings.HasPrefix(spec.Name, "codex:") {
 				continue
 			}
-			specs = append(specs, AgentSpec{Name: name, Command: "ccs " + prof})
-		}
-		for _, sel := range listCodexMultiAuthAccounts(ctx, t) {
-			name := "codex:" + sel
-			if hasAgent(specs, name) {
-				continue
+			if t == nil {
+				if t, err = s.NewTransport(hostID); err != nil {
+					return nil, err
+				}
 			}
-			specs = append(specs, AgentSpec{
-				Name:     name,
-				Command:  "codex-multi-auth-codex",
-				Args:     []string{"--account", sel},
-				UsageKey: "codex",
+			pr := probeOneAgent(ctx, t, spec)
+			rows = append(rows, AuthStatusRow{
+				Agent: spec.Name, Present: pr.Present, Authed: pr.Authed,
+				Detail: truncate(pr.Detail, 240), Login: LoginCommand(spec), CopyOK: len(CredentialPaths(spec)) > 0,
 			})
 		}
-	} else {
-		for _, d := range probeAgentCatalog(ctx, t) {
-			if d.SuggestedSpec != nil {
-				specs = append(specs, *d.SuggestedSpec)
-			} else {
-				specs = append(specs, AgentSpec{Name: d.Name, Command: d.Name})
+	}
+	if agentFilter != "" {
+		var kept []AuthStatusRow
+		for _, row := range rows {
+			if row.Agent == agentFilter || row.Backend == agentFilter {
+				kept = append(kept, row)
 			}
 		}
-	}
-
-	var rows []AuthStatusRow
-	for _, spec := range specs {
-		pr := probeOneAgent(ctx, t, spec)
-		rows = append(rows, AuthStatusRow{
-			Agent:   spec.Name,
-			Present: pr.Present,
-			Authed:  pr.Authed,
-			Detail:  truncate(pr.Detail, 240),
-			Login:   LoginCommand(spec),
-			CopyOK:  len(CredentialPaths(spec)) > 0,
-		})
+		if len(kept) == 0 {
+			return nil, fmt.Errorf("no login named %q on %s (agent-accounts logins --host %s lists them)", agentFilter, hostID, hostID)
+		}
+		rows = kept
 	}
 	return rows, nil
 }

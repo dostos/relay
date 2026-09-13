@@ -7,21 +7,6 @@ import (
 	"testing"
 )
 
-func TestParseCodexMultiAuthListJSONSelectors(t *testing.T) {
-	raw := `{
-  "accountCount": 2,
-  "accounts": [
-    {"index": 0, "label": "Account 1 (dostos, dostos10@gmail.com, id:w80WCB)", "enabled": true},
-    {"index": 1, "label": "Account 2 (no-email-here)", "enabled": true},
-    {"index": 2, "label": "Account 3 (skip@example.com)", "enabled": false}
-  ]
-}`
-	got := parseCodexMultiAuthListJSON(raw)
-	if len(got) != 2 || got[0] != "dostos10@gmail.com" || got[1] != "2" {
-		t.Fatalf("got %#v", got)
-	}
-}
-
 type matchTransport struct {
 	id    string
 	rules []struct{ contain, out string }
@@ -43,18 +28,18 @@ func (m *matchTransport) Interactive(context.Context, string) error             
 func (m *matchTransport) InteractiveCommand(remoteCmd string) string                 { return remoteCmd }
 
 func TestProbeAgentCatalogSuggestsCodexMultiAuthAccounts(t *testing.T) {
-	listJSON := `{"accounts":[{"index":0,"label":"Account 1 (a@example.com)","enabled":true},{"index":1,"label":"Account 2","enabled":true}]}`
+	fa := &fakeAccounts{logins: `[{"backend":"codex","name":"Account 1 (a@example.com)","handle":"0","enabled":true,"usable":true},
+		{"backend":"codex","name":"Account 2","handle":"1","enabled":true,"usable":true}]`}
 	tr := &matchTransport{
 		id: "c1",
 		rules: []struct{ contain, out string }{
-			{contain: "codex-multi-auth list --json", out: listJSON},
 			// loginShellRun single-quotes the script, so binaries appear as '\''bin'\''.
 			{contain: `'\''codex-multi-auth-codex'\''`, out: "PRESENT"},
 			{contain: `'\''codex'\''`, out: "PRESENT"},
 			{contain: "codex login status", out: "Logged in"},
 		},
 	}
-	detected := probeAgentCatalog(context.Background(), tr)
+	detected := probeAgentCatalog(context.Background(), tr, "c1", fa.run)
 	var names []string
 	var present []string
 	for _, d := range detected {

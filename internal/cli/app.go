@@ -94,7 +94,8 @@ func New() *App {
 		}
 		return sshtransport.New(hostID), nil
 	}
-	profiles := &core.ProfileService{NewTransport: tf}
+	accounts := core.DefaultAccountsRunner()
+	profiles := &core.ProfileService{NewTransport: tf, Accounts: accounts}
 	sessions := &core.SessionService{
 		Reg:          reg,
 		Profiles:     profiles,
@@ -110,6 +111,7 @@ func New() *App {
 		Sessions:     sessions,
 		Viz:          viz,
 		NewTransport: tf,
+		Accounts:     accounts,
 	}
 	return &App{
 		Sessions:  sessions,
@@ -124,6 +126,7 @@ func New() *App {
 		Ensure: &core.EnsureService{
 			NewTransport: tf,
 			Profiles:     profiles,
+			Accounts:     accounts,
 		},
 		Containers: &core.ContainerService{
 			NewTransport: tf,
@@ -485,7 +488,8 @@ New machine (ssh config → discover → init):
   relay host discover -H HOST         Inventory + proposed host.yaml (no writes)
   relay host init -H HOST [--apply] [--force]
                                       Install relay + compatibility shim; write proposal with --apply
-  relay host ensure -H HOST [--apply] Deps + propose/merge ccs:*/codex:* agents + auth help
+  relay host ensure -H HOST [--apply] Deps + propose/merge the logins agent-accounts lists as
+                                      ccs:*/codex:* agents + their auth state
 
 Dev containers (declared under containers: in the remote host.yaml):
   relay container open -H HOST --container NAME [--name TMUX] [--keep]
@@ -516,6 +520,9 @@ Host profiles (authoritative on each remote ~/.config/relay/host.yaml):
 
 Agent auth (claude / cursor-agent / codex / ccs:<profile> / …):
   relay auth status -H HOST [--agent NAME]
+                                      Every login's auth health, as agent-accounts reports it
+                                      (confidence: live-probe | declared | local-expiry | none).
+                                      Needs the agent-accounts CLI ($RELAY_AGENT_ACCOUNTS or PATH).
   relay auth login -H HOST --agent NAME
                                       Pane + reassemble wrapped OAuth URL + open locally
   relay auth url --session ID         Re-extract/open auth URL if the pane cropped it

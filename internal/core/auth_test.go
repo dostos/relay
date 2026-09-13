@@ -6,8 +6,11 @@ import (
 )
 
 func TestSpecForAgentCCS(t *testing.T) {
+	// A ccs profile is a claude login; the CLI it runs is claude, and the
+	// wrapper form `ccs <profile> …` is never built (agent-accounts' never_wrap:
+	// ccs writes sync chatter to stdout).
 	spec, err := SpecForAgent(nil, "ccs:personal")
-	if err != nil || spec.Command != "ccs personal" {
+	if err != nil || spec.Command != "claude" {
 		t.Fatalf("%+v err=%v", spec, err)
 	}
 	p := &HostProfile{Agents: []AgentSpec{{Name: "ccs:hcs", Command: "ccs hcs"}}}

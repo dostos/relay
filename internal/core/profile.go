@@ -8,9 +8,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -213,7 +210,9 @@ func (a *AgentSpec) InnerCommand() string {
 		return strings.TrimSpace(a.Command)
 	}
 	if strings.HasPrefix(a.Name, "ccs:") {
-		return "ccs " + strings.TrimPrefix(a.Name, "ccs:")
+		// A ccs profile runs claude under its own config home; the wrapper
+		// form `ccs <profile> …` is never constructed (never_wrap).
+		return "claude"
 	}
 	return a.Name
 }
@@ -249,6 +248,10 @@ func shellJoin(parts []string) string {
 
 // ProfileService fetches and caches remote host profiles.
 type ProfileService struct {
+	// Accounts is the agent-accounts CLI, used by discover to suggest
+	// ccs:*/codex:* agents. Nil means the installed one; when it is absent,
+	// discover still reports the bare CLIs and simply proposes no logins.
+	Accounts     AccountsRunner
 	NewTransport func(hostID string) (ports.Transport, error)
 }
 
@@ -349,8 +352,16 @@ var agentCatalog = []AgentSpec{
 	{Name: "ccs", Command: "ccs", Notes: "ccs multi-profile launcher"},
 }
 
-func probeAgentCatalog(ctx context.Context, t ports.Transport) []AgentDetect {
+func probeAgentCatalog(ctx context.Context, t ports.Transport, hostID string, run AccountsRunner) []AgentDetect {
 	var out []AgentDetect
+	// Logins are the catalog's fact; asked once, best-effort. No CLI, no
+	// login suggestions — never a second discovery of relay's own.
+	var logins []AccountLogin
+	if run != nil {
+		if got, err := AccountLogins(ctx, run, hostID, ""); err == nil {
+			logins = got
+		}
+	}
 	for _, spec := range agentCatalog {
 		pr := probeOneAgent(ctx, t, spec)
 		d := AgentDetect{
@@ -361,141 +372,34 @@ func probeAgentCatalog(ctx context.Context, t ports.Transport) []AgentDetect {
 		}
 		if pr.Present {
 			s := spec
-			if s.Name == "ccs" {
-				profiles := listCCSProfiles(ctx, t)
-				if len(profiles) == 0 {
-					profiles = []string{"personal"}
-				}
-				for _, prof := range profiles {
-					as := AgentSpec{Name: "ccs:" + prof, Command: "ccs " + prof}
-					out = append(out, AgentDetect{
-						Name:          as.Name,
-						Present:       true,
-						Authed:        probeOneAgent(ctx, t, as).Authed,
-						SuggestedSpec: &as,
-					})
-				}
-				continue
+			backend := ""
+			switch s.Name {
+			case "ccs":
+				backend = "claude"
+			case "codex":
+				backend = "codex"
 			}
-			if s.Name == "codex" {
-				for _, sel := range listCodexMultiAuthAccounts(ctx, t) {
-					as := AgentSpec{
-						Name:     "codex:" + sel,
-						Command:  "codex-multi-auth-codex",
-						Args:     []string{"--account", sel},
-						UsageKey: "codex",
+			if backend != "" {
+				for _, l := range logins {
+					if l.Backend != backend || !l.Enabled {
+						continue
 					}
+					as := agentSpecForLogin(l)
 					out = append(out, AgentDetect{
 						Name:          as.Name,
 						Present:       true,
-						Authed:        probeOneAgent(ctx, t, as).Authed,
+						Authed:        l.Usable,
 						SuggestedSpec: &as,
 					})
+				}
+				if backend == "claude" {
+					continue
 				}
 			}
 			d.SuggestedSpec = &s
 		}
 		out = append(out, d)
 	}
-	return out
-}
-
-var codexAccountEmailRe = regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)
-
-// listCodexMultiAuthAccounts returns selectors for discover-suggested codex:*
-// agents (email when present in the list label, else 1-based index). Never calls switch.
-func listCodexMultiAuthAccounts(ctx context.Context, t ports.Transport) []string {
-	stdout, _, _ := t.Run(ctx, "", loginShellRun(`
-if command -v codex-multi-auth >/dev/null 2>&1; then
-  codex-multi-auth list --json 2>/dev/null || true
-fi
-`))
-	return parseCodexMultiAuthListJSON(stdout)
-}
-
-func parseCodexMultiAuthListJSON(stdout string) []string {
-	stdout = strings.TrimSpace(stdout)
-	if stdout == "" {
-		return nil
-	}
-	// Remote scripts may wrap noise around JSON; take the outermost object.
-	start := strings.Index(stdout, "{")
-	end := strings.LastIndex(stdout, "}")
-	if start < 0 || end <= start {
-		return nil
-	}
-	var root struct {
-		Accounts []struct {
-			Index   int    `json:"index"`
-			Label   string `json:"label"`
-			Enabled *bool  `json:"enabled"`
-		} `json:"accounts"`
-	}
-	if err := json.Unmarshal([]byte(stdout[start:end+1]), &root); err != nil {
-		return nil
-	}
-	seen := map[string]bool{}
-	var out []string
-	for _, row := range root.Accounts {
-		if row.Enabled != nil && !*row.Enabled {
-			continue
-		}
-		sel := strings.TrimSpace(codexAccountEmailRe.FindString(row.Label))
-		if sel == "" {
-			if row.Index < 0 {
-				continue
-			}
-			sel = strconv.Itoa(row.Index + 1)
-		}
-		if seen[sel] {
-			continue
-		}
-		seen[sel] = true
-		out = append(out, sel)
-	}
-	return out
-}
-
-func listCCSProfiles(ctx context.Context, t ports.Transport) []string {
-	stdout, _, _ := t.Run(ctx, "", loginShellRun(`
-if command -v ccs >/dev/null 2>&1; then
-  ccs auth list 2>/dev/null || true
-fi
-ls -1 "$HOME"/.ccs/instances 2>/dev/null || true
-`))
-	seen := map[string]bool{}
-	var out []string
-	add := func(name string) {
-		name = strings.TrimSpace(name)
-		if name == "" || name == "Profile" || name == "ccs" || strings.HasSuffix(name, ".lock") {
-			return
-		}
-		if strings.ContainsAny(name, "/ \\") || strings.Contains(name, "─") {
-			return
-		}
-		if seen[name] {
-			return
-		}
-		seen[name] = true
-		out = append(out, name)
-	}
-	for _, line := range strings.Split(stdout, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if strings.Contains(line, "│") {
-			fields := strings.Split(line, "│")
-			if len(fields) >= 2 {
-				add(fields[1])
-			}
-			continue
-		}
-		if !strings.Contains(line, " ") {
-			add(line)
-		}
-	}
-	sort.Strings(out)
 	return out
 }
 
@@ -527,19 +431,11 @@ func probeOneAgent(ctx context.Context, t ports.Transport, a AgentSpec) ProbeRes
 		low := strings.ToLower(detail)
 		authed = detail != "" && !strings.Contains(low, "not logged") && !strings.Contains(low, "logged out")
 	case a.Name == "ccs" || strings.HasPrefix(a.Name, "ccs:") || bin == "ccs":
-		prof := strings.TrimPrefix(a.Name, "ccs:")
-		if prof == "" || prof == a.Name {
-			prof = "personal"
-		}
-		o, _, _ := t.Run(ctx, "", loginShellRun(fmt.Sprintf(`ccs %s -p PONG 2>&1 | head -c 400`, shellQuote(prof))))
-		detail = strings.TrimSpace(o)
-		low := strings.ToLower(detail)
-		// Weekly limit means auth works; only hard auth failures count as unauthed.
-		authed = detail != "" &&
-			!strings.Contains(low, "failed to authenticate") &&
-			!strings.Contains(low, "oauth session expired") &&
-			!strings.Contains(low, "not logged") &&
-			!strings.Contains(low, "e301")
+		// Presence only. Whether a profile can authenticate is agent-accounts'
+		// to say (`status`); relay used to run `ccs <profile> -p PONG` here,
+		// which is the wrapper form the catalog forbids (never_wrap).
+		authed = false
+		detail = "present; login state is agent-accounts' to report"
 	case isCodexFamily(a) || bin == "codex" || bin == "codex-multi-auth-codex" || bin == "mcodex":
 		o, _, _ := t.Run(ctx, "", loginShellRun(`codex login status 2>&1 | head -c 300`))
 		detail = strings.TrimSpace(o)

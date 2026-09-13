@@ -43,6 +43,16 @@ type EnsureResult struct {
 type EnsureService struct {
 	NewTransport TransportFactory
 	Profiles     *ProfileService
+	// Accounts is the agent-accounts CLI; nil means the installed one. The
+	// ccs:*/codex:* agents ensure proposes are the catalog's logins.
+	Accounts AccountsRunner
+}
+
+func (s *EnsureService) accounts() AccountsRunner {
+	if s.Accounts != nil {
+		return s.Accounts
+	}
+	return DefaultAccountsRunner()
 }
 
 // Ensure probes deps, proposes additive account agents, optionally merges host.yaml, and
@@ -75,7 +85,10 @@ func (s *EnsureService) Ensure(ctx context.Context, hostID string, opts EnsureOp
 		}
 	}
 
-	proposed, skipped := proposedAccountAgents(ctx, t, existing)
+	proposed, skipped, err := proposedAccountAgents(ctx, s.accounts(), hostID, existing)
+	if err != nil {
+		return nil, err
+	}
 	res.ProposedAgents = proposed
 	res.SkippedAgents = skipped
 
@@ -85,7 +98,7 @@ func (s *EnsureService) Ensure(ctx context.Context, hostID string, opts EnsureOp
 		res.Next = "install missing tools on the host login PATH, then re-run ensure"
 		res.Argv = []string{"relay", "host", "ensure", "-H", hostID}
 		// Still surface auth help for whatever is present.
-		res.Auth = ensureAuthRows(ctx, t, existing, proposed)
+		res.Auth = ensureAuthRows(ctx, s.accounts(), hostID, existing, proposed)
 		return res, nil
 	}
 
@@ -132,7 +145,7 @@ func (s *EnsureService) Ensure(ctx context.Context, hostID string, opts EnsureOp
 		}
 	}
 
-	res.Auth = ensureAuthRows(ctx, t, existing, proposed)
+	res.Auth = ensureAuthRows(ctx, s.accounts(), hostID, existing, proposed)
 	if unauthed := firstUnauthedAccount(res.Auth); unauthed != "" && res.Next == "" {
 		res.Next = fmt.Sprintf("relay auth login -H %s --agent %s", hostID, unauthed)
 		res.Argv = []string{"relay", "auth", "login", "-H", hostID, "--agent", unauthed}
@@ -140,29 +153,28 @@ func (s *EnsureService) Ensure(ctx context.Context, hostID string, opts EnsureOp
 	return res, nil
 }
 
-func proposedAccountAgents(ctx context.Context, t ports.Transport, existing []AgentSpec) (proposed, skipped []AgentSpec) {
-	for _, prof := range listCCSProfiles(ctx, t) {
-		as := AgentSpec{Name: "ccs:" + prof, Command: "ccs " + prof}
+// proposedAccountAgents turns the catalog's logins into the ccs:*/codex:*
+// agents host.yaml should carry, skipping names already declared.
+func proposedAccountAgents(ctx context.Context, run AccountsRunner, hostID string, existing []AgentSpec) (proposed, skipped []AgentSpec, err error) {
+	logins, err := AccountLogins(ctx, run, hostID, "")
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, l := range logins {
+		if l.Backend != "claude" && l.Backend != "codex" {
+			continue // one host login, nothing to name
+		}
+		if !l.Enabled {
+			continue
+		}
+		as := agentSpecForLogin(l)
 		if hasAgent(existing, as.Name) {
 			skipped = append(skipped, as)
 			continue
 		}
 		proposed = append(proposed, as)
 	}
-	for _, sel := range listCodexMultiAuthAccounts(ctx, t) {
-		as := AgentSpec{
-			Name:     "codex:" + sel,
-			Command:  "codex-multi-auth-codex",
-			Args:     []string{"--account", sel},
-			UsageKey: "codex",
-		}
-		if hasAgent(existing, as.Name) {
-			skipped = append(skipped, as)
-			continue
-		}
-		proposed = append(proposed, as)
-	}
-	return proposed, skipped
+	return proposed, skipped, nil
 }
 
 func mergeAccountAgents(p *HostProfile, proposed []AgentSpec) (*HostProfile, int) {
@@ -268,34 +280,36 @@ func accountStackPresent(proposed, existing []AgentSpec, prefix string) bool {
 	return false
 }
 
-func ensureAuthRows(ctx context.Context, t ports.Transport, existing, proposed []AgentSpec) []AuthStatusRow {
-	seen := map[string]bool{}
-	var specs []AgentSpec
-	add := func(list []AgentSpec) {
+// ensureAuthRows reports the auth state of every ccs:*/codex:* agent, as the
+// catalog sees it. A declared agent the catalog no longer lists gets a row
+// saying so rather than a probe of relay's own.
+func ensureAuthRows(ctx context.Context, run AccountsRunner, hostID string, existing, proposed []AgentSpec) []AuthStatusRow {
+	wanted := map[string]bool{}
+	var order []string
+	for _, list := range [][]AgentSpec{existing, proposed} {
 		for _, a := range list {
-			if !strings.HasPrefix(a.Name, "ccs:") && !strings.HasPrefix(a.Name, "codex:") {
+			if !strings.HasPrefix(a.Name, "ccs:") && !strings.HasPrefix(a.Name, "codex:") || wanted[a.Name] {
 				continue
 			}
-			if seen[a.Name] {
-				continue
-			}
-			seen[a.Name] = true
-			specs = append(specs, a)
+			wanted[a.Name] = true
+			order = append(order, a.Name)
 		}
 	}
-	add(existing)
-	add(proposed)
+	byName := map[string]AuthStatusRow{}
+	if statuses, err := AccountStatuses(ctx, run, hostID); err == nil {
+		for _, st := range statuses {
+			row := statusRowForLogin(st)
+			byName[row.Agent] = row
+		}
+	}
 	var rows []AuthStatusRow
-	for _, spec := range specs {
-		pr := probeOneAgent(ctx, t, spec)
-		rows = append(rows, AuthStatusRow{
-			Agent:   spec.Name,
-			Present: pr.Present,
-			Authed:  pr.Authed,
-			Detail:  truncate(pr.Detail, 240),
-			Login:   LoginCommand(spec),
-			CopyOK:  len(CredentialPaths(spec)) > 0,
-		})
+	for _, name := range order {
+		if row, ok := byName[name]; ok {
+			rows = append(rows, row)
+			continue
+		}
+		rows = append(rows, AuthStatusRow{Agent: name, Present: false, Authed: false,
+			Detail: "not a login agent-accounts lists on this host"})
 	}
 	return rows
 }

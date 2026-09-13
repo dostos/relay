@@ -55,6 +55,14 @@ type DiscoverService struct {
 	Profiles     *ProfileService
 }
 
+// accountsRunner is the profile service's agent-accounts CLI, if wired.
+func (d *DiscoverService) accountsRunner() AccountsRunner {
+	if d.Profiles != nil && d.Profiles.Accounts != nil {
+		return d.Profiles.Accounts
+	}
+	return DefaultAccountsRunner()
+}
+
 // Discover inventories a host and proposes host.yaml contents.
 func (d *DiscoverService) Discover(ctx context.Context, hostID string) (*DiscoverCard, error) {
 	if hostID == "" {
@@ -108,7 +116,7 @@ func (d *DiscoverService) Discover(ctx context.Context, hostID string) (*Discove
 	}
 
 	// Agent catalog (independent of host.yaml)
-	card.AgentsDetected = probeAgentCatalog(ctx, t)
+	card.AgentsDetected = probeAgentCatalog(ctx, t, hostID, d.accountsRunner())
 
 	card.Proposal = buildProposal(hostID, card)
 	if y, err := yaml.Marshal(card.Proposal); err == nil {
