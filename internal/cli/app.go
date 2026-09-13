@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -42,7 +43,9 @@ type App struct {
 	Maint       *core.MaintenanceService
 	JSON        bool
 	CompactJSON bool
-	tf          core.TransportFactory
+	// Stdin is the pane text source for `pane classify`; nil means os.Stdin.
+	Stdin io.Reader
+	tf    core.TransportFactory
 }
 
 // New constructs the default App (SSH + tmux + relayd coord).
@@ -164,7 +167,10 @@ func (a *App) forwardThroughDesktopBridge(args []string) (int, bool) {
 		}
 		// Signals are host-local hook events. Sending them through the desktop
 		// bridge would add latency and break if the pane's attach is reconnecting.
-		if arg == "signal" || arg == "hook" || arg == "ask" {
+		// `pane classify` reads its input from STDIN, which the bridge request
+		// (argv + source only) cannot carry: forwarded, it would classify
+		// nothing. It is a pure local function and always runs here.
+		if arg == "signal" || arg == "hook" || arg == "ask" || arg == "pane" {
 			return 0, false
 		}
 		break
@@ -220,6 +226,11 @@ func commandNeedsLocalTTY(args []string) bool {
 		}
 	}
 	if len(filtered) >= 2 && filtered[0] == "session" && filtered[1] == "attach" {
+		return true
+	}
+	// `pane classify` reads the pane text from the caller's stdin; the bridge
+	// carries argv, not stdin, so it must run in this process.
+	if len(filtered) >= 2 && filtered[0] == "pane" && filtered[1] == "classify" {
 		return true
 	}
 	return len(filtered) > 0 && filtered[0] == "resume" && (len(filtered) == 1 || (filtered[1] != "list" && filtered[1] != "reap" && filtered[1] != "prune"))
@@ -300,6 +311,8 @@ func (a *App) Run(args []string) int {
 		return a.cmdTargets(ctx, filtered[1:])
 	case "session", "sess":
 		return a.cmdSession(ctx, filtered[1:])
+	case "pane":
+		return a.cmdPane(ctx, filtered[1:])
 	case "client":
 		return a.cmdClient(filtered[1:])
 	case "resume":
@@ -1021,6 +1034,76 @@ func (a *App) errOut(err error) int {
 	return 0
 }
 
+// parseReadinessFlags reads the optional `--readiness [--readiness-lines N]`
+// pair that `session list` and `session get` accept. Anything else is an
+// unknown flag, so the no-flag output stays byte-identical to before.
+func parseReadinessFlags(rest []string) (withReadiness bool, lines int, err error) {
+	lines = core.DefaultReadinessLines
+	for i := 0; i < len(rest); i++ {
+		switch rest[i] {
+		case "--readiness":
+			withReadiness = true
+		case "--readiness-lines":
+			if i+1 >= len(rest) {
+				return false, 0, fmt.Errorf("%s requires a value", rest[i])
+			}
+			n, convErr := strconv.Atoi(rest[i+1])
+			if convErr != nil || n <= 0 {
+				return false, 0, fmt.Errorf("--readiness-lines must be a positive integer, got %q", rest[i+1])
+			}
+			lines = n
+			withReadiness = true
+			i++
+		default:
+			return false, 0, rejectUnknownFlag(rest[i])
+		}
+	}
+	return withReadiness, lines, nil
+}
+
+// cmdPane is the presenter's local half of readiness: `relay pane classify`
+// runs the classifier over pane text on stdin — no ssh, no registry, no
+// state — so Forge can classify a surface it is attached to without a second
+// copy of the classifier. Every other `pane` verb retired with the presenter
+// and stays an unknown command.
+func (a *App) cmdPane(_ context.Context, args []string) int {
+	if len(args) == 0 || args[0] != "classify" {
+		name := "pane"
+		if len(args) > 0 {
+			name = "pane " + args[0]
+		}
+		return a.fail(fmt.Errorf("unknown command %q (relay --help)", name))
+	}
+	a.JSON = true
+	lines := core.DefaultReadinessLines
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "-n", "--lines":
+			if i+1 >= len(args) {
+				return a.fail(fmt.Errorf("%s requires a value", args[i]))
+			}
+			lines, _ = strconv.Atoi(args[i+1])
+			i++
+		default:
+			return a.fail(rejectUnknownFlag(args[i]))
+		}
+	}
+	text, err := io.ReadAll(a.stdin())
+	if err != nil {
+		return a.fail(fmt.Errorf("read stdin: %w", err))
+	}
+	rep := core.ClassifyText(string(text), lines)
+	return a.errOut(a.out(rep))
+}
+
+// stdin is what `pane classify` reads; tests substitute it.
+func (a *App) stdin() io.Reader {
+	if a.Stdin != nil {
+		return a.Stdin
+	}
+	return os.Stdin
+}
+
 // parseSessionCreateArgs reads `session create` flags after -H. A trailing
 // `-- ARGV…` is the pane's inner command — for a container session it runs
 // inside the container, so a worker's entrypoint is what the pane shows —
@@ -1170,6 +1253,18 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 	sub := args[0]
 	switch sub {
 	case "list":
+		withReadiness, lines, err := parseReadinessFlags(args[1:])
+		if err != nil {
+			return a.fail(err)
+		}
+		if withReadiness {
+			list, err := a.Sessions.ListWithReadiness(ctx, lines)
+			if err != nil {
+				return a.fail(err)
+			}
+			a.JSON = true
+			return a.errOut(a.out(list))
+		}
 		list, err := a.Sessions.List()
 		if err != nil {
 			return a.fail(err)
@@ -1179,11 +1274,55 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 		if len(args) < 2 {
 			return a.fail(fmt.Errorf("session id required"))
 		}
+		withReadiness, lines, err := parseReadinessFlags(args[2:])
+		if err != nil {
+			return a.fail(err)
+		}
 		s, err := a.Sessions.Get(args[1])
 		if err != nil {
 			return a.fail(err)
 		}
+		if withReadiness {
+			_, rep, _ := a.Sessions.Readiness(ctx, s.ID, lines)
+			a.JSON = true
+			return a.errOut(a.out(core.SessionReadiness{Session: s, Readiness: rep}))
+		}
 		return a.errOut(a.out(s))
+	case "readiness":
+		// One session, captured and classified, for a presenter that does not
+		// hold the pane text itself (a put-away session). Always JSON.
+		if len(args) < 2 {
+			return a.fail(fmt.Errorf("usage: relay session readiness ID [--lines N]"))
+		}
+		a.JSON = true
+		lines := core.DefaultReadinessLines
+		for i := 2; i < len(args); i++ {
+			switch args[i] {
+			case "-n", "--lines":
+				if i+1 >= len(args) {
+					return a.fail(fmt.Errorf("%s requires a value", args[i]))
+				}
+				lines, _ = strconv.Atoi(args[i+1])
+				i++
+			case "--readiness":
+				// tolerated: `session readiness ID` is already the readiness verb
+			default:
+				return a.fail(rejectUnknownFlag(args[i]))
+			}
+		}
+		sess, rep, err := a.Sessions.Readiness(ctx, args[1], lines)
+		if err != nil {
+			if sess == nil {
+				return a.fail(err)
+			}
+			_ = a.out(map[string]any{"ok": false, "error": err.Error(), "session_id": sess.ID, "host_id": sess.HostID, "state": core.AgentUnknown, "lines": lines})
+			return 1
+		}
+		return a.errOut(a.out(map[string]any{
+			"ok": true, "session_id": sess.ID, "host_id": sess.HostID,
+			"state": rep.State, "reason": rep.Reason, "gate": rep.Gate,
+			"lines": rep.Lines, "sampled_at": rep.SampledAt,
+		}))
 	case "rename":
 		if len(args) != 3 {
 			return a.fail(fmt.Errorf("usage: relay session rename ID NAME"))

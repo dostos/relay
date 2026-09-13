@@ -150,7 +150,22 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
   # either way; only the restart is deferred to the caller.
   if [[ -z "${RELAY_SYSTEM_SELF_UPDATE:-}" ]]; then
     launchctl bootout "gui/$(id -u)/$SYSTEM_LABEL" >/dev/null 2>&1 || true
-    launchctl bootstrap "gui/$(id -u)" "$SYSTEM_PLIST"
+    # bootout returns before the old process is gone; a bootstrap that races
+    # it fails with EIO and, under set -e, used to leave the service unloaded
+    # (2026-09-13). Wait for the label to disappear, then retry the bootstrap.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      launchctl print "gui/$(id -u)/$SYSTEM_LABEL" >/dev/null 2>&1 || break
+      sleep 1
+    done
+    BOOTSTRAPPED=0
+    for _ in 1 2 3 4 5; do
+      if launchctl bootstrap "gui/$(id -u)" "$SYSTEM_PLIST" 2>/dev/null; then BOOTSTRAPPED=1; break; fi
+      sleep 1
+    done
+    if (( ! BOOTSTRAPPED )); then
+      echo "relay: launchctl bootstrap failed 5 times; the home service is NOT loaded — run: launchctl bootstrap gui/$(id -u) $SYSTEM_PLIST" >&2
+      exit 1
+    fi
     launchctl kickstart -k "gui/$(id -u)/$SYSTEM_LABEL"
   fi
   echo "relay service: authoritative home service registered ($SYSTEM_LABEL)"
