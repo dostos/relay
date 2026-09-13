@@ -51,13 +51,12 @@ func TestSessionRenameKeepsIdentityAndRetargetsDurableState(t *testing.T) {
 	sess := &Session{
 		ID: "sess-beholder", HostID: "c3", RemoteCWD: "~/dev/beholder",
 		Persist: ports.PersistHandle{Kind: "tmux", Name: "dostos-workspace-cdx"},
-		Labels:  map[string]string{DisplayNameLabel: "beholder"}, CreatedAt: now, UpdatedAt: now,
+		Labels:  map[string]string{"role": "interactive"}, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := reg.PutSession(sess); err != nil {
 		t.Fatal(err)
 	}
 	RememberResume(sess)
-	RememberPane("surface:187", sess, true)
 	persist := &renamePersistence{}
 	service := &SessionService{
 		Reg: reg, Persist: persist,
@@ -86,9 +85,5 @@ func TestSessionRenameKeepsIdentityAndRetargetsDurableState(t *testing.T) {
 	resume, err := LookupResume("beholder")
 	if err != nil || resume.SessionID != sess.ID {
 		t.Fatalf("new resume = %+v, err %v", resume, err)
-	}
-	pane, err := ReadPaneBinding("surface:187")
-	if err != nil || pane.PersistName != "beholder" {
-		t.Fatalf("pane binding = %+v, err %v", pane, err)
 	}
 }

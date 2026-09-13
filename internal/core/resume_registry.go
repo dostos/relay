@@ -12,11 +12,11 @@ import (
 	"github.com/dostos/relay/internal/shellquote"
 )
 
-// ResumeState distinguishes intentional teardown from transport/cmux disconnect.
+// ResumeState distinguishes intentional teardown from transport disconnect.
 type ResumeState string
 
 const (
-	// ResumeStateResumable: remote work may still be alive; cmux/SSH drop — OK to resume.
+	// ResumeStateResumable: remote work may still be alive; SSH drop — OK to resume.
 	ResumeStateResumable ResumeState = "resumable"
 	// ResumeStateCleaned: intentional destroy/finalize — do NOT resume or recreate.
 	ResumeStateCleaned ResumeState = "cleaned"
@@ -25,7 +25,7 @@ const (
 // ErrResumeCleaned means the session was intentionally torn down.
 var ErrResumeCleaned = errors.New("session was cleaned (finalized/destroyed); not a disconnect")
 
-// ResumeEntry maps a tmux persist name → host + lifecycle for cmux Vault resume.
+// ResumeEntry maps a tmux persist name → host + lifecycle for resume.
 type ResumeEntry struct {
 	HostID    string      `json:"host_id"`
 	SessionID string      `json:"session_id,omitempty"`
@@ -92,9 +92,6 @@ func saveResumeRegistryLocked(f *resumeRegistryFile) error {
 }
 
 func updateResumeRegistry(mutate func(*resumeRegistryFile) error) error {
-	if err := EnsureAuthorityWritable(); err != nil {
-		return err
-	}
 	unlock, err := lockAuthorityWrite()
 	if err != nil {
 		return err
@@ -235,7 +232,7 @@ type ResumePresence string
 const (
 	// PresenceLive: local session record exists (likely still connected from this machine).
 	PresenceLive ResumePresence = "live"
-	// PresenceDisconnected: no live local record, but resumable — cmux/SSH drop; remote may be up.
+	// PresenceDisconnected: no live local record, but resumable — SSH drop; remote may be up.
 	PresenceDisconnected ResumePresence = "disconnected"
 	// PresenceCleaned: intentional teardown; do not resume.
 	PresenceCleaned ResumePresence = "cleaned"

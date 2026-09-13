@@ -37,7 +37,6 @@ type AuthLoginResult struct {
 	HostID    string `json:"host_id"`
 	Agent     string `json:"agent"`
 	SessionID string `json:"session_id,omitempty"`
-	Surface   string `json:"surface,omitempty"`
 	LoginCmd  string `json:"login_cmd"`
 	AuthURL   string `json:"auth_url,omitempty"` // reassembled; pane width often wraps/crops this
 	Opened    bool   `json:"opened,omitempty"`   // local browser open attempted
@@ -60,7 +59,6 @@ type AuthCopyResult struct {
 type AuthService struct {
 	Profiles     *ProfileService
 	Sessions     *SessionService
-	Viz          ports.Viz
 	NewTransport TransportFactory
 	// Accounts asks agent-accounts which logins exist and how they are. Nil
 	// means the default runner (the installed CLI); a missing CLI is an error,
@@ -217,7 +215,7 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// Login opens a cmux pane running the agent’s interactive login command.
+// Login opens a remote tmux session running the agent’s interactive login command.
 // Narrow panes wrap OAuth URLs; we reassemble from capture and open locally.
 func (s *AuthService) Login(ctx context.Context, hostID, agent string) (*AuthLoginResult, error) {
 	if hostID == "" {
@@ -238,16 +236,6 @@ func (s *AuthService) Login(ctx context.Context, hostID, agent string) (*AuthLog
 	}
 	safe := sanitizeID(strings.ReplaceAll(spec.Name, ":", "-"))
 	authName := "auth-" + safe
-	// Drop stale auth tmux (previous login left it behind) + local viz rows.
-	if list, err := s.Sessions.List(); err == nil {
-		for _, old := range list {
-			if old.HostID == hostID && old.Persist.Name == authName {
-				if s.Viz != nil {
-					_ = s.Viz.Close(ctx, old.ID)
-				}
-			}
-		}
-	}
 	sess, err := s.Sessions.ReplaceCreate(ctx, CreateOpts{
 		HostID:    hostID,
 		Name:      authName,
@@ -267,20 +255,7 @@ func (s *AuthService) Login(ctx context.Context, hostID, agent string) (*AuthLog
 		Hint:      "complete OAuth/API login in the pane (or the opened browser), then: relay auth status -H " + hostID + " --agent " + spec.Name,
 		Next:      "relay auth status -H " + hostID + " --agent " + spec.Name,
 	}
-	if s.Viz != nil && s.Viz.Available(ctx) {
-		launch := ResumeLaunchCmd(sess.Persist.Name)
-		ref, err := PresentSession(ctx, s.Viz, sess, launch, ports.Layout{Mode: "remote"})
-		if err == nil {
-			res.Surface = ref
-			sess.VizSurfaceRef = ref
-			_ = s.Sessions.Reg.PutSession(sess)
-			RememberPane(ref, sess, true)
-		} else {
-			res.Hint += " (viz present failed: " + err.Error() + "; attach with relay resume --session " + sess.Persist.Name + ")"
-		}
-	} else {
-		res.Hint += "; viz unavailable — relay resume --session " + sess.Persist.Name
-	}
+	res.Hint += "; attach with: relay resume --session " + sess.Persist.Name + " --host " + hostID
 
 	if url, err := s.WaitAuthURL(ctx, sess.ID, 12*time.Second); err == nil && url != "" {
 		res.AuthURL = url

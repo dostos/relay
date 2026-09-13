@@ -127,8 +127,7 @@ func (e *ensureTransport) WriteFile(_ context.Context, _ string, data []byte, _ 
 	e.profile = string(data)
 	return nil
 }
-func (e *ensureTransport) Interactive(context.Context, string) error  { return nil }
-func (e *ensureTransport) InteractiveCommand(remoteCmd string) string { return remoteCmd }
+func (e *ensureTransport) Interactive(context.Context, string) error { return nil }
 
 // happyAccounts is the catalog the happy-path ensure tests see: one ccs
 // profile and one codex account, both usable.

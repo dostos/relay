@@ -29,4 +29,3 @@ func (f *fakeTransport) WriteFile(ctx context.Context, path string, data []byte,
 	return nil
 }
 func (f *fakeTransport) Interactive(ctx context.Context, command string) error { return nil }
-func (f *fakeTransport) InteractiveCommand(remoteCmd string) string            { return remoteCmd }

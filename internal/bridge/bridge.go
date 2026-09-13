@@ -1,5 +1,5 @@
 // Package bridge connects relay processes inside remote tmux sessions back to
-// the relay control plane on the cmux machine.
+// the relay control plane on the control host.
 package bridge
 
 import (
@@ -501,13 +501,10 @@ func serializeInvocation(argv []string) bool {
 
 func desktopInvokeEnv(env []string) []string {
 	blocked := map[string]bool{
-		"CMUX_WORKSPACE_ID": true,
-		"CMUX_SURFACE_REF":  true,
-		"CMUX_SURFACE":      true,
-		SourceSessionEnv:    true,
-		SourceHostEnv:       true,
-		SourcePersistEnv:    true,
-		SourceTokenEnv:      true,
+		SourceSessionEnv: true,
+		SourceHostEnv:    true,
+		SourcePersistEnv: true,
+		SourceTokenEnv:   true,
 	}
 	out := make([]string, 0, len(env))
 	for _, entry := range env {

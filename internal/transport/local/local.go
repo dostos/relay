@@ -129,9 +129,3 @@ func (t *Transport) Interactive(ctx context.Context, command string) error {
 	cmd.Stderr = stderr
 	return cmd.Run()
 }
-
-// InteractiveCommand returns the command unchanged. The SSH transport wraps it
-// in "ssh -t HOST --" to cross a network; there is no hop to cross here, and
-// wrapping it would reintroduce the "hostname local" failure this package
-// exists to remove.
-func (t *Transport) InteractiveCommand(remoteCmd string) string { return remoteCmd }

@@ -1,5 +1,7 @@
 # Viz-only SSH key
 
+> **Retired 2026-09-13.** relay no longer has a presenter: the cmux viz client, `relay viz serve`/`viz-broker`, and the projection-only Mac split are gone. Forge (`projects/infrastructure/forge`) is the presenter; a tab runs `relay resume --session NAME --host HOST`. See the workspace's one-owner-per-axis decision. Kept for the record.
+
 The optional Viz host must use a dedicated SSH key whose `authorized_keys`
 entry on the control host is restricted to Relay's Viz broker. For a service
 named `relay-viz-mac`, the owner-managed entry is:

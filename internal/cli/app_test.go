@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -17,49 +16,6 @@ import (
 	"github.com/dostos/relay/internal/core"
 	"github.com/dostos/relay/internal/ports"
 )
-
-type projectedPaneViz struct {
-	ports.Viz
-	panes []ports.ProjectedSession
-	err   error
-}
-
-type localFocusViz struct {
-	projectedPaneViz
-	focused string
-}
-
-func (v *localFocusViz) Available(context.Context) bool { return true }
-
-func (v *localFocusViz) Focus(_ context.Context, sessionID string) error {
-	v.focused = sessionID
-	return nil
-}
-
-type authorityForwardViz struct{ ports.Viz }
-
-func (authorityForwardViz) ForwardAuthorityCommand(context.Context, []string) (int, string, string, error) {
-	return 0, "forwarded-from-home\n", "", nil
-}
-
-type projectionDoctorViz struct{ projectedPaneViz }
-
-func (projectionDoctorViz) Available(context.Context) bool { return true }
-
-func (projectionDoctorViz) ForwardAuthorityCommand(_ context.Context, args []string) (int, string, string, error) {
-	if len(args) == 2 && args[0] == "service" && args[1] == "status" {
-		raw, _ := json.Marshal(map[string]any{
-			"build": coord.Build, "pid": 42, "ready": true, "live": true,
-			"updated_at": time.Now().UTC().Format(time.RFC3339Nano),
-			"components": map[string]any{
-				"command_boundary": map[string]any{"build": coord.Build, "ready": true, "live": true, "durable_effects": true},
-			},
-		})
-		wrapped, _ := json.Marshal(map[string]any{"ok": true, "health": json.RawMessage(raw)})
-		return 0, string(wrapped), "", nil
-	}
-	return 0, `{"ok":true}`, "", nil
-}
 
 func TestMain(m *testing.M) {
 	root, err := os.MkdirTemp("", "relay-cli-tests-")
@@ -83,97 +39,6 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	_ = os.RemoveAll(root)
 	os.Exit(code)
-}
-
-func (v projectedPaneViz) ProjectionSessions(context.Context) ([]ports.ProjectedSession, error) {
-	return v.panes, v.err
-}
-
-func TestStaleQueuedPresentationsDistinguishesPendingFromInert(t *testing.T) {
-	now := time.Now().UTC()
-	sessions := []*core.Session{
-		{ID: "sess-stale", VizSurfaceRef: "viz:queued:39", UpdatedAt: now.Add(-10 * time.Minute)},
-		{ID: "sess-recent", VizSurfaceRef: "viz:queued:40", UpdatedAt: now.Add(-time.Minute)},
-		{ID: "sess-done", VizSurfaceRef: "surface:289", UpdatedAt: now.Add(-time.Hour)},
-	}
-	got := staleQueuedPresentations(sessions, now, 5*time.Minute)
-	if len(got) != 1 || !strings.Contains(got[0], "sess-stale") || !strings.Contains(got[0], "viz:queued:39") {
-		t.Fatalf("stale presentations=%v", got)
-	}
-}
-
-func TestProjectionSessionListDoesNotCollapseInventoryFailureToEmpty(t *testing.T) {
-	state := t.TempDir()
-	t.Setenv("RELAY_STATE_DIR", state)
-	if err := os.WriteFile(filepath.Join(state, ".viz-projection-only"), []byte("projection only\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	a := New()
-	a.Viz = projectedPaneViz{err: errors.New("cmux unavailable")}
-	out := captureStdout(t, func() {
-		if code := a.Run([]string{"--json", "session", "list"}); code == 0 {
-			t.Fatal("session list unexpectedly succeeded")
-		}
-	})
-	if !strings.Contains(out, "cmux unavailable") {
-		t.Fatalf("inventory error lost: %q", out)
-	}
-}
-
-func TestVizHelpDoesNotExecuteUpdate(t *testing.T) {
-	a := New()
-	a.Viz = projectedPaneViz{}
-	out := captureStdout(t, func() {
-		if code := a.Run([]string{"viz", "update", "--help"}); code != 0 {
-			t.Fatalf("help code=%d", code)
-		}
-	})
-	if !strings.Contains(out, "usage: relay viz") {
-		t.Fatalf("help output=%q", out)
-	}
-}
-
-func TestProjectedSessionListUsesLiveVizBindings(t *testing.T) {
-	state := t.TempDir()
-	t.Setenv("RELAY_STATE_DIR", state)
-	if err := os.WriteFile(filepath.Join(state, ".viz-projection-only"), []byte("projection only\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	a := New()
-	a.Viz = projectedPaneViz{panes: []ports.ProjectedSession{
-		{SessionID: "sess-engram", ParentSessionID: "sess-apex", TmuxName: "engram", Target: "c3", Surface: "surface:2"},
-	}}
-	list, err := a.Sessions.List()
-	if !errors.Is(err, core.ErrProjectionOnlyAuthority) || list != nil {
-		t.Fatalf("authority read did not fail closed: list=%v err=%v", list, err)
-	}
-	projected, err := a.projectedSessions(context.Background())
-	if err != nil || len(projected) != 1 {
-		t.Fatalf("projection=%v err=%v", projected, err)
-	}
-	got := projected[0]
-	if got.ID != "sess-engram" || got.SourceSessionID != "sess-apex" || got.HostID != "c3" || got.Persist.Name != "engram" || got.VizSurfaceRef != "surface:2" {
-		t.Fatalf("projection fields lost: %+v", got)
-	}
-}
-
-func TestProjectionOnlyVizFocusUsesProjectedIdentity(t *testing.T) {
-	state := t.TempDir()
-	t.Setenv("RELAY_STATE_DIR", state)
-	if err := os.WriteFile(filepath.Join(state, ".viz-projection-only"), []byte("projection only\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	viz := &localFocusViz{projectedPaneViz: projectedPaneViz{panes: []ports.ProjectedSession{
-		{SessionID: "sess-hamburg", Target: "hamburg", TmuxName: "beholder", Surface: "surface:1"},
-	}}}
-	a := New()
-	a.Viz = viz
-	if code := a.Run([]string{"viz", "focus", "hamburg"}); code != 0 {
-		t.Fatalf("projection-only viz focus code=%d", code)
-	}
-	if viz.focused != "sess-hamburg" {
-		t.Fatalf("focused session=%q, want sess-hamburg", viz.focused)
-	}
 }
 
 func captureStdout(t *testing.T, fn func()) string {
@@ -263,28 +128,6 @@ func TestLocalCLIForwardsAuthenticatedRequestAndConfirmsResponse(t *testing.T) {
 	}
 }
 
-func TestProjectionClientDoctorChecksHomeWithoutLocalAuthority(t *testing.T) {
-	state := t.TempDir()
-	t.Setenv("RELAY_STATE_DIR", state)
-	if err := os.WriteFile(filepath.Join(state, ".viz-projection-only"), []byte("projection only\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	a := New()
-	a.Viz = projectionDoctorViz{}
-	a.CompactJSON = true
-	out := captureStdout(t, func() {
-		if code := a.Run([]string{"doctor"}); code != 0 {
-			t.Fatalf("doctor code=%d", code)
-		}
-	})
-	var result struct {
-		Failed int `json:"failed"`
-	}
-	if err := json.Unmarshal([]byte(out), &result); err != nil || result.Failed != 0 || !strings.Contains(out, `"authority_command"`) {
-		t.Fatalf("projection doctor output=%q", out)
-	}
-}
-
 func TestLegacyAuthorityProcessDetectionIgnoresDiagnosticCommands(t *testing.T) {
 	tests := []struct {
 		command string
@@ -344,6 +187,25 @@ func TestRetiredDelegationVerbsAreUnknownCommands(t *testing.T) {
 			}
 		})
 		if !strings.Contains(out, "unknown command") {
+			t.Fatalf("%v: expected an unknown-command error, got %q", argv, out)
+		}
+	}
+}
+
+func TestPresenterVerbsAreUnknownCommands(t *testing.T) {
+	// relay has no presenter (Forge attaches with `relay resume`), so the
+	// surface verbs are gone. The command centre still calls `pane list` and
+	// `viz list` and degrades on a non-zero exit; that exit must be the plain
+	// unknown-command failure, not a tmux open on a host called "pane".
+	for _, argv := range [][]string{{"pane", "list"}, {"viz", "list"}, {"viz", "present", "sess-1"}, {"container", "open", "-H", "h", "--container", "c"}} {
+		a := New()
+		a.JSON = true
+		out := captureStdout(t, func() {
+			if code := a.Run(argv); code == 0 {
+				t.Fatalf("%v should not be a command any more", argv)
+			}
+		})
+		if argv[0] != "container" && !strings.Contains(out, "unknown command") {
 			t.Fatalf("%v: expected an unknown-command error, got %q", argv, out)
 		}
 	}

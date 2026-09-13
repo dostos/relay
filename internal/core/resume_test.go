@@ -14,26 +14,18 @@ import (
 
 type resumePersist struct{ ports.Persistence }
 
-type projectionTransport struct {
-	*fakeTransport
-	user     string
-	port     int
-	identity string
-}
-
-func (t *projectionTransport) ConfigureEndpoint(user string, port int, identity string) error {
-	t.user, t.port, t.identity = user, port, identity
-	return nil
-}
+type hostTransport struct{ *fakeTransport }
 
 func (resumePersist) AttachCommand(h ports.PersistHandle, _ string) string {
 	return "tmux attach-session -t =" + h.Name
 }
 
-func TestProjectionResumeUsesExplicitTargetWithoutLocalAuthority(t *testing.T) {
+func TestResumeWithHostAttachesWithoutLocalAuthority(t *testing.T) {
+	// A Forge tab runs `relay resume --session NAME --host HOST` and must
+	// attach to that host with no local registry row.
 	t.Setenv("RELAY_STATE_DIR", t.TempDir())
 	var target string
-	transport := &projectionTransport{fakeTransport: &fakeTransport{id: "hamburg"}}
+	transport := &hostTransport{fakeTransport: &fakeTransport{id: "hamburg"}}
 	svc := &SessionService{
 		Reg: &Registry{}, Persist: resumePersist{},
 		NewTransport: func(host string) (ports.Transport, error) {
@@ -41,22 +33,19 @@ func TestProjectionResumeUsesExplicitTargetWithoutLocalAuthority(t *testing.T) {
 			return transport, nil
 		},
 	}
-	if err := svc.ResumeOpts(context.Background(), "phyzfuzz-feas-3", "", ResumeOpts{TargetHost: "hamburg", TargetUser: "jingyu", TargetPort: 2222, TargetIdentity: "~/.ssh/viz", Explicit: true}); err != nil {
+	if err := svc.ResumeOpts(context.Background(), "phyzfuzz-feas-3", "", ResumeOpts{TargetHost: "hamburg"}); err != nil {
 		t.Fatal(err)
 	}
 	if target != "hamburg" {
 		t.Fatalf("target=%q", target)
 	}
-	if transport.user != "jingyu" || transport.port != 2222 || transport.identity != "~/.ssh/viz" {
-		t.Fatalf("endpoint policy lost: %+v", transport)
-	}
 	sessions, err := svc.Reg.ListSessions()
 	if err != nil || len(sessions) != 0 {
-		t.Fatalf("projection resume created local authority: sessions=%v err=%v", sessions, err)
+		t.Fatalf("host-named resume created local authority: sessions=%v err=%v", sessions, err)
 	}
 }
 
-func TestProjectionResumeRejectsSSHOptionHost(t *testing.T) {
+func TestResumeRejectsSSHOptionHost(t *testing.T) {
 	svc := &SessionService{Reg: &Registry{}, Persist: resumePersist{}, NewTransport: func(string) (ports.Transport, error) {
 		t.Fatal("invalid host reached transport")
 		return nil, nil
@@ -105,13 +94,6 @@ func TestFindByPersistNamePrefersRepo(t *testing.T) {
 	got, err := r.FindByPersistName("shared-name", repoB)
 	if err != nil || got.ID != "sess-new" {
 		t.Fatalf("got %+v err %v", got, err)
-	}
-}
-
-func TestResumeLaunchCmdCarriesSessionFlag(t *testing.T) {
-	cmd := ResumeLaunchCmd("dostos-workspace-abc")
-	if !strings.Contains(cmd, "resume") || !strings.Contains(cmd, "--session") || !strings.Contains(cmd, "dostos-workspace-abc") {
-		t.Fatalf("cmd=%q", cmd)
 	}
 }
 

@@ -11,10 +11,6 @@ func lockAuthorityWrite() (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := EnsureAuthorityWritable(); err != nil {
-		unlockAuthorityFile(lock)
-		return nil, err
-	}
 	return func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); _ = lock.Close() }, nil
 }
 

@@ -28,7 +28,6 @@ func cleanupFixture(t *testing.T) (*SessionService, *Registry) {
 
 func TestDestroyKeepRemotePreservesResumeAndBridgeIdentity(t *testing.T) {
 	service, _ := cleanupFixture(t)
-	service.Viz = &deletionViz{}
 	child, err := service.Reg.GetSession("sess-child")
 	if err != nil {
 		t.Fatal(err)

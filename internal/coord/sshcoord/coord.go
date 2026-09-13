@@ -71,7 +71,7 @@ func (c *Coord) Subscribe(ctx context.Context, t ports.Transport, session string
 
 // SensorCommand returns a remote emit command after validating session and kind.
 // stdout/stderr are discarded: tmux run-shell otherwise paints {"ok":true,"seq":N}
-// into the live pane (visible in cmux).
+// into the live pane (visible in the attached terminal).
 func (c *Coord) SensorCommand(session, kind string) (string, error) {
 	if err := shellquote.ValidateSessionName(session); err != nil {
 		return "", err

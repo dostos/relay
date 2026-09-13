@@ -240,7 +240,6 @@ func (s *scriptedTransport) RunStream(context.Context, string, string, io.Writer
 func (s *scriptedTransport) ReadFile(context.Context, string) ([]byte, error)           { return nil, io.EOF }
 func (s *scriptedTransport) WriteFile(context.Context, string, []byte, string) error    { return nil }
 func (s *scriptedTransport) Interactive(context.Context, string) error                  { return nil }
-func (s *scriptedTransport) InteractiveCommand(remoteCmd string) string                 { return remoteCmd }
 
 func TestImageUpPreparesVolumesForTheExecUser(t *testing.T) {
 	tr := &scriptedTransport{outputs: []string{"created\nabc123\n", "prepared\n"}}

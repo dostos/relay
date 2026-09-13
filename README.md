@@ -1,73 +1,69 @@
 # relay
 
-**Durable remote agent panes for [cmux](https://cmux.com)** — with one authoritative home service and a small stateless CLI that agents can drive without poll loops.
+**Durable remote sessions** — SSH + tmux on a fleet host, one authoritative home
+service, and a small stateless CLI other programs can drive with `--json`.
 
-`relay` attaches long-lived remote work (SSH + tmux) into cmux workspaces, marks those tabs with a teal **◆ RELAY** badge, and restores them after cmux quit / Mac reboot via cmux Vault. The same installed binary runs the home authority (`relay service run`), optional presentation client (`relay viz serve`), and host-local event edge (`relay service event run`).
+relay creates, names, and re-attaches long-lived remote work. It has no window
+of its own: **[Forge](../forge)** (a Ghostty fork, `projects/infrastructure/forge`)
+is the presenter, and a Forge tab is nothing more than a terminal running
 
-<p align="center">
-  <img src="docs/images/cmux-relay-hero.jpg" alt="cmux with relay-managed split panes and teal ◆ RELAY workspace badge" width="920" />
-</p>
+```bash
+relay resume --session NAME --host HOST
+```
 
-<p align="center"><em>Illustrative UI (anonymized hosts). Real tabs look like <code>◆ RELAY · train</code> with a matching sidebar pill.</em></p>
+so any terminal can be the presenter, and relay never depends on one.
 
 ## Why
 
-cmux is great at local workspace UX. Remote agent work still needs:
+Remote agent work needs:
 
-1. **Persistence** — the process must survive laptop sleep, wifi blips, and quitting cmux  
-2. **Reattach** — panes should come back as the same session, not a fresh shell  
-3. **Agent-friendly control** — orchestrators need `start → wait → send → done` without `tail -f` loops  
-4. **Visual ownership** — you should see at a glance which tabs are relay-managed  
+1. **Persistence** — the process must survive laptop sleep, wifi blips, and closing the window
+2. **Reattach** — a tab should come back as the same session, not a fresh shell
+3. **Program-friendly control** — Forge, the command centre and scripts need `session list|create|send|capture|exec|destroy` with `--json`
 
-relay is the thin control plane for that. cmux stays the windowing surface; relay never owns lifecycle through the GUI alone.
+relay is the thin substrate for that. What a human looks at is the terminal's
+job (Forge); what runs as delegated, machine-judged work is blacksmith's.
 
 ## Use cases
 
-### 1) Remote coding agent that survives cmux quit
+### 1) Remote coding agent that survives closing the window
 
-Start Claude / Codex / cursor-agent in a durable session on a lab box. Close cmux. Reopen later — Vault runs `relay resume --session …` and the pane is back in the same tmux session.
+Start Claude / Codex / cursor-agent in a durable session on a lab box. Close the
+tab, quit Forge, sleep the laptop. Reopen later — Forge restores the tab by
+running `relay resume --session …` and you are back in the same tmux session.
 
 ```bash
 relay session create -H host-a --name eval -- cursor-agent "fix the flaky eval; keep tests green"
 relay resume --session eval --host host-a      # from any pane, later
 ```
 
-### 2) Project workspace with several durable remotes
+### 2) A workspace with several durable remotes
 
-One cmux workspace with a parent pane on the left and its relay children stacked
-on the right (train + eval, app + benchmark). Sidebar pill:
-
-`◆ RELAY · train, eval`
+Adopt or create the sessions; Forge shows them as one workspace (train + eval,
+app + benchmark), each tab attached with `relay resume`:
 
 ```bash
 relay session adopt -H host-a --name train
 relay session adopt -H host-b --name eval
-relay viz present sess-… --workspace workspace:N   # split by default
-relay viz brand                                    # refresh ◆ RELAY titles + pills
+relay --json session list                          # what Forge reads
 ```
 
 For the common interactive path, use the host/name shorthand. It creates (or
-reuses) the named remote tmux session and binds it to the **current** cmux pane:
+reuses) the named remote tmux session and attaches to it in **this** terminal:
 
 ```bash
 relay c3 research
 ```
 
-That pane carries a persistent reverse Unix-socket bridge to the desktop. A
-`relay` command run inside it is executed by the desktop control plane, so it
-can open the next host in cmux without giving a remote machine direct access to
-cmux:
+That session carries a persistent reverse Unix-socket bridge to the control
+host. A `relay` command run inside it is executed by the control plane, so it
+can create the next session without giving a remote machine the control host's
+credentials; the reply names the `relay resume …` that attaches it:
 
 ```bash
 # inside c3/research
 relay c1 followup
 ```
-
-Child placement follows the recorded session binding, not whichever pane is
-currently focused. The first child splits `right` from its parent; later
-children of that parent split `down` from the newest live sibling. Explicit
-`--workspace` / `--pane` placement overrides the default. Inspect the
-session-keyed records with `relay pane list`.
 
 ### 3) Bring a new machine online
 
@@ -85,17 +81,13 @@ relay host init -H host-a --apply   # installs relay + compatibility symlink
 ```bash
 git clone https://github.com/dostos/relay.git
 cd relay
-./install.sh          # ~/.local/bin/relay{,d}; CLI is the agent protocol
+./install.sh          # ~/.local/bin/relay{,d}
 relay doctor --json
-relay install-cmux-restore   # register Vault resume agent (also run by install.sh)
 ```
 
-In cmux: **Settings → Terminal → Resume Commands** → approve **relay** once.
+Forge finds `relay` at `~/.local/bin/relay` (or `$FORGE_RELAY`).
 
-No runtime-specific agent skill is required or installed. Workspace-level
-agent instructions only need to point at `relay agent protocol`.
-
-## Quick start with cmux
+## Quick start
 
 ```bash
 # one-time per remote
@@ -106,33 +98,29 @@ relay HOST NAME                     # current pane → named remote tmux
 relay session create -H HOST --name work -- claude   # or any CLI as the pane's command
 # or attach an existing tmux session
 relay session adopt -H HOST --name my-tmux
-relay viz present sess-…          # opens a cmux split; ◆ RELAY tab title
 
-# after cmux restart (or laptop sleep / wifi drop)
+# in a Forge tab, or any terminal (also after laptop sleep / wifi drop)
 relay resume list                 # live | disconnected | cleaned
-relay resume                      # bare: this cmux pane's history
-relay resume --session NAME       # pin + waits/retries on SSH drop
-relay viz restore                 # optional manual path
+relay resume --session NAME --host HOST   # attach; waits/retries on SSH drop
 ```
 
-`relay resume` keeps the pane alive across sleep and “Shared connection … closed”: on drop it shows a single animated status line (spinner + countdown) and retries after a short delay (default 3s), frozen to that pane’s session. Bare `relay resume` (no `--session`) reads `~/.local/state/relay/panes/<surface>.json` (or the cmux surface resume binding). Disable reconnect with `--no-reconnect` or `RELAY_AUTO_RECONNECT=0`.
+`relay resume` keeps the tab alive across sleep and “Shared connection … closed”: on drop it shows a single animated status line (spinner + countdown) and retries after a short delay (default 3s), frozen to that session. Disable reconnect with `--no-reconnect` or `RELAY_AUTO_RECONNECT=0`.
 
 
 | Resume presence | Meaning | Resume? |
 |-----------------|---------|---------|
 | `live` | tracked locally | yes |
-| `disconnected` | cmux/SSH dropped; remote may still be up | yes |
+| `disconnected` | SSH dropped; remote may still be up | yes |
 | `cleaned` | intentional destroy/finalize | **no** |
 | `unknown` | never created here | no |
 
-## How it fits cmux
+## How it fits together
 
 | Layer | Role |
 |-------|------|
-| **cmux** | Workspaces, splits, tabs, Vault resume UI |
-| **relay CLI** | Session ids, `viz present`, branding, `--json` output for other programs |
+| **Forge** (or any terminal) | Tabs, splits, workspaces, restore; each tab runs `relay resume` |
+| **relay CLI** | Session ids and `--json` output for other programs |
 | **control bridge** | Unix-socket daemon on the control host; serializes authenticated remote requests |
-| **cmux client** | Optional visualization endpoint; executes cmux operations but owns no agent lifecycle |
 | **tmux** (remote) | Durable process surface |
 | **relay service event** (remote) | Always-on event bus over a **Unix socket only** (no TCP listen) |
 
@@ -146,65 +134,10 @@ is limited to named-session operations. There is no TCP listener or
 inbound connection to the laptop; the forward lives and reconnects with the
 pane's dedicated SSH connection.
 
-An always-on control host can request visualization without moving its registry
-or watchers to the Mac. Home sends only session ID, SSH target, and tmux name to
-the optional Mac `relay viz serve` service through a durable local queue. The Mac
-owns SSH attachment and placement policy, and consumes that queue using its own
-outbound SSH connection. Configure home's `~/.config/relay/viz.json`:
+cmux is no longer the presenter, and relay has no presenter port: the viz
+client, `relay viz serve`, `viz-broker`, `install-cmux-restore` and the
+projection-only Mac split were retired on 2026-09-13 with Forge in their place.
 
-The command server also follows the Viz acknowledgement stream and replaces a
-queued reference only after the Mac reports the actual surface. This protocol
-contains no agent/provider field: interactive sessions, jobs, and any agent CLI
-use the same request, receipt, and cursor path.
-
-```json
-{
-  "service_id": "mac"
-}
-```
-
-The Mac config names the outbound control connection and an owner-fixed update
-policy. Home resolves session host aliases through its SSH config and sends
-only host/user/port; credentials remain on the Mac. Optional `targets` entries
-can still pin a client-local identity for a host key.
-
-```json
-{
-  "service_id": "mac",
-  "control": {
-    "host": "100.108.118.32",
-    "user": "dostos",
-    "port": 2222
-  },
-  "command": {
-    "host": "home-relay"
-  },
-  "update": {
-    "repo": "~/dev/relay",
-    "remote": "origin",
-    "branch": "master"
-  }
-}
-```
-
-`command.host` is an OpenSSH alias for ordinary stateless CLI requests from a
-projection-only desktop. The alias keeps credentials and per-vantage routes in
-the desktop's SSH config; it must reach the authoritative account without an
-interactive prompt. The separate `control` identity remains restricted to the
-Viz event protocol.
-
-`relay viz update` appends a durable compatibility `update_relayd` signal. The Mac refuses it
-when its checkout is dirty or not on the configured branch. Otherwise Relay
-fetches the configured ref, builds the primary binary in a detached staging
-worktree, verifies its stamped build, fast-forwards the checkout, and atomically
-swaps it plus the compatibility symlink with rollback copies. It then
-acknowledges with the installed commit in `result`, advances its cursor, and
-lets launchd restart the follower.
-After the home bridge has been verified for local and worker sessions,
-`relay viz retire-control` durably asks the Mac to boot out and unregister the
-legacy supervisor and stop only a verified legacy bridge socket owner. The
-Viz follower and cmux restoration remain installed, and the Mac acknowledges
-the exact retirement result before advancing its cursor.
 `install.sh` is only for initial binary/service bootstrap. Both outbound control and target attachment are
 batch-only with strict host-key checking. If the Mac is asleep, requests wait
 durably while control work continues on home.
@@ -218,21 +151,20 @@ to enable chaining.
 
 ```text
 relay targets / host discover / host init   # new machine
-relay HOST NAME                             # named tmux in current cmux pane
+relay HOST NAME                             # named tmux, attached in this terminal
 relay session … / session adopt             # durable tmux (create takes -- ARGV for the pane's command)
 relay container up|down|status|stop|start   # devcontainer or image-backed instance
 relay auth status|login|copy                # agent CLI logins on a host
 relay service run|status                    # unified home service and component health
-relay pane list / pane rename               # owned surface/workspace/pane + liveness
-relay viz present|brand|save|restore        # cmux surface
-relay resume --session NAME                 # Vault target
+relay resume --session NAME --host HOST     # what a Forge tab runs
 ```
 
 Retired 2026-09-13 (workspace decision *one owner per axis*): the delegation
 handshake — `agent`, `handoff`, `parent`, `resolve`, `ask`, `signal`, `board`,
-`policy`, `msg`, `events`, `log`, `root`, `gc`, `history`, `mcp`. A unit of
-delegated work is blacksmith's; relay is the session substrate. `resume
-reap|prune` cover what `gc` did for sessions.
+`policy`, `msg`, `events`, `log`, `root`, `gc`, `history`, `mcp` — a unit of
+delegated work is blacksmith's; and the presenter — `viz`/`pane`, `viz serve`,
+`viz-broker`, `install-cmux-restore`, `container open` — Forge is the one.
+relay is the session substrate. `resume reap|prune` cover what `gc` did.
 
 Details: [`docs/2026-07-24-relay-design.md`](docs/2026-07-24-relay-design.md)
 (historical; the delegation half is retired).

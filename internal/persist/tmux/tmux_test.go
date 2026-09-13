@@ -237,17 +237,6 @@ func TestInstallSensorsUsesSessionColonTarget(t *testing.T) {
 	}
 }
 
-func TestApplyChromeUsesSessionColonTarget(t *testing.T) {
-	transport := &recordingTransport{}
-	if err := New().ApplyChrome(context.Background(), transport, ports.PersistHandle{Name: "phyzfuzz-feas-alt"}); err != nil {
-		t.Fatal(err)
-	}
-	got := transport.commands[0]
-	if !strings.Contains(got, `SESS='=phyzfuzz-feas-alt:'`) {
-		t.Fatalf("chrome must target '=name:' for tmux 3.2a set-option, got %q", got)
-	}
-}
-
 func TestComposerHoldsIgnoresSubmittedScrollback(t *testing.T) {
 	if composerHolds("❯ relay marker\nACCEPTED:relay marker\n", "relay marker") {
 		t.Fatal("output below the old composer proves submission")
@@ -268,7 +257,6 @@ func (t *recordingTransport) WriteFile(context.Context, string, []byte, string) 
 	return nil
 }
 func (t *recordingTransport) Interactive(context.Context, string) error { return nil }
-func (t *recordingTransport) InteractiveCommand(string) string          { return "" }
 
 func TestExistsUsesExactSessionName(t *testing.T) {
 	transport := &recordingTransport{stdout: "relay-absent"}

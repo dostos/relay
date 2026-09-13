@@ -318,15 +318,12 @@ func TestBridgeAllowlist(t *testing.T) {
 	}
 }
 
-func TestDesktopInvokeEnvDropsStaleCmuxCaller(t *testing.T) {
+func TestDesktopInvokeEnvDropsStaleCallerIdentity(t *testing.T) {
 	got := strings.Join(desktopInvokeEnv([]string{
-		"PATH=/bin", "CMUX_WORKSPACE_ID=workspace:old", "CMUX_SURFACE_REF=surface:old", "RELAY_CMUX_BIN=/cmux",
+		"PATH=/bin", "RELAY_STATE_DIR=/state",
 		SourceSessionEnv + "=sess-poison", SourceTokenEnv + "=token-poison",
 	}), "\n")
-	if strings.Contains(got, "workspace:old") || strings.Contains(got, "surface:old") {
-		t.Fatalf("stale caller context survived: %s", got)
-	}
-	if !strings.Contains(got, "PATH=/bin") || !strings.Contains(got, "RELAY_CMUX_BIN=/cmux") {
+	if !strings.Contains(got, "PATH=/bin") || !strings.Contains(got, "RELAY_STATE_DIR=/state") {
 		t.Fatalf("unrelated environment was removed: %s", got)
 	}
 	if strings.Contains(got, "sess-poison") || strings.Contains(got, "token-poison") {

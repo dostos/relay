@@ -53,7 +53,7 @@ func Command(args []string) int {
 	case "event":
 		return eventCommand(args[1:])
 	case "boundary":
-		// --no-control serves the authenticated boundary alone: no cmux ack sync
+		// --no-control serves the authenticated boundary alone: no presenter ack sync
 		// and no ssh -R tunnels. That is the shape an authority-owning container
 		// needs, and the shape a desktop must NOT use.
 		rest := args[1:]

@@ -12,14 +12,6 @@ import (
 )
 
 var ErrSessionNotFound = errors.New("session not found")
-var ErrProjectionOnlyAuthority = errors.New("local relay is visualization-only; authoritative registry is unavailable")
-
-// ProjectionOnly reports whether durable authority has been retired from this
-// visualization client to the home service.
-func ProjectionOnly() bool {
-	_, err := os.Lstat(ProjectionOnlyMarkerPath())
-	return err == nil
-}
 
 // Registry is the local durable store for sessions and handoffs.
 type Registry struct {
@@ -31,47 +23,15 @@ type sessionStore struct {
 	Sessions map[string]*Session `json:"sessions"`
 }
 
-// EnsureAuthorityWritable is the single role boundary for durable control-plane
-// stores. Projection code writes only under viz/ and must never call it.
-func EnsureAuthorityWritable() error {
-	if _, err := os.Lstat(ProjectionOnlyMarkerPath()); err == nil {
-		return fmt.Errorf("local relay is visualization-only; authoritative registry mutation refused")
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	return nil
-}
-
-func EnsureAuthorityReadable() error {
-	if _, err := os.Lstat(ProjectionOnlyMarkerPath()); err == nil {
-		return ErrProjectionOnlyAuthority
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	return nil
-}
-
 func (r *Registry) loadSessions() (*sessionStore, error) {
 	if err := EnsureStateDirs(); err != nil {
-		return nil, err
-	}
-	if err := EnsureAuthorityReadable(); err != nil {
 		return nil, err
 	}
 	b, err := os.ReadFile(SessionsPath())
 	if err != nil {
 		if os.IsNotExist(err) {
-			// Retirement may have moved sessions.json after the first marker
-			// check. Never turn that transition into an authoritative empty
-			// registry.
-			if readableErr := EnsureAuthorityReadable(); readableErr != nil {
-				return nil, readableErr
-			}
 			return &sessionStore{Sessions: map[string]*Session{}}, nil
 		}
-		return nil, err
-	}
-	if err := EnsureAuthorityReadable(); err != nil {
 		return nil, err
 	}
 	var s sessionStore
@@ -99,9 +59,6 @@ func (r *Registry) saveSessions(s *sessionStore) error {
 func (r *Registry) PutSession(sess *Session) error {
 	r.txMu.RLock()
 	defer r.txMu.RUnlock()
-	if err := EnsureAuthorityWritable(); err != nil {
-		return err
-	}
 	unlock, err := lockAuthorityWrite()
 	if err != nil {
 		return err
@@ -113,10 +70,7 @@ func (r *Registry) PutSession(sess *Session) error {
 func (r *Registry) putSessionLocked(sess *Session) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if managerDeletionReserved(sess.SourceSessionID) {
-		return fmt.Errorf("manager %s is reserved for deletion", sess.SourceSessionID)
-	}
-	if sess.Persist.Name != "" && sess.Persist.Kind != LocalPersistKind {
+	if sess.Persist.Name != "" {
 		if err := shellquote.ValidateSessionName(sess.Persist.Name); err != nil {
 			return fmt.Errorf("invalid persisted tmux name: %w", err)
 		}
@@ -163,9 +117,6 @@ func (r *Registry) ListSessions() ([]*Session, error) {
 func (r *Registry) DeleteSession(id string) error {
 	r.txMu.RLock()
 	defer r.txMu.RUnlock()
-	if err := EnsureAuthorityWritable(); err != nil {
-		return err
-	}
 	unlock, err := lockAuthorityWrite()
 	if err != nil {
 		return err

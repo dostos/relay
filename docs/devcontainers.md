@@ -65,18 +65,19 @@ because the CLI applies `remoteUser` only to execs it runs itself.
 
 ## Use it
 
-One command from your own machine — brings the container up, opens a tmux
-session whose shell runs inside it, and puts that pane in front of you through
-cmux:
+From your own machine — bring the container up, open a tmux session whose
+shell runs inside it, and attach (a Forge tab does the last step for you):
 
 ```bash
-relay container open -H hamburg --container oqb
+relay container up -H hamburg --container oqb
+relay --json session create -H hamburg --container oqb --ephemeral   # → persist.name
+relay resume --session <name> --host hamburg
 ```
 
-The container is **ephemeral by default**: relay brought it up, so relay removes
-it when the session is destroyed. A container nobody remembers starting is the
-one still running a week later. `--keep` opts out for a long-lived shared
-runner.
+With `--ephemeral` the container's lifetime is the session's: relay brought it
+up, so relay removes it when the session is destroyed. A container nobody
+remembers starting is the one still running a week later. Omit `--ephemeral`
+for a long-lived shared runner.
 
 The rest of the surface:
 
@@ -92,15 +93,15 @@ relay session create -H hamburg --container oqb -- claude "run the smoke suite" 
 ## Lifetime
 
 tmux runs **on the host**, not in the container, so the pane survives a
-container recreate and cmux keeps its binding. What relay ties to the session is
-the *container*, not the pane:
+container recreate and a tab simply reattaches. What relay ties to the session
+is the *container*, not the pane:
 
 | Event | Container | Named volumes |
 |---|---|---|
-| `relay container open` | created if absent | created if absent, provisioned once |
+| `relay session create --container … --ephemeral` | created if absent | created if absent, provisioned once |
 | container recreated (`--recreate`) | replaced, new id | kept, provision skipped by its stamp |
 | `relay session destroy` (ephemeral) | removed | **kept** |
-| `relay session destroy` (`--keep`) | kept | kept |
+| `relay session destroy` (not ephemeral) | kept | kept |
 | `relay container down` | removed | **kept** |
 
 Teardown never removes the volumes. The toolkit and the agent's `$HOME` are

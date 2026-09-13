@@ -1,11 +1,11 @@
 // Package ports defines pluggable adapter interfaces for the relay control plane.
-// Defaults: Transport=SSH, Persistence=tmux, Visualization=cmux, Coord=relayd.
+// Defaults: Transport=SSH, Persistence=tmux, Coord=relayd. Presentation is
+// not a port: Forge (or any terminal) runs `relay resume` in a tab.
 package ports
 
 import (
 	"context"
 	"io"
-	"time"
 )
 
 // Transport reaches a remote host. SSH is the default implementation.
@@ -16,9 +16,6 @@ type Transport interface {
 	ReadFile(ctx context.Context, path string) ([]byte, error)
 	WriteFile(ctx context.Context, path string, data []byte, mode string) error
 	Interactive(ctx context.Context, command string) error
-	// InteractiveCommand returns a local shell command that opens an interactive
-	// session running remoteCmd (for Viz present). Default SSH: "ssh -t HOST -- …".
-	InteractiveCommand(remoteCmd string) string
 }
 
 // DiagnosticSource is an optional capability for transports and their
@@ -89,132 +86,6 @@ type GateChoiceResolver interface {
 	ResolveGateChoice(ctx context.Context, t Transport, h PersistHandle, selectedOffset int) error
 }
 
-// SessionChrome is an optional persistence capability for applying durable
-// visual ownership cues. SessionService invokes it on create, adopt, and
-// named-session reuse so callers below the CLI layer receive the same chrome.
-type SessionChrome interface {
-	ApplyChrome(ctx context.Context, t Transport, h PersistHandle) error
-}
-
-// Layout describes how to present a session in a visual surface.
-type Layout struct {
-	Mode            string // "pair" | "remote" | "none"
-	Workspace       string // optional cmux workspace ref (e.g. workspace:2)
-	Pane            string // optional cmux pane ref — split relative to this pane
-	Tab             bool   // if true with Pane set, stack as a tab; default is side-by-side split
-	SourceSessionID string // lineage owner whose pane anchors this placement
-	SplitDirection  string // right for the first child; down for later siblings
-	ExplicitPlace   bool   // explicit workspace/pane flags disable sibling stacking
-}
-
-// Presentation identifies what an optional visualization service should
-// display. Geometry is deliberately absent: it belongs to user policy on the
-// visualization host.
-type Presentation struct {
-	SessionID       string `json:"session_id"`
-	ParentSessionID string `json:"parent_session_id,omitempty"`
-	Target          string `json:"target"`
-	TmuxName        string `json:"tmux_name"`
-	SSHHost         string `json:"ssh_host,omitempty"`
-	SSHUser         string `json:"ssh_user,omitempty"`
-	SSHPort         int    `json:"ssh_port,omitempty"`
-	// ProjectionRevision identifies an authority-requested presentation whose
-	// receipt may need recovery after a follower or bridge restart. Zero means
-	// the authority has not requested visualization for this session.
-	ProjectionRevision int64 `json:"projection_revision,omitempty"`
-}
-
-type ProjectionOp string
-
-const (
-	ProjectionUpsert ProjectionOp = "upsert"
-	ProjectionDelete ProjectionOp = "delete"
-	ProjectionFocus  ProjectionOp = "focus"
-)
-
-// ProjectionEvent is display-only state emitted by the authoritative host.
-// Revision is the durable visualization-stream sequence, not authority data.
-type ProjectionEvent struct {
-	V        int          `json:"v"`
-	Revision int64        `json:"stream_revision"`
-	Op       ProjectionOp `json:"op"`
-	Item     Presentation `json:"item"`
-}
-
-type ProjectionSink interface {
-	ApplyProjection(context.Context, ProjectionEvent) (surfaceRef string, err error)
-}
-
-// ProjectedSession is the authority-owned identity and lineage joined to a
-// visualization host's local surface. It is a read model, never authority.
-type ProjectedSession struct {
-	SessionID       string
-	ParentSessionID string
-	Target          string
-	TmuxName        string
-	Surface         string
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-}
-
-// ProjectionInventory is an optional Viz capability used on projection-only
-// hosts. Implementations must fail when current authority metadata is absent.
-type ProjectionInventory interface {
-	ProjectionSessions(context.Context) ([]ProjectedSession, error)
-}
-
-// ResumeTarget joins authority-resolved routing to an optional client-local
-// identity. Private key paths never cross the projection protocol.
-type ResumeTarget struct {
-	Host     string `json:"host"`
-	User     string `json:"user,omitempty"`
-	Port     int    `json:"port,omitempty"`
-	Identity string `json:"-"`
-}
-
-type ResumeResolver interface {
-	ResolveProjectedResume(context.Context, string, ResumeResolveOpts) (ResumeTarget, error)
-}
-
-type ResumeResolveOpts struct {
-	AllowOffline bool
-}
-
-// ResumeResolution is the broker-safe authority response. It carries public
-// connection coordinates, never credentials or key paths.
-type ResumeResolution struct {
-	SessionID string `json:"session_id"`
-	Target    string `json:"target"`
-	TmuxName  string `json:"tmux_name"`
-	SSHHost   string `json:"ssh_host"`
-	SSHUser   string `json:"ssh_user,omitempty"`
-	SSHPort   int    `json:"ssh_port,omitempty"`
-}
-
-type AuthoritySnapshot struct {
-	V        int            `json:"v"`
-	Revision int64          `json:"revision"`
-	Items    []Presentation `json:"items"`
-}
-
-// Viz presents sessions to a human. cmux is the default; may be a no-op.
-type Viz interface {
-	Kind() string
-	Available(ctx context.Context) bool
-	Present(ctx context.Context, sessionID, attachCmd string, layout Layout) (surfaceRef string, err error)
-	Focus(ctx context.Context, sessionID string) error
-	Close(ctx context.Context, sessionID string) error
-	Layout(ctx context.Context) (string, error)
-	// SaveRestorable snapshots live panes for restart restore (cmux Vault / manual).
-	// No-op adapters return (0, nil).
-	SaveRestorable(ctx context.Context) (saved int, err error)
-	// RestoreSaved re-attaches saved panes after cmux restart (manual path).
-	RestoreSaved(ctx context.Context) (restored int, err error)
-	// BrandLabels refreshes ◆ RELAY · <project> tab titles + workspace status
-	// pills (not workspace descriptions). labels maps session_id → project name.
-	BrandLabels(ctx context.Context, labels map[string]string) error
-}
-
 // Coord is the remote event/coordination bus (default: always-on relayd over SSH).
 type Coord interface {
 	Kind() string
@@ -225,32 +96,4 @@ type Coord interface {
 	// SensorCommand returns a remote shell command that emits kind for session
 	// (used by Persistence sensors). Validates session and kind defensively.
 	SensorCommand(session, kind string) (string, error)
-}
-
-// ManagedPane is one presenter-owned surface binding, as reported by
-// `relay pane list`.
-//
-// It lives here rather than in the cmux adapter because the CLI reads it
-// through a capability assertion on the Viz port. While the type was
-// cmux-specific, that assertion named the cmux package, so no second presenter
-// could ever satisfy it however completely it implemented the behaviour.
-type ManagedPane struct {
-	SessionID       string    `json:"session_id"`
-	SourceSessionID string    `json:"source_session_id,omitempty"`
-	PersistName     string    `json:"persist_name,omitempty"`
-	Target          string    `json:"target,omitempty"`
-	Surface         string    `json:"surface"`
-	Pane            string    `json:"pane,omitempty"`
-	Workspace       string    `json:"workspace,omitempty"`
-	Mode            string    `json:"mode,omitempty"`
-	State           string    `json:"state"` // live | disconnected
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
-}
-
-// PaneLister is the optional Viz capability behind `relay pane list`.
-// A presenter that can enumerate its surfaces implements it; one that cannot
-// is refused by name rather than silently returning nothing.
-type PaneLister interface {
-	ManagedPanes(ctx context.Context) ([]ManagedPane, error)
 }

@@ -22,7 +22,6 @@ import (
 type MaintenanceService struct {
 	Sessions     *SessionService
 	Reg          *Registry
-	Viz          ports.Viz
 	NewTransport TransportFactory
 }
 
@@ -39,12 +38,10 @@ type GCHostResult struct {
 
 // GCReport is the whole-sweep summary (terse by design — token-efficient output).
 type GCReport struct {
-	DryRun             bool           `json:"dry_run"`
-	Hosts              []GCHostResult `json:"hosts"`
-	PaneFilesRemoved   int            `json:"pane_files_removed"`
-	VizBindingsRemoved int            `json:"viz_bindings_removed"`
-	TombstonesPruned   int            `json:"tombstones_pruned"`
-	DanglingLineage    []string       `json:"dangling_lineage,omitempty"`
+	DryRun           bool           `json:"dry_run"`
+	Hosts            []GCHostResult `json:"hosts"`
+	TombstonesPruned int            `json:"tombstones_pruned"`
+	DanglingLineage  []string       `json:"dangling_lineage,omitempty"`
 }
 
 type channelStat struct {
@@ -62,23 +59,6 @@ func (m *MaintenanceService) GC(ctx context.Context, hosts []string, channelTTL 
 
 	if len(hosts) == 0 {
 		hosts = m.registryHosts()
-	}
-
-	// Local, zero-SSH: drop pane-state files for sessions already known dead
-	// (cleaned tombstones) so a later cmux restore can't resurrect them.
-	if !dryRun {
-		if entries, err := m.Sessions.ListResumeStatus(); err == nil {
-			for _, e := range entries {
-				if e.Presence == PresenceCleaned {
-					report.PaneFilesRemoved += RemovePaneBindingsForPersist(e.PersistName)
-					if cleaner, ok := m.Viz.(interface {
-						ClosePersist(context.Context, string) int
-					}); ok {
-						report.VizBindingsRemoved += cleaner.ClosePersist(ctx, e.PersistName)
-					}
-				}
-			}
-		}
 	}
 
 	// Per host: one probe SSH → reap dead sessions + GC stale channels.
@@ -190,12 +170,11 @@ func (m *MaintenanceService) gcHost(ctx context.Context, host string, channelTTL
 		if dryRun {
 			continue
 		}
-		if err := DeleteSessionProjected(ctx, m.Reg, m.Viz, s, false); err != nil {
+		if err := DeleteSession(ctx, m.Reg, s); err != nil {
 			res.HeldSessions = append(res.HeldSessions, s.Persist.Name)
 			continue
 		}
 		MarkResumeCleaned(s.Persist.Name, "gc: remote tmux absent")
-		RemovePaneBindingsForPersist(s.Persist.Name)
 	}
 
 	if skipChannels {
@@ -205,10 +184,6 @@ func (m *MaintenanceService) gcHost(ctx context.Context, host string, channelTTL
 	now := time.Now().Unix()
 	var toGC []string
 	for _, c := range channels {
-		if strings.HasPrefix(c.name, "relay-viz-") {
-			res.KeptChannels++
-			continue
-		}
 		stale := c.lines == 0 || (channelTTL > 0 && now-c.mtime > int64(channelTTL.Seconds()))
 		if stale {
 			res.GCedChannels = append(res.GCedChannels, c.name)

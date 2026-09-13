@@ -33,11 +33,6 @@ func RelayBin() string {
 	return "relay"
 }
 
-// ResumeLaunchCmd is the restorable pane command for cmux Vault / viz save.
-func ResumeLaunchCmd(persistName string) string {
-	return fmt.Sprintf("%s resume --session %s", RelayBin(), persistName)
-}
-
 // FindByPersistName returns the best matching local session for a tmux persist name.
 func (r *Registry) FindByPersistName(persistName, cwd string) (*Session, error) {
 	if err := shellquote.ValidateSessionName(persistName); err != nil {
@@ -75,7 +70,7 @@ func (r *Registry) FindByPersistName(persistName, cwd string) (*Session, error) 
 	return &cp, nil
 }
 
-// Resume re-attaches after cmux/SSH disconnect. Refuses cleaned sessions.
+// Resume re-attaches after an SSH disconnect. Refuses cleaned sessions.
 // Like sst: on transport drop (laptop sleep, wifi, Shared connection closed)
 // it waits and retries until a clean attach exit or Ctrl+C — it does not fall
 // through to a local shell while a binding exists.
@@ -86,16 +81,9 @@ func (s *SessionService) Resume(ctx context.Context, persistName, cwd string) er
 // ResumeOpts controls attach reconnect behavior.
 type ResumeOpts struct {
 	NoReconnect bool // disable retry loop (also RELAY_AUTO_RECONNECT=0)
-	// TargetHost is the projection-supplied host. It lets a Viz-only client
-	// reconnect without copying the authoritative session registry locally.
-	TargetHost     string
-	TargetUser     string
-	TargetPort     int
-	TargetIdentity string
-	// Explicit is true when the caller passed --session (pins pane history).
-	Explicit bool
-	// Surface overrides auto-detect for pane history stamping.
-	Surface            string
+	// TargetHost is the host a caller names (`--host`), which is how a tab in
+	// Forge or any terminal attaches without a local registry row.
+	TargetHost         string
 	BridgeLocalSocket  string
 	BridgeRemoteSocket string
 }
@@ -127,34 +115,9 @@ func (s *SessionService) ResumeOpts(ctx context.Context, persistName, cwd string
 	connRemote := remoteCWD
 	connHandle := handle
 
-	surface := strings.TrimSpace(opts.Surface)
-	if surface == "" {
-		surface, _ = CurrentSurface()
-	}
-	if surface != "" {
-		pin := opts.Explicit
-		if !pin {
-			// Bare resume from this pane still refreshes history so reconnect stays stable.
-			pin = true
-		}
-		localCWD, _ := os.Getwd()
-		RememberPanePersist(surface, connPersist, connHost, connRemote, firstNonEmpty(cwd, localCWD), pin)
-	}
-
 	t, err := s.NewTransport(connHost)
 	if err != nil {
 		return err
-	}
-	if opts.TargetHost != "" {
-		configured, ok := t.(interface {
-			ConfigureEndpoint(string, int, string) error
-		})
-		if !ok {
-			return fmt.Errorf("transport for %s cannot apply visualization endpoint policy", connHost)
-		}
-		if err := configured.ConfigureEndpoint(opts.TargetUser, opts.TargetPort, opts.TargetIdentity); err != nil {
-			return err
-		}
 	}
 	if opts.BridgeLocalSocket != "" && opts.BridgeRemoteSocket != "" {
 		if forwarder, ok := t.(ports.ReverseUnixForwarder); ok {
@@ -437,7 +400,7 @@ func FormatResumeError(err error) string {
 		return ""
 	}
 	if errors.Is(err, ErrResumeCleaned) {
-		return err.Error() + " — close the cmux pane; do not treat this as a disconnect"
+		return err.Error() + " — close this terminal; do not treat this as a disconnect"
 	}
 	return err.Error()
 }

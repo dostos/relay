@@ -39,18 +39,11 @@ func ConfigRoot() string {
 }
 
 func SessionsPath() string             { return filepath.Join(StateRoot(), "sessions.json") }
-func ProjectionOnlyMarkerPath() string { return filepath.Join(StateRoot(), ".viz-projection-only") }
-func AuthorityDeletionDir() string     { return filepath.Join(StateRoot(), "authority-deletions") }
 func AuthorityReceiptIndexDir() string { return filepath.Join(StateRoot(), "authority-receipts") }
 func CommandReceiptDir() string        { return filepath.Join(StateRoot(), "command-receipts") }
-func DeletedManagerDir() string        { return filepath.Join(StateRoot(), "deleted-managers") }
-func AuthorityReplacementPath() string {
-	return filepath.Join(StateRoot(), "authority-replacement.json")
-}
-func HomeServiceHealthPath() string { return filepath.Join(StateRoot(), "service-health.json") }
-func HomeServiceLockPath() string   { return filepath.Join(StateRoot(), "service.lock") }
-func HomeClientTokenPath() string   { return filepath.Join(StateRoot(), "home-client.token") }
-func HandoffsDir() string           { return filepath.Join(StateRoot(), "handoffs") }
+func HomeServiceHealthPath() string    { return filepath.Join(StateRoot(), "service-health.json") }
+func HomeServiceLockPath() string      { return filepath.Join(StateRoot(), "service.lock") }
+func HomeClientTokenPath() string      { return filepath.Join(StateRoot(), "home-client.token") }
 
 // DesktopBridgeSocketPath is where the authenticated command boundary listens,
 // and where a client dials it. RELAY_BRIDGE_SOCK overrides both ends together
@@ -67,8 +60,6 @@ func DesktopBridgeSocketPath() string {
 }
 func BridgeTokensDir() string     { return filepath.Join(StateRoot(), "bridge-tokens") }
 func BridgeIdentitiesDir() string { return filepath.Join(StateRoot(), "bridge-identities") }
-func ParentInboxDir() string      { return filepath.Join(StateRoot(), "parent-inbox") }
-func ParentWatchDir() string      { return filepath.Join(StateRoot(), "parent-watch") }
 func ProfileCacheDir() string {
 	return filepath.Join(StateRoot(), "hosts")
 }
@@ -94,7 +85,7 @@ func sanitizeID(s string) string {
 
 // EnsureStateDirs creates local state directories.
 func EnsureStateDirs() error {
-	for _, d := range []string{StateRoot(), HandoffsDir(), ProfileCacheDir(), PanesDir(), BridgeTokensDir(), BridgeIdentitiesDir(), ParentInboxDir(), ParentWatchDir(), AuthorityReceiptIndexDir(), CommandReceiptDir()} {
+	for _, d := range []string{StateRoot(), ProfileCacheDir(), BridgeTokensDir(), BridgeIdentitiesDir(), AuthorityReceiptIndexDir(), CommandReceiptDir()} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return err
 		}

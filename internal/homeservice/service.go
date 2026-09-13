@@ -19,7 +19,6 @@ import (
 	"github.com/dostos/relay/internal/coord"
 	coordrelayd "github.com/dostos/relay/internal/coord/relayd"
 	"github.com/dostos/relay/internal/core"
-	cmuxviz "github.com/dostos/relay/internal/viz/cmux"
 )
 
 const restartDelay = time.Second
@@ -81,9 +80,6 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	if err := core.EnsureStateDirs(); err != nil {
 		return err
-	}
-	if err := core.EnsureAuthorityWritable(); err != nil {
-		return fmt.Errorf("home authority unavailable: %w", err)
 	}
 	lockPath := s.LockPath
 	if lockPath == "" {
@@ -318,15 +314,13 @@ func runCommandBoundary(ctx context.Context, ready func(bool)) error {
 }
 
 // runCommandBoundaryOnly serves the authenticated command boundary WITHOUT the
-// cmux control loop.
+// control loop.
 //
 // The control loop's job is to push this socket out to remote tmux sessions
-// over ssh -R and to sync cmux acknowledgements. A host that owns the authority
-// but has neither cmux nor a reason to open ssh tunnels — a container, for
-// instance — needs the boundary and must not start the tunnels: they would be
-// unnecessary ssh churn on the fleet, and the ack sync would fail forever
-// against a cmux that is not there. Same socket, same authorization, one
-// component instead of two.
+// over ssh -R. A host that owns the authority but has no reason to open ssh
+// tunnels — a container, for instance — needs the boundary and must not start
+// the tunnels: they would be unnecessary ssh churn on the fleet. Same socket,
+// same authorization, one component instead of two.
 func runCommandBoundaryOnly(ctx context.Context, ready func(bool)) error {
 	return serveCommandBoundary(ctx, ready, false)
 }
@@ -357,10 +351,8 @@ func serveCommandBoundary(ctx context.Context, ready func(bool), withControl boo
 	}
 	controlReady := make(chan struct{}, 1)
 	app := cli.New()
-	viz := cmuxviz.New()
 	control := &controlbridge.Service{
 		Registry: app.Reg, BridgeSocket: sock, Stderr: os.Stderr,
-		AckSync: func(ctx context.Context) error { return viz.SyncAcks(ctx, app.Reg) },
 		Ready: func() {
 			select {
 			case controlReady <- struct{}{}:

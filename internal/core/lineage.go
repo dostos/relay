@@ -118,9 +118,6 @@ func loadBridgeIdentityForPersist(persistName string) (*BridgeIdentity, error) {
 }
 
 func rememberBridgeToken(sessionID, token string) error {
-	if err := EnsureAuthorityWritable(); err != nil {
-		return err
-	}
 	unlock, err := lockAuthorityWrite()
 	if err != nil {
 		return err
@@ -140,9 +137,6 @@ func forgetBridgeToken(sessionID string) {
 }
 
 func forgetBridgeTokenChecked(sessionID string) error {
-	if EnsureAuthorityWritable() != nil {
-		return EnsureAuthorityWritable()
-	}
 	unlock, err := lockAuthorityWrite()
 	if err != nil {
 		return err

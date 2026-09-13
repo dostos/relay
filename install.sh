@@ -140,12 +140,12 @@ echo "relay migration receipt: $RECEIPT"
 # unit needs root. A LaunchAgent does not, so this one is installed directly.
 SYSTEM_LABEL="com.dostos.relay-system"
 SYSTEM_PLIST="$HOME/Library/LaunchAgents/$SYSTEM_LABEL.plist"
-if [[ "$(uname -s)" == "Darwin" && ! -f "$STATE_ROOT/.viz-projection-only" ]]; then
+if [[ "$(uname -s)" == "Darwin" ]]; then
   mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
   sed -e "s|REPLACE_INSTALL_DIR|$INSTALL_DIR|g" -e "s|REPLACE_HOME|$HOME|g" \
     "$ROOT/share/launchd/$SYSTEM_LABEL.plist" > "$SYSTEM_PLIST"
-  # The same self-update guard the viz client uses, and for a sharper reason:
-  # this service is the command boundary, so an install triggered THROUGH it
+  # Self-update guard: this service is the command boundary, so an install
+  # triggered THROUGH it
   # would bootout the process running the install. The plist is refreshed
   # either way; only the restart is deferred to the caller.
   if [[ -z "${RELAY_SYSTEM_SELF_UPDATE:-}" ]]; then
@@ -156,28 +156,8 @@ if [[ "$(uname -s)" == "Darwin" && ! -f "$STATE_ROOT/.viz-projection-only" ]]; t
   echo "relay service: authoritative home service registered ($SYSTEM_LABEL)"
 fi
 
-# The optional Mac visualization client connects outbound to the authoritative
-# control host. It is installed only when owner config declares a control
-# target; home never needs inbound SSH access to the Mac.
-VIZ_CONFIG="${RELAY_CONFIG_DIR:-$HOME/.config/relay}/viz.json"
-VIZ_LABEL="com.dostos.relay-viz"
-VIZ_PLIST="$HOME/Library/LaunchAgents/$VIZ_LABEL.plist"
-if [[ "$(uname -s)" == "Darwin" && -f "$VIZ_CONFIG" ]] && grep -q '"control"' "$VIZ_CONFIG"; then
-  mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
-  sed -e "s|REPLACE_INSTALL_DIR|$INSTALL_DIR|g" -e "s|REPLACE_HOME|$HOME|g" \
-    "$ROOT/share/launchd/$VIZ_LABEL.plist" > "$VIZ_PLIST"
-  if [[ -z "${RELAY_VIZ_SELF_UPDATE:-}" ]]; then
-    launchctl bootout "gui/$(id -u)/$VIZ_LABEL" >/dev/null 2>&1 || true
-    launchctl bootstrap "gui/$(id -u)" "$VIZ_PLIST"
-    launchctl kickstart -k "gui/$(id -u)/$VIZ_LABEL"
-  fi
-  echo "relay viz: outbound client registered"
-fi
-
-# Relay's compact JSON + `next`/`argv` is the complete agent protocol. Remove
-# symlinks created by older installers, including the formerly auto-linked goal
-# helper; workspace agent instructions can point at `relay agent protocol`
-# without making a runtime-specific skill part of correctness.
+# Remove skill symlinks created by older installers; the delegation skill they
+# pointed at retired with the delegation verbs (2026-09-13).
 unlink_relay_skills() {
   local dst="$1"
   local name target
@@ -195,12 +175,3 @@ unlink_relay_skills "$HOME/.agents/skills"
 unlink_relay_skills "$HOME/.claude/skills"
 unlink_relay_skills "$HOME/.codex/skills"
 unlink_relay_skills "$HOME/.cursor/skills"
-
-# Register with cmux Vault so panes re-launch after cmux quit / Mac reboot.
-if command -v cmux >/dev/null 2>&1 || [[ -x /Applications/cmux.app/Contents/Resources/bin/cmux ]]; then
-  if "$INSTALL_DIR/relay" install-cmux-restore >/dev/null 2>&1; then
-    echo "cmux session restore: registered (relay install-cmux-restore)"
-  else
-    echo "relay: cmux restore registration skipped (non-fatal)" >&2
-  fi
-fi

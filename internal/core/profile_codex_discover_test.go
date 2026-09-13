@@ -25,7 +25,6 @@ func (m *matchTransport) RunStream(context.Context, string, string, io.Writer) e
 func (m *matchTransport) ReadFile(context.Context, string) ([]byte, error)           { return nil, nil }
 func (m *matchTransport) WriteFile(context.Context, string, []byte, string) error    { return nil }
 func (m *matchTransport) Interactive(context.Context, string) error                  { return nil }
-func (m *matchTransport) InteractiveCommand(remoteCmd string) string                 { return remoteCmd }
 
 func TestProbeAgentCatalogSuggestsCodexMultiAuthAccounts(t *testing.T) {
 	fa := &fakeAccounts{logins: `[{"backend":"codex","name":"Account 1 (a@example.com)","handle":"0","enabled":true,"usable":true},

@@ -10,7 +10,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -27,7 +26,6 @@ import (
 	localtransport "github.com/dostos/relay/internal/transport/local"
 	sshtransport "github.com/dostos/relay/internal/transport/ssh"
 	"github.com/dostos/relay/internal/ui"
-	"github.com/dostos/relay/internal/viz/cmux"
 )
 
 // App wires adapters and runs CLI commands.
@@ -42,44 +40,15 @@ type App struct {
 	Reg         *core.Registry
 	Coord       ports.Coord
 	Maint       *core.MaintenanceService
-	Viz         ports.Viz
 	JSON        bool
 	CompactJSON bool
 	tf          core.TransportFactory
 }
 
-// PresenterEnv selects which presenter backs the Viz port. cmux is the default
-// and the only one built in today; the variable exists so a second presenter
-// can be introduced without editing this constructor, and so an unknown value
-// fails loudly at startup instead of silently falling back to cmux.
-const PresenterEnv = "RELAY_PRESENTER"
-
-// newPresenter resolves the Viz adapter. An unrecognised name is a fatal
-// configuration error rather than a default: a user who asked for a presenter
-// that does not exist wants to hear about it, not to get the old one.
-func newPresenter() (ports.Viz, error) {
-	switch name := strings.TrimSpace(os.Getenv(PresenterEnv)); name {
-	case "", "cmux":
-		return cmux.New(), nil
-	default:
-		return nil, fmt.Errorf("unknown presenter %q in %s (known: cmux)", name, PresenterEnv)
-	}
-}
-
-// New constructs the default App (SSH + tmux + cmux + relayd coord).
+// New constructs the default App (SSH + tmux + relayd coord).
 func New() *App {
 	reg := &core.Registry{}
 	persist := tmux.New()
-	viz, vizErr := newPresenter()
-	if vizErr != nil {
-		ui.Warn(vizErr.Error())
-	}
-	// A presenter is a Viz first and a set of optional capabilities second.
-	// These two are discovered rather than required, so a presenter that cannot
-	// capture a screen or notify a mailbox still constructs -- the services
-	// that need them nil-check and degrade, which is what lets a second
-	// presenter exist before it is complete.
-	screen, _ := viz.(core.DesktopScreen)
 	coord := sshcoord.New()
 	localHostID := core.LocalHostIDFromProfile()
 	tf := func(hostID string) (ports.Transport, error) {
@@ -101,15 +70,12 @@ func New() *App {
 		Profiles:     profiles,
 		NewTransport: tf,
 		Persist:      persist,
-		Viz:          viz,
-		Screen:       screen,
 		Coord:        coord,
 	}
 	boot := &core.BootstrapService{NewTransport: tf}
 	auth := &core.AuthService{
 		Profiles:     profiles,
 		Sessions:     sessions,
-		Viz:          viz,
 		NewTransport: tf,
 		Accounts:     accounts,
 	}
@@ -134,8 +100,7 @@ func New() *App {
 		},
 		Reg:   reg,
 		Coord: coord,
-		Maint: &core.MaintenanceService{Sessions: sessions, Reg: reg, Viz: viz, NewTransport: tf},
-		Viz:   viz,
+		Maint: &core.MaintenanceService{Sessions: sessions, Reg: reg, NewTransport: tf},
 		tf:    tf,
 	}
 }
@@ -223,25 +188,6 @@ func (a *App) forwardThroughDesktopBridge(args []string) (int, bool) {
 			source = identity
 		}
 	}
-	if sock == "" && os.Getenv(bridge.LocalInvokeEnv) != "1" && core.ProjectionOnly() && !projectionClientCommandStaysLocal(args) {
-		forwarder, ok := a.Viz.(interface {
-			ForwardAuthorityCommand(context.Context, []string) (int, string, string, error)
-		})
-		if !ok {
-			return 0, false
-		}
-		code, stdout, stderr, err := forwarder.ForwardAuthorityCommand(context.Background(), args)
-		if stdout != "" {
-			fmt.Fprint(os.Stdout, stdout)
-		}
-		if stderr != "" {
-			fmt.Fprint(os.Stderr, stderr)
-		}
-		if err != nil {
-			return a.fail(err), true
-		}
-		return code, true
-	}
 	if sock == "" || os.Getenv(bridge.LocalInvokeEnv) == "1" {
 		return 0, false
 	}
@@ -264,36 +210,6 @@ func (a *App) forwardThroughDesktopBridge(args []string) (int, bool) {
 		ui.Warn(resp.Error)
 	}
 	return resp.ExitCode, true
-}
-
-func projectionClientCommandStaysLocal(args []string) bool {
-	filtered := make([]string, 0, len(args))
-	for _, arg := range args {
-		if arg != "--json" {
-			filtered = append(filtered, arg)
-		}
-	}
-	if len(filtered) == 0 {
-		return true
-	}
-	switch filtered[0] {
-	case "help", "-h", "--help", "version", "-V", "--version", "build", "targets", "doctor", "install-cmux-restore":
-		return true
-	case "resume":
-		return true
-	case "session", "sess":
-		return len(filtered) == 1 || filtered[1] == "list" || filtered[1] == "attach"
-	case "viz", "pane":
-		return len(filtered) == 1 || filtered[1] != "retire-control"
-	case "agent":
-		return len(filtered) > 1 && filtered[1] == "protocol"
-	case "host":
-		// ensure must run in the client binary (SSH from this vantage + current
-		// account-agent logic). Forwarding to an older desktop bridge loses the command.
-		return len(filtered) > 1 && filtered[1] == "ensure"
-	default:
-		return false
-	}
 }
 
 func commandNeedsLocalTTY(args []string) bool {
@@ -334,22 +250,6 @@ func sourceFromEnvironment(reg *core.Registry) (sessionID, hostID, persistName, 
 	return
 }
 
-func (a *App) locationForSource(sessionID string) (workspace, pane string) {
-	if sessionID == "" || a.Reg == nil || a.Viz == nil {
-		return "", ""
-	}
-	sess, err := a.Reg.GetSession(sessionID)
-	if err != nil || sess.VizSurfaceRef == "" {
-		return "", ""
-	}
-	if resolver, ok := a.Viz.(interface {
-		LocationForSurface(context.Context, string) (string, string)
-	}); ok {
-		return resolver.LocationForSurface(context.Background(), sess.VizSurfaceRef)
-	}
-	return "", ""
-}
-
 // Run dispatches argv (without program name).
 func (a *App) Run(args []string) int {
 	if len(args) == 0 {
@@ -381,9 +281,6 @@ func (a *App) Run(args []string) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if _, err := core.RecoverSessionDeletions(ctx, a.Reg, a.Viz); err != nil {
-		return a.fail(fmt.Errorf("recover session deletion: %w", err))
-	}
 	switch filtered[0] {
 	case "help", "-h", "--help":
 		return a.cmdHelp()
@@ -405,12 +302,8 @@ func (a *App) Run(args []string) int {
 		return a.cmdSession(ctx, filtered[1:])
 	case "client":
 		return a.cmdClient(filtered[1:])
-	case "viz", "pane":
-		return a.cmdViz(ctx, filtered[1:])
 	case "resume":
 		return a.cmdResume(ctx, filtered[1:])
-	case "install-cmux-restore":
-		return a.cmdInstallCmuxRestore()
 	case "doctor":
 		return a.cmdDoctor(ctx, filtered[1:])
 	default:
@@ -477,11 +370,11 @@ func (a *App) cmdClient(args []string) int {
 }
 
 func (a *App) cmdHelp() int {
-	fmt.Print(`relay — durable remote sessions (SSH/tmux/cmux are default adapters)
+	fmt.Print(`relay — durable remote sessions (SSH + tmux; Forge or any terminal attaches with relay resume)
 
 Usage:
   relay [--json] <command> ...
-  relay HOST NAME                    Open/create named tmux on HOST in this pane
+  relay HOST NAME                    Open/create named tmux on HOST and attach here
 
 New machine (ssh config → discover → init):
   relay targets                       List Host aliases from ~/.ssh/config (+ Include)
@@ -492,9 +385,6 @@ New machine (ssh config → discover → init):
                                       ccs:*/codex:* agents + their auth state
 
 Dev containers (declared under containers: in the remote host.yaml):
-  relay container open -H HOST --container NAME [--name TMUX] [--keep]
-                                      Up + tmux session inside it + cmux pane, in one command.
-                                      Ephemeral by default: removed when the session is destroyed.
   relay container up -H HOST --container NAME [--recreate] [--reprovision]
                                       devcontainer up + relay named volumes; provisions the toolkit
   relay container status|down -H HOST --container NAME
@@ -524,7 +414,7 @@ Agent auth (claude / cursor-agent / codex / ccs:<profile> / …):
                                       (confidence: live-probe | declared | local-expiry | none).
                                       Needs the agent-accounts CLI ($RELAY_AGENT_ACCOUNTS or PATH).
   relay auth login -H HOST --agent NAME
-                                      Pane + reassemble wrapped OAuth URL + open locally
+                                      Remote login session + reassemble wrapped OAuth URL + open locally
   relay auth url --session ID         Re-extract/open auth URL if the pane cropped it
   relay auth copy --from HOST --to HOST --agent NAME
                                       Copy known cred files between Linux hosts (when supported)
@@ -542,27 +432,11 @@ Sessions (explicit id; no guesswork):
   relay session exec ID -- CMD
   relay session resize ID
   relay session attach ID             Interactive (humans only)
-  relay session destroy ID [--keep-remote] [--keep-viz]
-                                      Also closes the presented cmux pane; --keep-viz leaves it.
+  relay session destroy ID [--keep-remote]
   relay session sensors ID [--silence SEC]   Reinstall quiet idle/exit hooks
 
-Visualization (optional cmux adapter):
-  relay pane list                     Session-keyed pane, workspace, parent, and liveness inventory
-  relay pane rename SESSION_ID NAME   Set a durable display alias; tmux identity is unchanged
-  relay viz present SESSION_ID [--workspace WS] [--pane PANE] [--tab]
-                                      First child splits right; later siblings stack downward.
-                                      --tab stacks in PANE; explicit placement overrides defaults.
-  relay viz brand                     Refresh ◆ RELAY · <project> tabs + workspace pills
-  relay viz focus SESSION_ID
-  relay viz close SESSION_ID          Retire just the pane (session destroy does this automatically)
-  relay viz layout
-  relay viz save                      Snapshot live relay panes for cmux restart
-  relay viz restore                   Re-attach saved panes after cmux restart
-
-cmux session restore (survive cmux quit / Mac reboot):
-  relay install-cmux-restore          Register vault agent (run by install.sh)
-  relay resume [--session NAME] [--host HOST] [--cwd DIR] [--no-reconnect]
-                                      Bare form uses this cmux pane's history.
+Attach (what a Forge tab, or any terminal, runs):
+  relay resume --session NAME [--host HOST] [--cwd DIR] [--no-reconnect]
                                       Re-attach; waits/retries on SSH drop (session frozen).
   relay resume list [--probe]               live | disconnected | cleaned
                                       --probe adds real remote tmux liveness
@@ -1256,25 +1130,15 @@ func (a *App) cmdNamed(ctx context.Context, host, name string) int {
 	} else {
 		opts.RemoteCWD = "~"
 	}
-	// Remember the registered identity before OpenNamed probes tmux. If the
-	// remote session died, OpenNamed replaces that registry record; its old
-	// cmux binding must not remain as a duplicate of the replacement pane.
-	var previousIDs []string
-	if sessions, listErr := a.Reg.ListSessions(); listErr == nil {
-		for _, candidate := range sessions {
-			if candidate.HostID == host && candidate.Persist.Name == name {
-				previousIDs = append(previousIDs, candidate.ID)
-			}
-		}
-	}
-	return a.openNamedAndPresent(ctx, opts, sourceID, previousIDs)
+	return a.openNamedAndAttach(ctx, opts)
 }
 
-// openNamedAndPresent opens (or adopts) the named session and puts it in front
-// of the user through cmux, exactly as `relay HOST NAME` does. Shared so a
-// container-backed open lands in the same pane, with the same resume and chrome
-// behaviour, instead of a second near-copy of this flow.
-func (a *App) openNamedAndPresent(ctx context.Context, opts core.CreateOpts, sourceID string, previousIDs []string) int {
+// openNamedAndAttach opens (or adopts) the named session and attaches to it in
+// this terminal — the same attach `relay resume` performs, so a human running
+// `relay HOST NAME` in Forge or any terminal lands in the pane. Invoked through
+// the bridge from inside a remote pane there is no terminal to attach, so the
+// session is reported with the command that attaches it.
+func (a *App) openNamedAndAttach(ctx context.Context, opts core.CreateOpts) int {
 	host := opts.HostID
 	sess, created, err := a.Sessions.OpenNamed(ctx, opts)
 	if err != nil {
@@ -1286,56 +1150,17 @@ func (a *App) openNamedAndPresent(ctx context.Context, opts core.CreateOpts, sou
 		}
 		return a.fail(err)
 	}
-	if forgetter, ok := a.Viz.(interface{ ForgetBinding(string) error }); ok {
-		for _, previousID := range previousIDs {
-			if previousID != sess.ID {
-				_ = forgetter.ForgetBinding(previousID)
-			}
-		}
-	}
-	if sourceID != "" && sourceID != sess.ID && !created {
-	}
 	if sess.Labels["adopted"] == "existing" {
 		ui.Warn("existing tmux adopted without relay bridge identity; use a new NAME for remote-to-remote relay commands")
 	}
-	launch := core.ResumeLaunchCmd(sess.Persist.Name)
-	if os.Getenv(bridge.LocalInvokeEnv) == "1" {
-		if a.Viz == nil || !a.Viz.Available(ctx) {
-			return a.fail(fmt.Errorf("cmux unavailable on desktop bridge"))
-		}
-		workspace, pane := a.locationForSource(sourceID)
-		ref, err := core.PresentSession(ctx, a.Viz, sess, launch, ports.Layout{
-			Mode: "remote", Workspace: workspace, Pane: pane, SourceSessionID: sourceID,
-		})
-		if err != nil {
-			return a.fail(err)
-		}
-		sess.VizSurfaceRef = ref
-		_ = a.Reg.PutSession(sess)
-		core.RememberResume(sess)
-		core.RememberPane(ref, sess, true)
-		_ = a.applySessionChrome(ctx, sess)
-		_ = a.brandAll(ctx)
+	attach := []string{"relay", "resume", "--session", sess.Persist.Name, "--host", host}
+	if os.Getenv(bridge.LocalInvokeEnv) == "1" || a.JSON {
 		a.JSON = true
 		return a.errOut(a.out(map[string]any{
-			"ok": true, "created": created, "session": sess, "surface": ref,
-			"source_session_id": sourceID,
+			"ok": true, "created": created, "session": sess, "attach": attach,
 		}))
 	}
-	if binder, ok := a.Viz.(interface {
-		BindCurrent(context.Context, string, string) (string, error)
-	}); ok && a.Viz.Available(ctx) {
-		if ref, bindErr := binder.BindCurrent(ctx, sess.ID, launch); bindErr == nil {
-			sess.VizSurfaceRef = ref
-			_ = a.Reg.PutSession(sess)
-			core.RememberPane(ref, sess, true)
-		} else if bindErr != nil {
-			ui.Warn("cmux current-pane binding failed: " + bindErr.Error())
-		}
-	}
-	_ = a.applySessionChrome(ctx, sess)
-	_ = a.brandAll(ctx)
-	return a.cmdResume(ctx, []string{"--session", sess.Persist.Name})
+	return a.cmdResume(ctx, []string{"--session", sess.Persist.Name, "--host", host})
 }
 
 func (a *App) cmdSession(ctx context.Context, args []string) int {
@@ -1346,9 +1171,6 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 	switch sub {
 	case "list":
 		list, err := a.Sessions.List()
-		if errors.Is(err, core.ErrProjectionOnlyAuthority) {
-			list, err = a.projectedSessions(ctx)
-		}
 		if err != nil {
 			return a.fail(err)
 		}
@@ -1370,23 +1192,8 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 		if err != nil {
 			return a.fail(err)
 		}
-		rebound := false
-		if a.Viz != nil && a.Viz.Available(ctx) && sess.VizSurfaceRef != "" {
-			if rebinder, ok := a.Viz.(interface {
-				RebindRenamedSession(context.Context, *core.Session, string) error
-			}); ok {
-				if err := rebinder.RebindRenamedSession(ctx, sess, core.ResumeLaunchCmd(sess.Persist.Name)); err != nil {
-					return a.fail(fmt.Errorf("tmux renamed to %q, but cmux rebind failed: %w", sess.Persist.Name, err))
-				}
-				rebound = true
-			}
-		}
-		if err := a.brandAll(ctx); err != nil {
-			return a.fail(err)
-		}
 		return a.errOut(a.out(map[string]any{
 			"ok": true, "session_id": sess.ID, "persist_name": sess.Persist.Name,
-			"display_name": core.SessionDisplayName(sess), "cmux_rebound": rebound,
 		}))
 	case "bridge":
 		if len(args) != 2 {
@@ -1547,25 +1354,16 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 			return a.fail(fmt.Errorf("session id required"))
 		}
 		keep := false
-		closeViz := true
 		for _, x := range args[2:] {
 			switch x {
 			case "--keep-remote":
 				keep = true
-			case "--keep-viz":
-				closeViz = false
 			default:
 				return a.fail(rejectUnknownFlag(x))
 			}
 		}
 		if err := a.Sessions.Destroy(ctx, args[1], keep); err != nil {
 			return a.fail(err)
-		}
-		// Retiring the session retires its presented pane too (exact bound
-		// surface, keyed by session_id — never any other pane). Best-effort:
-		// a headless/unbound session simply has no binding to close.
-		if closeViz && a.Viz != nil {
-			_ = a.Viz.Close(ctx, args[1])
 		}
 		return 0
 	case "sensors":
@@ -1594,29 +1392,6 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 	}
 }
 
-func (a *App) projectedSessions(ctx context.Context) ([]*core.Session, error) {
-	manager, ok := a.Viz.(ports.ProjectionInventory)
-	if !ok {
-		return nil, core.ErrProjectionOnlyAuthority
-	}
-	panes, err := manager.ProjectionSessions(ctx)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*core.Session, 0, len(panes))
-	for _, pane := range panes {
-		if pane.SessionID == "" {
-			continue
-		}
-		out = append(out, &core.Session{
-			ID: pane.SessionID, HostID: pane.Target, Persist: ports.PersistHandle{Kind: "tmux", Name: pane.TmuxName},
-			SourceSessionID: pane.ParentSessionID, VizSurfaceRef: pane.Surface,
-			Labels: map[string]string{"role": "projection", "authority": "home"}, CreatedAt: pane.CreatedAt, UpdatedAt: pane.UpdatedAt,
-		})
-	}
-	return out, nil
-}
-
 func afterDashDash(args []string) (string, bool) {
 	for i, a := range args {
 		if a == "--" {
@@ -1634,216 +1409,6 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
-}
-
-func (a *App) cmdViz(ctx context.Context, args []string) int {
-	if len(args) == 0 {
-		return a.fail(fmt.Errorf("viz subcommand required"))
-	}
-	if args[0] == "--help" || (len(args) > 1 && args[1] == "--help") {
-		fmt.Println("usage: relay viz list|retire-control")
-		return 0
-	}
-	if a.Viz == nil {
-		return a.fail(fmt.Errorf("viz adapter unavailable"))
-	}
-	if args[0] == "update" {
-		return a.cmdClient([]string{"update"})
-	}
-	// Pane inventory remains useful when cmux is stopped: persisted bindings
-	// are reported as disconnected instead of hidden.
-	if args[0] != "list" && !a.Viz.Available(ctx) {
-		return a.fail(fmt.Errorf("viz adapter unavailable (is cmux running?)"))
-	}
-	switch args[0] {
-	case "retire-control":
-		retirer, ok := a.Viz.(interface{ QueueControlRetirement() (int64, error) })
-		if !ok {
-			return a.fail(fmt.Errorf("viz adapter does not expose control retirement"))
-		}
-		seq, err := retirer.QueueControlRetirement()
-		if err != nil {
-			return a.fail(err)
-		}
-		a.JSON = true
-		return a.errOut(a.out(map[string]any{"ok": true, "seq": seq, "kind": "retire_control"}))
-	case "list":
-		manager, ok := a.Viz.(ports.PaneLister)
-		if !ok {
-			return a.fail(fmt.Errorf("viz adapter does not expose managed panes"))
-		}
-		panes, err := manager.ManagedPanes(ctx)
-		if err != nil {
-			return a.fail(err)
-		}
-		a.JSON = true
-		return a.errOut(a.out(map[string]any{"ok": true, "panes": panes}))
-	case "rename":
-		if len(args) != 3 {
-			return a.fail(fmt.Errorf("usage: relay pane rename SESSION_ID NAME"))
-		}
-		displayName := strings.TrimSpace(args[2])
-		if displayName == "" || len(displayName) > 64 || strings.ContainsAny(displayName, "\r\n\t") {
-			return a.fail(fmt.Errorf("invalid pane display name %q", args[2]))
-		}
-		sess, err := a.Reg.GetSession(args[1])
-		if err != nil {
-			return a.fail(err)
-		}
-		if sess.Labels == nil {
-			sess.Labels = map[string]string{}
-		}
-		sess.Labels[core.DisplayNameLabel] = displayName
-		if err := a.Reg.PutSession(sess); err != nil {
-			return a.fail(err)
-		}
-		if err := a.brandAll(ctx); err != nil {
-			return a.fail(err)
-		}
-		if _, err := a.Viz.SaveRestorable(ctx); err != nil {
-			return a.fail(err)
-		}
-		return a.errOut(a.out(map[string]any{
-			"ok": true, "session_id": sess.ID, "display_name": displayName,
-			"persist_name": sess.Persist.Name,
-		}))
-	case "layout":
-		out, err := a.Viz.Layout(ctx)
-		if err != nil {
-			return a.fail(err)
-		}
-		fmt.Print(out)
-		return 0
-	case "present":
-		if len(args) < 2 {
-			return a.fail(fmt.Errorf("session id required"))
-		}
-		sess, err := a.visualizationSession(ctx, args[1])
-		if err != nil {
-			return a.fail(err)
-		}
-		layout := ports.Layout{Mode: "remote"}
-		for i := 2; i < len(args); i++ {
-			switch args[i] {
-			case "--workspace":
-				if i+1 >= len(args) {
-					return a.fail(fmt.Errorf("--workspace requires a value"))
-				}
-				layout.Workspace = args[i+1]
-				i++
-			case "--pane":
-				if i+1 >= len(args) {
-					return a.fail(fmt.Errorf("--pane requires a value"))
-				}
-				layout.Pane = args[i+1]
-				i++
-			case "--tab":
-				layout.Tab = true
-			default:
-				return a.fail(rejectUnknownFlag(args[i]))
-			}
-		}
-		if layout.Tab && layout.Pane == "" {
-			return a.fail(fmt.Errorf("--tab requires --pane"))
-		}
-		launch := core.ResumeLaunchCmd(sess.Persist.Name)
-		ref, err := core.PresentSession(ctx, a.Viz, sess, launch, layout)
-		if err != nil {
-			return a.fail(err)
-		}
-		sess.VizSurfaceRef = ref
-		_ = a.Reg.PutSession(sess)
-		core.RememberResume(sess)
-		core.RememberPane(ref, sess, true)
-		_ = a.applySessionChrome(ctx, sess)
-		_ = a.brandAll(ctx)
-		return a.errOut(a.out(map[string]string{
-			"session_id": args[1],
-			"surface":    ref,
-			"launch":     launch,
-			"brand":      core.BrandTitle(sess.Persist.Name),
-		}))
-	case "brand":
-		if err := a.brandAll(ctx); err != nil {
-			return a.fail(err)
-		}
-		list, _ := a.Sessions.List()
-		for _, s := range list {
-			_ = a.applySessionChrome(ctx, s)
-		}
-		return a.errOut(a.out(map[string]any{"ok": true, "sessions": len(list)}))
-	case "focus":
-		if len(args) < 2 {
-			return a.fail(fmt.Errorf("session id required"))
-		}
-		sess, err := a.visualizationSession(ctx, args[1])
-		if err != nil {
-			return a.fail(err)
-		}
-		_, focusErr := core.ProjectSession(ctx, a.Viz, sess, ports.ProjectionFocus)
-		if focusErr != nil {
-			return a.fail(focusErr)
-		}
-		return 0
-	case "close":
-		if len(args) < 2 {
-			return a.fail(fmt.Errorf("session id required"))
-		}
-		sess, err := a.visualizationSession(ctx, args[1])
-		if err != nil {
-			return a.fail(err)
-		}
-		if err := a.Viz.Close(ctx, sess.ID); err != nil {
-			return a.fail(err)
-		}
-		return 0
-	case "save":
-		n, err := a.Viz.SaveRestorable(ctx)
-		if err != nil {
-			return a.fail(err)
-		}
-		return a.errOut(a.out(map[string]any{"ok": true, "saved": n}))
-	case "restore":
-		n, err := a.Viz.RestoreSaved(ctx)
-		if err != nil {
-			return a.fail(err)
-		}
-		return a.errOut(a.out(map[string]any{"ok": true, "restored": n}))
-	default:
-		return a.fail(fmt.Errorf("unknown viz subcommand %q", args[0]))
-	}
-}
-
-// visualizationSession resolves against the local projection when the Mac
-// has retired its authoritative registry. Visualization commands are local
-// cmux operations, so they must remain usable in projection-only mode while
-// durable control-plane mutations continue to fail closed.
-func (a *App) visualizationSession(ctx context.Context, ref string) (*core.Session, error) {
-	sess, err := a.Sessions.Get(ref)
-	if err == nil {
-		return sess, nil
-	}
-	if !core.ProjectionOnly() || !errors.Is(err, core.ErrProjectionOnlyAuthority) {
-		return nil, err
-	}
-
-	projected, projectionErr := a.projectedSessions(ctx)
-	if projectionErr != nil {
-		return nil, projectionErr
-	}
-	matches := make([]*core.Session, 0, 1)
-	for _, candidate := range projected {
-		if ref == candidate.ID || ref == candidate.Persist.Name || ref == candidate.HostID {
-			matches = append(matches, candidate)
-		}
-	}
-	if len(matches) == 0 {
-		return nil, fmt.Errorf("projected visualization session %q not found", ref)
-	}
-	if len(matches) > 1 {
-		return nil, fmt.Errorf("multiple projected visualization sessions match %q; use a session ID", ref)
-	}
-	return matches[0], nil
 }
 
 func (a *App) cmdResume(ctx context.Context, args []string) int {
@@ -1935,14 +1500,12 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 	}
 	var session, cwd, targetHost string
 	opts := core.ResumeOpts{}
-	offline := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--session", "-s":
 			i++
 			if i < len(args) {
 				session = args[i]
-				opts.Explicit = true
 			}
 		case "--cwd":
 			i++
@@ -1955,29 +1518,8 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 				targetHost = args[i]
 				opts.TargetHost = targetHost
 			}
-		case "--user":
-			i++
-			if i < len(args) {
-				opts.TargetUser = args[i]
-			}
-		case "--port":
-			i++
-			if i < len(args) {
-				port, err := strconv.Atoi(args[i])
-				if err != nil || port < 1 || port > 65535 {
-					return a.fail(fmt.Errorf("invalid resume port %q", args[i]))
-				}
-				opts.TargetPort = port
-			}
-		case "--identity":
-			i++
-			if i < len(args) {
-				opts.TargetIdentity = args[i]
-			}
 		case "--no-reconnect":
 			opts.NoReconnect = true
-		case "--offline":
-			offline = true
 		case "list":
 			return a.cmdResume(ctx, []string{"list"})
 		default:
@@ -1985,79 +1527,13 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 		}
 	}
 	if session == "" {
-		if targetHost != "" {
-			return a.fail(fmt.Errorf("--host requires --session"))
-		}
-		name, paneCWD, surface, err := core.ResolveResumeFromPane()
-		if err != nil {
-			return a.fail(fmt.Errorf("%w\nusage: relay resume [--session NAME] [--host HOST] [--cwd DIR] [--no-reconnect] [--offline]  |  relay resume list", err))
-		}
-		session = name
-		opts.Surface = surface
-		if cwd == "" {
-			cwd = paneCWD
-		}
-		ui.Note(fmt.Sprintf("pane %s → %s", surface, session))
-	}
-	if targetHost == "" && (opts.TargetUser != "" || opts.TargetPort != 0 || opts.TargetIdentity != "") {
-		return a.fail(fmt.Errorf("--user, --port, and --identity require --host"))
-	}
-	if offline && targetHost != "" {
-		return a.fail(fmt.Errorf("--offline cannot be combined with --host"))
-	}
-	projectionOnly := false
-	if targetHost == "" {
-		authorityErr := core.EnsureAuthorityReadable()
-		if authorityErr != nil && !errors.Is(authorityErr, core.ErrProjectionOnlyAuthority) {
-			return a.fail(authorityErr)
-		}
-		if errors.Is(authorityErr, core.ErrProjectionOnlyAuthority) {
-			projectionOnly = true
-			resolver, ok := a.Viz.(ports.ResumeResolver)
-			if !ok {
-				return a.fail(core.ErrProjectionOnlyAuthority)
-			}
-			target, err := resolver.ResolveProjectedResume(ctx, session, ports.ResumeResolveOpts{AllowOffline: offline})
-			if err != nil {
-				return a.fail(err)
-			}
-			opts.TargetHost, opts.TargetUser = target.Host, target.User
-			opts.TargetPort, opts.TargetIdentity = target.Port, target.Identity
-			targetHost = target.Host
-		}
-	}
-	if offline && !projectionOnly {
-		return a.fail(fmt.Errorf("--offline is only valid on a projection-only host"))
-	}
-	if opts.Surface == "" {
-		opts.Surface, _ = core.CurrentSurface()
-	}
-	var resumeSession *core.Session
-	if opts.Surface != "" && !projectionOnly {
-		if sess, findErr := a.Reg.FindByPersistName(session, cwd); findErr == nil {
-			resumeSession = sess
-			if binder, ok := a.Viz.(interface {
-				BindSurface(context.Context, string, string, string) (string, error)
-			}); ok && a.Viz.Available(ctx) {
-				if ref, bindErr := binder.BindSurface(ctx, sess.ID, core.ResumeLaunchCmd(sess.Persist.Name), opts.Surface); bindErr == nil {
-					opts.Surface = ref
-				} else {
-					ui.Warn("cmux pane rebind failed: " + bindErr.Error())
-				}
-			}
-			sess.VizSurfaceRef = opts.Surface
-			_ = a.Reg.PutSession(sess)
-			core.RememberPane(opts.Surface, sess, true)
-		}
+		return a.fail(fmt.Errorf("usage: relay resume --session NAME [--host HOST] [--cwd DIR] [--no-reconnect]  |  relay resume list|reap|prune"))
 	}
 	bridgeSessionID := ""
-	if !projectionOnly {
-		if sess, findErr := a.Reg.FindByPersistName(session, cwd); findErr == nil {
-			resumeSession = sess
-			bridgeSessionID = sess.ID
-		} else if entry, lookupErr := core.LookupResume(session); lookupErr == nil {
-			bridgeSessionID = entry.SessionID
-		}
+	if sess, findErr := a.Reg.FindByPersistName(session, cwd); findErr == nil {
+		bridgeSessionID = sess.ID
+	} else if entry, lookupErr := core.LookupResume(session); lookupErr == nil {
+		bridgeSessionID = entry.SessionID
 	}
 	if bridgeSessionID != "" {
 		localSocket, bridgeErr := ensureDesktopBridge(ctx)
@@ -2066,9 +1542,6 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 		}
 		opts.BridgeLocalSocket = localSocket
 		opts.BridgeRemoteSocket = core.BridgeRemoteSocket(bridgeSessionID)
-	}
-	if resumeSession != nil {
-		_ = a.applySessionChrome(ctx, resumeSession)
 	}
 	if err := a.Sessions.ResumeOpts(ctx, session, cwd, opts); err != nil {
 		msg := core.FormatResumeError(err)
@@ -2103,19 +1576,6 @@ func isUnknownResumeBinding(err error) bool {
 		strings.Contains(msg, "unknown session")
 }
 
-func (a *App) cmdInstallCmuxRestore() int {
-	path := cmux.DefaultCmuxJSONPath()
-	if err := cmux.InstallVaultAgent(path); err != nil {
-		return a.fail(err)
-	}
-	return a.errOut(a.out(map[string]any{
-		"ok":     true,
-		"config": path,
-		"agent":  "relay",
-		"hint":   "approve 'relay' under cmux Settings → Terminal → Resume Commands for auto-restore; or use relay viz save/restore",
-	}))
-}
-
 func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 	type check struct {
 		Name   string `json:"name"`
@@ -2127,7 +1587,6 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 		return a.fail(err)
 	}
 	var checks []check
-	projectionOnly := core.ProjectionOnly()
 	if _, err := exec.LookPath("ssh"); err != nil {
 		checks = append(checks, check{"ssh", false, err.Error()})
 	} else {
@@ -2138,25 +1597,13 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 	} else {
 		checks = append(checks, check{"git", true, ""})
 	}
-	cmuxOK := a.Viz != nil && a.Viz.Available(ctx)
-	detail := "optional"
-	if cmuxOK {
-		detail = "available"
-	}
-	checks = append(checks, check{"cmux_viz", cmuxOK, detail})
 	// The bridge result must reflect the ping. It used to be initialised true
 	// and only ever re-set true, so a dead bridge — which strands every remote
 	// agent's control path — still reported ok.
 	bridgeOK := false
 	bridgeDetail := "not running; remote agents cannot reach this control plane"
 	status, bridgeErr := (bridge.Client{SockPath: core.DesktopBridgeSocketPath()}).Status(ctx)
-	if projectionOnly {
-		bridgeOK = bridgeErr != nil
-		bridgeDetail = "legacy bridge retired; authority commands use home transport"
-		if bridgeErr == nil {
-			bridgeDetail = "legacy desktop bridge still running build " + status.Build
-		}
-	} else if bridgeErr == nil {
+	if bridgeErr == nil {
 		if status.Build == coord.Build {
 			bridgeOK = true
 			bridgeDetail = "running build " + status.Build
@@ -2191,36 +1638,6 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 	}
 	healthRaw, healthErr := os.ReadFile(core.HomeServiceHealthPath())
 	remoteHealth := false
-	if projectionOnly {
-		if inspector, ok := a.Viz.(interface{ ProjectionHealth() (bool, string) }); ok {
-			ok, detail := inspector.ProjectionHealth()
-			checks = append(checks, check{"viz_follower", ok, detail})
-		}
-		forwarder, ok := a.Viz.(interface {
-			ForwardAuthorityCommand(context.Context, []string) (int, string, string, error)
-		})
-		if !ok {
-			healthErr = fmt.Errorf("visualization adapter has no authority command transport")
-		} else {
-			code, stdout, stderr, err := forwarder.ForwardAuthorityCommand(ctx, []string{"service", "status"})
-			switch {
-			case err != nil:
-				healthErr = err
-			case code != 0:
-				healthErr = fmt.Errorf("remote service status exited %d: %s", code, strings.TrimSpace(stderr))
-			default:
-				var status struct {
-					OK     bool            `json:"ok"`
-					Health json.RawMessage `json:"health"`
-				}
-				if err := json.Unmarshal([]byte(stdout), &status); err != nil || !status.OK || len(status.Health) == 0 {
-					healthErr = fmt.Errorf("invalid remote service status")
-				} else {
-					healthRaw, healthErr, remoteHealth = status.Health, nil, true
-				}
-			}
-		}
-	}
 	if healthErr == nil {
 		healthErr = json.Unmarshal(healthRaw, &serviceHealth)
 	}
@@ -2255,43 +1672,6 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 	}
 	checks = append(checks, check{"legacy_authority_processes", legacyOK, legacyDetail})
 
-	// Checks for the failure class that cost hours today: things that look
-	// healthy while doing nothing. Each of these was invisible before.
-	if projectionOnly {
-		forwarder, ok := a.Viz.(interface {
-			ForwardAuthorityCommand(context.Context, []string) (int, string, string, error)
-		})
-		authorityOK, authorityDetail := false, "authority command transport unavailable"
-		if ok {
-			code, stdout, stderr, err := forwarder.ForwardAuthorityCommand(ctx, []string{"parent", "list"})
-			switch {
-			case err != nil:
-				authorityDetail = err.Error()
-			case code != 0:
-				authorityDetail = fmt.Sprintf("parent list exited %d: %s", code, strings.TrimSpace(stderr))
-			default:
-				var result struct {
-					OK bool `json:"ok"`
-				}
-				if err := json.Unmarshal([]byte(stdout), &result); err != nil {
-					authorityDetail = "invalid parent list response: " + err.Error()
-				} else {
-					authorityOK = result.OK
-					authorityDetail = "authenticated home command boundary reachable"
-				}
-			}
-		}
-		checks = append(checks, check{"authority_command", authorityOK, authorityDetail})
-	} else if a.Reg != nil {
-		if sessions, err := a.Reg.ListSessions(); err != nil {
-			checks = append(checks, check{"presentation_effects", false, "inspection failed: " + err.Error()})
-		} else if stale := staleQueuedPresentations(sessions, time.Now().UTC(), 5*time.Minute); len(stale) > 0 {
-			checks = append(checks, check{"presentation_effects", false,
-				"unacknowledged visualization requests: " + strings.Join(stale, ", ")})
-		} else {
-			checks = append(checks, check{"presentation_effects", true, "none stale"})
-		}
-	}
 	if host == "" {
 		// Not probed is not the same as broken. Failing here would make doctor
 		// always exit non-zero, which trains the reader to ignore it — and a
@@ -2339,7 +1719,7 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) int {
 	_ = a.out(map[string]any{
 		"ok": failed == 0, "failed": failed, "checks": checks,
 		"adapters": map[string]string{
-			"transport": "ssh", "persistence": "tmux", "viz": "cmux", "coord": "relayd",
+			"transport": "ssh", "persistence": "tmux", "coord": "relayd",
 		}})
 	return code
 }
@@ -2377,63 +1757,18 @@ func isLegacyAuthorityProcess(command string, argv []string) bool {
 	return command == "relay" && len(argv) >= 2 && argv[1] == "supervise"
 }
 
-func staleQueuedPresentations(sessions []*core.Session, now time.Time, after time.Duration) []string {
-	var stale []string
-	for _, session := range sessions {
-		if session == nil || !strings.HasPrefix(session.VizSurfaceRef, "viz:queued:") {
-			continue
-		}
-		queuedAt := session.UpdatedAt
-		if queuedAt.IsZero() {
-			queuedAt = session.CreatedAt
-		}
-		if queuedAt.IsZero() || now.Sub(queuedAt) < after {
-			continue
-		}
-		stale = append(stale, fmt.Sprintf("%s (%s, %dm)", session.ID, session.VizSurfaceRef, int(now.Sub(queuedAt).Minutes())))
-	}
-	sort.Strings(stale)
-	return stale
-}
-
-func (a *App) brandAll(ctx context.Context) error {
-	if a.Viz == nil {
-		return nil
-	}
-	list, err := a.Sessions.List()
-	if err != nil {
-		return err
-	}
-	labels := make(map[string]string, len(list))
-	for _, s := range list {
-		labels[s.ID] = core.SessionDisplayName(s)
-	}
-	return a.Viz.BrandLabels(ctx, labels)
-}
-
-func (a *App) applySessionChrome(ctx context.Context, sess *core.Session) error {
-	if sess == nil || a.tf == nil {
-		return nil
-	}
-	t, err := a.tf(sess.HostID)
-	if err != nil {
-		return err
-	}
-	return tmux.ApplyChrome(ctx, t, sess.Persist)
-}
-
 // cmdContainer manages relay-declared containers on a host: bringing a Dev
 // Containers workspace up with relay's named volumes injected, tearing it
 // down, and reporting whether it is running.
 func (a *App) cmdContainer(ctx context.Context, args []string) int {
-	usage := "usage: relay container up|open|down|status|stop|start -H HOST --container NAME [--name TMUX|INSTANCE] [--recreate] [--reprovision] [--keep]"
+	usage := "usage: relay container up|down|status|stop|start -H HOST --container NAME [--name INSTANCE] [--recreate] [--reprovision]"
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
 		fmt.Println(usage)
 		return 0
 	}
 	sub := args[0]
 	host, name, tmuxName := "", "", ""
-	recreate, reprovision, keep := false, false, false
+	recreate, reprovision := false, false
 	rest := args[1:]
 	for i := 0; i < len(rest); i++ {
 		switch rest[i] {
@@ -2456,8 +1791,6 @@ func (a *App) cmdContainer(ctx context.Context, args []string) int {
 			recreate = true
 		case "--reprovision":
 			reprovision = true
-		case "--keep":
-			keep = true
 		default:
 			return a.fail(rejectUnknownFlag(rest[i]))
 		}
@@ -2476,8 +1809,6 @@ func (a *App) cmdContainer(ctx context.Context, args []string) int {
 		err error
 	)
 	switch sub {
-	case "open":
-		return a.cmdContainerOpen(ctx, host, name, tmuxName, recreate, reprovision, keep)
 	case "up":
 		st, err = a.Containers.UpInstance(ctx, host, name, tmuxName, recreate, reprovision)
 	case "down":
@@ -2523,51 +1854,4 @@ func (a *App) cmdContainer(ctx context.Context, args []string) int {
 		fmt.Printf("  detail     %s\n", st.Detail)
 	}
 	return 0
-}
-
-// cmdContainerOpen is the single verb this workflow is meant to be driven by:
-// bring the devcontainer up on the host, open a tmux session whose shell runs
-// inside it, and put that pane in front of the user through cmux. The container
-// is ephemeral by default — torn down when the session is destroyed — because a
-// container nobody remembers starting is the one that is still running a week
-// later. --keep opts out for a long-lived runner.
-func (a *App) cmdContainerOpen(ctx context.Context, host, name, tmuxName string, recreate, reprovision, keep bool) int {
-	if a.Containers == nil {
-		return a.fail(fmt.Errorf("container service unavailable"))
-	}
-	st, err := a.Containers.Up(ctx, host, name, recreate, reprovision)
-	if err != nil {
-		return a.fail(err)
-	}
-	if !a.JSON {
-		ui.Note(fmt.Sprintf("%s up on %s (%s)", name, host, st.ContainerID))
-	}
-	if tmuxName == "" {
-		tmuxName = name
-	}
-	sourceID, sourceHost, sourcePersist, sourceRepo := sourceFromEnvironment(a.Reg)
-	opts := core.CreateOpts{
-		HostID:             host,
-		Name:               tmuxName,
-		Labels:             map[string]string{"role": "interactive", "agent": "human", "container": name},
-		SourceSessionID:    sourceID,
-		SourceHostID:       sourceHost,
-		SourcePersistName:  sourcePersist,
-		Container:          name,
-		ContainerEphemeral: !keep,
-	}
-	if sourceRepo != "" {
-		opts.RepoRef = sourceRepo
-	} else if root, err := findGitRoot(""); err == nil {
-		opts.RepoRef = root
-	}
-	var previousIDs []string
-	if sessions, listErr := a.Reg.ListSessions(); listErr == nil {
-		for _, candidate := range sessions {
-			if candidate.HostID == host && candidate.Persist.Name == tmuxName {
-				previousIDs = append(previousIDs, candidate.ID)
-			}
-		}
-	}
-	return a.openNamedAndPresent(ctx, opts, sourceID, previousIDs)
 }

@@ -25,41 +25,8 @@ type SessionService struct {
 	Profiles     *ProfileService
 	NewTransport TransportFactory
 	Persist      ports.Persistence
-	// Viz is the visualisation adapter. It is consulted only for sessions
-	// whose persistence is the viz itself (cmux panes), and may be nil.
-	Viz ports.Viz
-	// Screen is the optional desktop pane I/O capability. Control-plane send
-	// and capture use it without assigning communication ownership to Viz.
-	Screen DesktopScreen
 	// Coord is the host-local event service the tmux sensors emit through.
 	Coord ports.Coord
-}
-
-// ScreenCapturer is an optional Viz capability: reading a pane's visible text.
-//
-// Most sessions are tmux-backed, so their text comes from the persistence
-// adapter. A cmux pane has no tmux server behind it — asking tmux for it fails
-// with "no server running", naming a subsystem that was never involved.
-type ScreenCapturer interface {
-	CaptureScreen(ctx context.Context, sessionID string, lines int) (string, error)
-}
-
-// ScreenSender is the control-plane delivery capability for sessions whose
-// persistence is a desktop surface rather than tmux. Visualization may render
-// that surface, but message delivery remains a SessionService operation.
-type ScreenSender interface {
-	SendScreen(ctx context.Context, sessionID, text string, enter bool) error
-}
-
-type DesktopScreen interface {
-	ScreenCapturer
-	ScreenSender
-}
-
-func (s *SessionService) applyChrome(ctx context.Context, t ports.Transport, h ports.PersistHandle) {
-	if chrome, ok := s.Persist.(ports.SessionChrome); ok {
-		_ = chrome.ApplyChrome(ctx, t, h)
-	}
 }
 
 func newID(prefix string) string {
@@ -128,11 +95,10 @@ func (s *SessionService) OpenNamed(ctx context.Context, opts CreateOpts) (*Sessi
 			continue
 		}
 		if exists {
-			s.applyChrome(ctx, t, sess.Persist)
 			RememberResume(sess)
 			return sess, false, nil
 		}
-		if err := s.deleteLeafProjected(ctx, sess); err != nil {
+		if err := DeleteSession(ctx, s.Reg, sess); err != nil {
 			return nil, false, err
 		}
 	}
@@ -226,7 +192,6 @@ func (s *SessionService) Create(ctx context.Context, opts CreateOpts) (*Session,
 		forgetBridgeToken(sessionID)
 		return nil, err
 	}
-	s.applyChrome(ctx, t, h)
 	now := time.Now().UTC()
 	sess := &Session{
 		ID:                sessionID,
@@ -293,7 +258,6 @@ func (s *SessionService) Adopt(ctx context.Context, opts CreateOpts) (*Session, 
 	if !ok {
 		return nil, fmt.Errorf("tmux session %q not found on %s", safe, opts.HostID)
 	}
-	s.applyChrome(ctx, t, h)
 	now := time.Now().UTC()
 	labels := opts.Labels
 	if labels == nil {
@@ -423,9 +387,6 @@ func (s *SessionService) Rename(ctx context.Context, id, name string) (*Session,
 	if err := RenameResumePersist(old.Name, sess); err != nil {
 		return sess, fmt.Errorf("session renamed, but resume registry update failed: %w", err)
 	}
-	if _, err := RenamePaneBindingsForPersist(old.Name, sess); err != nil {
-		return sess, fmt.Errorf("session renamed, but pane history update failed: %w", err)
-	}
 	if _, err := s.ProvisionBridge(ctx, sess.ID); err != nil {
 		return sess, fmt.Errorf("session renamed, but bridge identity update failed: %w", err)
 	}
@@ -444,13 +405,6 @@ func (s *SessionService) Capture(ctx context.Context, id string, lines int) (str
 	if lines <= 0 {
 		lines = 50
 	}
-	if sess.Persist.Kind == LocalPersistKind {
-		capturer := s.Screen
-		if capturer == nil {
-			return "", fmt.Errorf("capture %s: cmux pane text is not readable through this viz adapter", id)
-		}
-		return capturer.CaptureScreen(ctx, sess.ID, lines)
-	}
 	return s.Persist.Capture(ctx, t, sess.Persist, lines)
 }
 
@@ -461,13 +415,6 @@ func (s *SessionService) Exists(ctx context.Context, id string) (bool, error) {
 	sess, err := s.Reg.GetSession(id)
 	if err != nil {
 		return false, err
-	}
-	if sess.Persist.Kind == LocalPersistKind {
-		_, err := s.Capture(ctx, id, 1)
-		if err != nil {
-			return false, err
-		}
-		return true, nil
 	}
 	t, err := s.transportFor(sess)
 	if err != nil {
@@ -484,13 +431,6 @@ func (s *SessionService) Send(ctx context.Context, id, text string, enter bool) 
 	t, err := s.transportFor(sess)
 	if err != nil {
 		return err
-	}
-	if sess.Persist.Kind == LocalPersistKind {
-		sender := s.Screen
-		if sender == nil {
-			return fmt.Errorf("send %s: desktop pane input is unavailable", id)
-		}
-		return sender.SendScreen(ctx, sess.ID, text, enter)
 	}
 	return s.Persist.Send(ctx, t, sess.Persist, text, enter)
 }
@@ -568,7 +508,7 @@ func (s *SessionService) Destroy(ctx context.Context, id string, keepRemote bool
 		if err != nil {
 			return err
 		}
-		err = DeleteSessionsProjected(ctx, s.Reg, s.Viz, []*Session{sess}, false, func() error {
+		err = DeleteSessions(ctx, s.Reg, []*Session{sess}, func() error {
 			if err := s.Persist.Destroy(ctx, t, sess.Persist); err != nil {
 				return err
 			}
@@ -579,13 +519,13 @@ func (s *SessionService) Destroy(ctx context.Context, id string, keepRemote bool
 			return err
 		}
 		s.reapEphemeralContainer(ctx, t, sess)
-		// Intentional teardown — cmux must not treat this as a reconnectable drop.
+		// Intentional teardown: the resume registry now holds a tombstone.
 		return nil
 	} else {
 		// Local unbound; remote kept → disconnected/resumable.
 		RememberResume(sess)
 	}
-	return deleteSessionsProjected(ctx, s.Reg, s.Viz, []*Session{sess}, false, nil, nil, false)
+	return DeleteSession(ctx, s.Reg, sess)
 }
 
 func (s *SessionService) ResolveGateChoice(ctx context.Context, id string, expected *SecurityGate, choiceIndex int) error {
@@ -664,7 +604,7 @@ func (s *SessionService) KillPersist(ctx context.Context, hostID, persistName st
 		}
 	}
 	if len(matching) > 0 {
-		if err := DeleteSessionsProjected(ctx, s.Reg, s.Viz, matching, false, func() error { return s.Persist.Destroy(ctx, t, h) }); err != nil {
+		if err := DeleteSessions(ctx, s.Reg, matching, func() error { return s.Persist.Destroy(ctx, t, h) }); err != nil {
 			return err
 		}
 	} else if err := s.Persist.Destroy(ctx, t, h); err != nil {
@@ -675,10 +615,6 @@ func (s *SessionService) KillPersist(ctx context.Context, hostID, persistName st
 		forgetBridgeToken(sess.ID)
 	}
 	return nil
-}
-
-func (s *SessionService) deleteLeafProjected(ctx context.Context, sess *Session) error {
-	return DeleteSessionProjected(ctx, s.Reg, s.Viz, sess, false)
 }
 
 // RemoteLiveness is the result of probing whether persist names actually have a

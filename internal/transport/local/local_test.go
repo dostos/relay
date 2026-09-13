@@ -99,15 +99,3 @@ func TestPathsAreShellExpanded(t *testing.T) {
 		t.Fatalf("tilde must expand to %q, got %q", home, stdout)
 	}
 }
-
-// The whole point of this transport: no ssh hop. Wrapping in "ssh -t local"
-// is what made every local session uncapturable.
-func TestInteractiveCommandDoesNotWrapInSSH(t *testing.T) {
-	got := New().InteractiveCommand("tmux attach -t x")
-	if strings.Contains(got, "ssh") {
-		t.Fatalf("a local interactive command must not shell out to ssh, got %q", got)
-	}
-	if !strings.Contains(got, "tmux attach -t x") {
-		t.Fatalf("the command must be preserved, got %q", got)
-	}
-}
