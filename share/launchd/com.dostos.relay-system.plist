@@ -18,7 +18,7 @@
                   It opens a tunnel ONLY for sessions that have a token in
                   $STATE/relay/bridge-tokens/ (internal/controlbridge/service.go
                   hasToken), so which sessions are reachable is decided by which
-                  tokens exist -- not by this file.
+                  tokens exist, not by this file.
 
   Use `relay service boundary` instead if you want the socket without any ssh
   tunnels (a container, or a host with no cmux).
