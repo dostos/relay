@@ -127,18 +127,25 @@ func (c *ContainerSpec) VolumeMounts() ([]VolumeMount, error) {
 
 // VolumeMount is a docker named volume bound at a container path.
 type VolumeMount struct {
-	Volume string `json:"volume"`
-	Target string `json:"target"`
+	Volume   string `json:"volume"`
+	Target   string `json:"target"`
+	ReadOnly bool   `json:"read_only,omitempty"`
 }
 
-// ParseVolumeMount reads a "NAME:/container/path" entry. The name must be a
-// docker volume name, never a host path — a bind mount belongs in `expose:`,
-// and silently accepting one here would create a directory on the host as root.
+// ParseVolumeMount reads a "NAME:/container/path[:ro]" entry. The name must be
+// a docker volume name, never a host path — a bind mount belongs in `expose:`
+// (or a session's --bind for an image-backed container), and silently
+// accepting one here would create a directory on the host as root.
 func ParseVolumeMount(raw string) (VolumeMount, error) {
 	s := strings.TrimSpace(raw)
+	ro := false
+	if strings.HasSuffix(s, ":ro") {
+		ro = true
+		s = strings.TrimSuffix(s, ":ro")
+	}
 	i := strings.Index(s, ":")
 	if i <= 0 || i == len(s)-1 {
-		return VolumeMount{}, fmt.Errorf("volume %q must be NAME:/container/path", raw)
+		return VolumeMount{}, fmt.Errorf("volume %q must be NAME:/container/path[:ro]", raw)
 	}
 	name, target := s[:i], s[i+1:]
 	if strings.ContainsAny(name, "/~.") {
@@ -147,7 +154,10 @@ func ParseVolumeMount(raw string) (VolumeMount, error) {
 	if !strings.HasPrefix(target, "/") {
 		return VolumeMount{}, fmt.Errorf("volume target %q must be absolute", target)
 	}
-	return VolumeMount{Volume: name, Target: target}, nil
+	if strings.Contains(target, ":") {
+		return VolumeMount{}, fmt.Errorf("volume target %q must not contain ':' (only a trailing :ro is understood)", target)
+	}
+	return VolumeMount{Volume: name, Target: target, ReadOnly: ro}, nil
 }
 
 // DevcontainerUpCommand builds the host-side `devcontainer up` invocation.
@@ -192,8 +202,11 @@ func DevcontainerUpCommand(c *ContainerSpec, removeExisting bool) (string, error
 		return "", err
 	}
 	for _, m := range mounts {
-		args = append(args, "--mount",
-			shellquote.Quote(fmt.Sprintf("type=volume,source=%s,target=%s", m.Volume, m.Target)))
+		spec := fmt.Sprintf("type=volume,source=%s,target=%s", m.Volume, m.Target)
+		if m.ReadOnly {
+			spec += ",readonly"
+		}
+		args = append(args, "--mount", shellquote.Quote(spec))
 	}
 	for _, name := range c.Env {
 		if err := validateEnvName(name); err != nil {
@@ -373,11 +386,156 @@ type ContainerStatus struct {
 	HostID      string `json:"host_id"`
 	IDLabel     string `json:"id_label"`
 	ContainerID string `json:"container_id,omitempty"`
-	Running     bool   `json:"running"`
-	User        string `json:"user,omitempty"`
-	Toolkit     string `json:"toolkit,omitempty"`
-	Home        string `json:"home,omitempty"`
-	Detail      string `json:"detail,omitempty"`
+	// Instance is the docker container name of an image-backed instance
+	// (spec name, or spec-session). Empty for the other kinds.
+	Instance string `json:"instance,omitempty"`
+	Running  bool   `json:"running"`
+	// Present is false when an image-backed instance does not exist at all,
+	// which is a different fact from "exists and is stopped".
+	Present bool `json:"present"`
+	// ExitCode is the container's last exit code (image-backed, not running).
+	ExitCode int    `json:"exit_code,omitempty"`
+	User     string `json:"user,omitempty"`
+	Toolkit  string `json:"toolkit,omitempty"`
+	Home     string `json:"home,omitempty"`
+	Detail   string `json:"detail,omitempty"`
+}
+
+// ImageUp brings an instance of an image-backed spec up over t and finishes
+// it the way a devcontainer is finished: the relay volumes made writable by
+// the exec user, the toolkit provisioned once. Shared by `container up` and by
+// `session create --container X` on an image-backed spec, so both paths land
+// in the same state.
+func ImageUp(ctx context.Context, t ports.Transport, hostID string, inst ImageInstance, recreate, forceProvision bool) (*ContainerStatus, error) {
+	spec := inst.Spec
+	if inst.Name == "" {
+		inst.Name = spec.Name
+	}
+	st := &ContainerStatus{Name: spec.Name, HostID: hostID, IDLabel: spec.ResolvedIDLabel(), Instance: inst.Name}
+	upCmd, err := ImageUpCommand(inst, recreate)
+	if err != nil {
+		return nil, err
+	}
+	out, errOut, runErr := t.Run(ctx, "", upCmd)
+	combined := strings.TrimSpace(out + "\n" + errOut)
+	if runErr != nil {
+		if strings.Contains(combined, "Unable to find image") || strings.Contains(combined, "pull access denied") {
+			return nil, fmt.Errorf("image %s is not available on %s: pull it there first\n--- output ---\n%s", spec.Image, hostID, combined)
+		}
+		return nil, fmt.Errorf("container up failed on %s: %w\n--- output ---\n%s", hostID, runErr, combined)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	st.ContainerID = strings.TrimSpace(lines[len(lines)-1])
+	if len(lines) >= 2 {
+		st.Detail = strings.TrimSpace(lines[len(lines)-2])
+	}
+	if st.ContainerID == "" {
+		return nil, fmt.Errorf("container up on %s reported no container id\n--- output ---\n%s", hostID, combined)
+	}
+	st.Running, st.Present = true, true
+	if spec.Toolkit != nil {
+		st.Toolkit = spec.Toolkit.Volume
+	}
+	if spec.Home != nil {
+		st.Home = spec.Home.Volume
+	}
+	st.User = spec.User
+	prep, err := ContainerPrepareCommand(spec, inst.Name, st.User)
+	if err != nil {
+		return nil, err
+	}
+	if prep != "" {
+		pOut, pErr, pRunErr := t.Run(ctx, "", prep)
+		if pRunErr != nil {
+			return nil, fmt.Errorf("could not make the relay volumes writable by %s in %s: %w\n--- output ---\n%s",
+				st.User, inst.Name, pRunErr, strings.TrimSpace(pOut+"\n"+pErr))
+		}
+	}
+	if spec.Toolkit != nil && spec.Toolkit.Provision != "" {
+		ref := spec.RefFor(inst.Name, "")
+		provCmd, err := ToolkitProvisionCommand(spec, ref, forceProvision)
+		if err != nil {
+			return nil, err
+		}
+		pOut, pErr, pRunErr := t.Run(ctx, "", provCmd)
+		pCombined := strings.TrimSpace(pOut + "\n" + pErr)
+		if pRunErr != nil {
+			return nil, fmt.Errorf("toolkit provision failed in %s: %w\n--- output ---\n%s", inst.Name, pRunErr, pCombined)
+		}
+		if d := firstLine(pCombined); d != "" {
+			st.Detail = d
+		}
+	}
+	st.OK = true
+	return st, nil
+}
+
+// imageStatus reads one instance's state.
+func imageStatus(ctx context.Context, t ports.Transport, hostID string, spec *ContainerSpec, instance string) (*ContainerStatus, error) {
+	st := &ContainerStatus{OK: true, Name: spec.Name, HostID: hostID, IDLabel: spec.ResolvedIDLabel(), Instance: instance, User: spec.User}
+	if spec.Toolkit != nil {
+		st.Toolkit = spec.Toolkit.Volume
+	}
+	if spec.Home != nil {
+		st.Home = spec.Home.Volume
+	}
+	out, _, err := t.Run(ctx, "", ImageStatusCommand(spec, instance))
+	if err != nil {
+		st.Detail = err.Error()
+		return st, nil
+	}
+	running, code, id, present := parseImageStatus(out)
+	st.Running, st.ExitCode, st.ContainerID, st.Present = running, code, id, present
+	if !present {
+		st.Detail = "absent"
+	}
+	return st, nil
+}
+
+// Stop pauses a container without removing it; Start resumes it. For an
+// image-backed spec, instance selects which session's container (empty means
+// the spec's own). A devcontainer has exactly one container, found by label.
+func (s *ContainerService) Stop(ctx context.Context, hostID, name, instance string) (*ContainerStatus, error) {
+	return s.stopStart(ctx, hostID, name, instance, "stop")
+}
+
+func (s *ContainerService) Start(ctx context.Context, hostID, name, instance string) (*ContainerStatus, error) {
+	return s.stopStart(ctx, hostID, name, instance, "start")
+}
+
+func (s *ContainerService) stopStart(ctx context.Context, hostID, name, instance, verb string) (*ContainerStatus, error) {
+	t, spec, err := s.resolve(ctx, hostID, name)
+	if err != nil {
+		return nil, err
+	}
+	target := ""
+	switch {
+	case spec.ImageBacked():
+		target = spec.InstanceName(instance)
+	case spec.Devcontainer != nil:
+		out, _, rerr := t.Run(ctx, "", fmt.Sprintf("%s ps -aq --filter %s", spec.RuntimeVerb(), shellquote.Quote("label="+spec.ResolvedIDLabel())))
+		if rerr != nil {
+			return nil, fmt.Errorf("resolve devcontainer %s on %s: %w", name, hostID, rerr)
+		}
+		target = firstLine(out)
+		if target == "" {
+			return nil, fmt.Errorf("no container carries label %s on %s", spec.ResolvedIDLabel(), hostID)
+		}
+	default:
+		target = spec.Container
+	}
+	cmd := ImageStopCommand(spec, target)
+	if verb == "start" {
+		cmd = ImageStartCommand(spec, target)
+	}
+	out, errOut, runErr := t.Run(ctx, "", cmd)
+	if runErr != nil {
+		return nil, fmt.Errorf("container %s failed on %s: %w\n%s", verb, hostID, runErr, strings.TrimSpace(out+"\n"+errOut))
+	}
+	if spec.ImageBacked() {
+		return imageStatus(ctx, t, hostID, spec, target)
+	}
+	return s.Status(ctx, hostID, name)
 }
 
 func (s *ContainerService) resolve(ctx context.Context, hostID, name string) (ports.Transport, *ContainerSpec, error) {
@@ -433,11 +591,27 @@ func parseDevcontainerOutcome(out string) (devcontainerOutcome, bool) {
 // Up brings the devcontainer up and populates the toolkit volume. It returns
 // the resolved container id so downstream verbs can `docker exec` into it.
 func (s *ContainerService) Up(ctx context.Context, hostID, name string, removeExisting, forceProvision bool) (*ContainerStatus, error) {
+	return s.UpInstance(ctx, hostID, name, "", removeExisting, forceProvision)
+}
+
+// UpInstance is Up with an instance name, which only an image-backed spec
+// uses; for the other kinds a non-empty instance is refused rather than
+// silently ignored.
+func (s *ContainerService) UpInstance(ctx context.Context, hostID, name, instance string, removeExisting, forceProvision bool) (*ContainerStatus, error) {
 	t, spec, err := s.resolve(ctx, hostID, name)
 	if err != nil {
 		return nil, err
 	}
-	st := &ContainerStatus{Name: name, HostID: hostID, IDLabel: spec.ResolvedIDLabel()}
+	if spec.ImageBacked() {
+		return ImageUp(ctx, t, hostID, ImageInstance{Spec: spec, Name: spec.InstanceName(instance)}, removeExisting, forceProvision)
+	}
+	if instance != "" {
+		return nil, fmt.Errorf("container %q is not image-backed; --name applies only to image: containers", name)
+	}
+	if spec.Devcontainer == nil {
+		return nil, fmt.Errorf("container %q declares container: only — it is managed outside relay, nothing to bring up", name)
+	}
+	st := &ContainerStatus{Name: name, HostID: hostID, IDLabel: spec.ResolvedIDLabel(), Present: true}
 	upCmd, err := DevcontainerUpCommand(spec, removeExisting)
 	if err != nil {
 		return nil, err
@@ -516,9 +690,30 @@ func (s *ContainerService) Up(ctx context.Context, hostID, name string, removeEx
 // Down removes the container. The named volumes survive by design: the toolkit
 // and the agent's $HOME are the state worth keeping across a recreate.
 func (s *ContainerService) Down(ctx context.Context, hostID, name string) (*ContainerStatus, error) {
+	return s.DownInstance(ctx, hostID, name, "")
+}
+
+// DownInstance removes one instance of an image-backed spec (or the whole
+// devcontainer when instance is empty and the spec is not image-backed).
+func (s *ContainerService) DownInstance(ctx context.Context, hostID, name, instance string) (*ContainerStatus, error) {
 	t, spec, err := s.resolve(ctx, hostID, name)
 	if err != nil {
 		return nil, err
+	}
+	if spec.ImageBacked() {
+		inst := spec.InstanceName(instance)
+		out, errOut, runErr := t.Run(ctx, "", ImageDownCommand(spec, inst))
+		if runErr != nil {
+			return nil, fmt.Errorf("container down failed on %s: %w\n%s", hostID, runErr, strings.TrimSpace(out+"\n"+errOut))
+		}
+		return &ContainerStatus{OK: true, Name: name, HostID: hostID, IDLabel: spec.ResolvedIDLabel(),
+			Instance: inst, Running: false, Present: false, Detail: firstLine(out)}, nil
+	}
+	if instance != "" {
+		return nil, fmt.Errorf("container %q is not image-backed; --name applies only to image: containers", name)
+	}
+	if spec.Devcontainer == nil {
+		return nil, fmt.Errorf("container %q declares container: only — it is managed outside relay, nothing to take down", name)
 	}
 	out, errOut, runErr := t.Run(ctx, "", DevcontainerDownCommand(spec))
 	if runErr != nil {
@@ -533,11 +728,22 @@ func (s *ContainerService) Down(ctx context.Context, hostID, name string) (*Cont
 
 // Status reports whether the declared container is currently running.
 func (s *ContainerService) Status(ctx context.Context, hostID, name string) (*ContainerStatus, error) {
+	return s.StatusInstance(ctx, hostID, name, "")
+}
+
+// StatusInstance is Status for one instance of an image-backed spec.
+func (s *ContainerService) StatusInstance(ctx context.Context, hostID, name, instance string) (*ContainerStatus, error) {
 	t, spec, err := s.resolve(ctx, hostID, name)
 	if err != nil {
 		return nil, err
 	}
-	st := &ContainerStatus{OK: true, Name: name, HostID: hostID, IDLabel: spec.ResolvedIDLabel()}
+	if spec.ImageBacked() {
+		return imageStatus(ctx, t, hostID, spec, spec.InstanceName(instance))
+	}
+	if instance != "" {
+		return nil, fmt.Errorf("container %q is not image-backed; --name applies only to image: containers", name)
+	}
+	st := &ContainerStatus{OK: true, Name: name, HostID: hostID, IDLabel: spec.ResolvedIDLabel(), Present: true}
 	if spec.Toolkit != nil {
 		st.Toolkit = spec.Toolkit.Volume
 	}

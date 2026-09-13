@@ -84,6 +84,20 @@ type CreateOpts struct {
 	Container string
 	// ContainerEphemeral ties the container's lifetime to this session.
 	ContainerEphemeral bool
+	// The rest apply only when Container names an image-backed spec, whose
+	// instance this session brings up itself: extra named volumes
+	// (NAME:/path[:ro]), host bind mounts (/abs:/path[:ro]), a GPU device
+	// list or all|none, and a docker network. On any other kind they are
+	// refused, because there is no per-session container to apply them to.
+	ContainerVolumes []string
+	ContainerBinds   []string
+	ContainerGPUs    string
+	ContainerNetwork string
+}
+
+// hasContainerExtras reports whether any per-instance option was given.
+func (o CreateOpts) hasContainerExtras() bool {
+	return len(o.ContainerVolumes) > 0 || len(o.ContainerBinds) > 0 || o.ContainerGPUs != "" || o.ContainerNetwork != ""
 }
 
 // OpenNamed returns the existing host/name session or creates it. A remote
@@ -186,6 +200,9 @@ func (s *SessionService) Create(ctx context.Context, opts CreateOpts) (*Session,
 	}
 	var cref *ContainerRef
 	if opts.Container != "" {
+		// The sanitized name is what an image-backed instance is named after,
+		// so the container and the tmux session agree on it.
+		opts.Name = name
 		ref, cerr := resolveSessionContainer(ctx, t, profile, opts)
 		if cerr != nil {
 			forgetBridgeToken(sessionID)
@@ -894,7 +911,26 @@ func resolveSessionContainer(ctx context.Context, t ports.Transport, profile *Ho
 	if err != nil {
 		return nil, err
 	}
+	if opts.hasContainerExtras() && !spec.ImageBacked() {
+		return nil, fmt.Errorf("container %q is not image-backed: --volume/--bind/--gpus/--network apply only to image: containers, whose instance the session brings up itself", spec.Name)
+	}
 	id := spec.Container
+	if spec.ImageBacked() {
+		inst := ImageInstance{
+			Spec:    spec,
+			Name:    spec.InstanceName(opts.Name),
+			Volumes: opts.ContainerVolumes,
+			Binds:   opts.ContainerBinds,
+			GPUs:    opts.ContainerGPUs,
+			Network: opts.ContainerNetwork,
+		}
+		if _, uerr := ImageUp(ctx, t, opts.HostID, inst, false, false); uerr != nil {
+			return nil, uerr
+		}
+		// The instance is addressed by name, not id: the name survives a
+		// stop/start and is what every later exec, status and teardown uses.
+		id = inst.Name
+	}
 	if spec.Devcontainer != nil {
 		out, _, rerr := t.Run(ctx, "", DevcontainerResolveCommand(spec))
 		if rerr != nil {
@@ -939,7 +975,13 @@ func (s *SessionService) reapEphemeralContainer(ctx context.Context, t ports.Tra
 	if err != nil {
 		return
 	}
-	if _, _, err := t.Run(ctx, "", DevcontainerDownCommand(spec)); err != nil {
-		ui.Warn(fmt.Sprintf("ephemeral container %s left running on %s: %v", spec.Name, sess.HostID, err))
+	down := DevcontainerDownCommand(spec)
+	if spec.ImageBacked() {
+		// Only this session's instance; another session's instance of the
+		// same spec is its own to reap.
+		down = ImageDownCommand(spec, sess.Container.Ref)
+	}
+	if _, _, err := t.Run(ctx, "", down); err != nil {
+		ui.Warn(fmt.Sprintf("ephemeral container %s left running on %s: %v", sess.Container.Ref, sess.HostID, err))
 	}
 }

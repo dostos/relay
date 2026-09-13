@@ -105,8 +105,16 @@ type ContainerSpec struct {
 	// Home is a named volume that becomes $HOME for in-container agent execs,
 	// so agent credentials and config survive container recreation.
 	Home *HomeSpec `yaml:"home,omitempty" json:"home,omitempty"`
-	// Volumes are extra named volume mounts, each "NAME:/container/path".
+	// Volumes are extra named volume mounts, each "NAME:/container/path[:ro]".
 	Volumes []string `yaml:"volumes,omitempty" json:"volumes,omitempty"`
+
+	// GPU and Network apply to an image-backed container (`image:` set,
+	// no `devcontainer:`), which relay runs itself: GPU is all | none | a
+	// device list "0,1"; Network is docker's --network value. A session may
+	// override both per instance. A devcontainer declares gpu under its own
+	// block, because the devcontainer CLI owns that flag.
+	GPU     string `yaml:"gpu,omitempty" json:"gpu,omitempty"`
+	Network string `yaml:"network,omitempty" json:"network,omitempty"`
 }
 
 // RefFor builds the exec binding for a resolved container id, carrying the

@@ -24,6 +24,7 @@ import (
 	"github.com/dostos/relay/internal/core"
 	"github.com/dostos/relay/internal/persist/tmux"
 	"github.com/dostos/relay/internal/ports"
+	"github.com/dostos/relay/internal/shellquote"
 	localtransport "github.com/dostos/relay/internal/transport/local"
 	sshtransport "github.com/dostos/relay/internal/transport/ssh"
 	"github.com/dostos/relay/internal/ui"
@@ -1303,6 +1304,79 @@ func (a *App) errOut(err error) int {
 	return 0
 }
 
+// parseSessionCreateArgs reads `session create` flags after -H. A trailing
+// `-- ARGV…` is the pane's inner command — for a container session it runs
+// inside the container, so a worker's entrypoint is what the pane shows —
+// and the container extras (--volume, --bind, --gpus, --network) are refused
+// by core unless the container is image-backed.
+func parseSessionCreateArgs(host string, rest []string) (core.CreateOpts, error) {
+	opts := core.CreateOpts{HostID: host}
+	need := func(i int, flag string) (string, error) {
+		if i+1 >= len(rest) {
+			return "", fmt.Errorf("%s requires a value", flag)
+		}
+		return rest[i+1], nil
+	}
+	for i := 0; i < len(rest); i++ {
+		var v string
+		var err error
+		switch rest[i] {
+		case "--repo":
+			v, err = need(i, rest[i])
+			opts.RepoRef = v
+			i++
+		case "--cwd", "-R":
+			v, err = need(i, rest[i])
+			opts.RemoteCWD = v
+			i++
+		case "--container":
+			v, err = need(i, rest[i])
+			opts.Container = v
+			i++
+		case "--ephemeral":
+			opts.ContainerEphemeral = true
+		case "--name", "-s":
+			v, err = need(i, rest[i])
+			opts.Name = v
+			i++
+		case "--volume", "-v":
+			v, err = need(i, rest[i])
+			opts.ContainerVolumes = append(opts.ContainerVolumes, v)
+			i++
+		case "--bind":
+			v, err = need(i, rest[i])
+			opts.ContainerBinds = append(opts.ContainerBinds, v)
+			i++
+		case "--gpus":
+			v, err = need(i, rest[i])
+			opts.ContainerGPUs = v
+			i++
+		case "--network":
+			v, err = need(i, rest[i])
+			opts.ContainerNetwork = v
+			i++
+		case "--":
+			if i+1 >= len(rest) {
+				return opts, fmt.Errorf("-- must be followed by the command to run")
+			}
+			// Each word quoted on its own, so the pane runs exactly the argv
+			// given, not a re-parse of it by the remote shell.
+			words := make([]string, 0, len(rest)-i-1)
+			for _, w := range rest[i+1:] {
+				words = append(words, shellquote.Quote(w))
+			}
+			opts.Command = strings.Join(words, " ")
+			i = len(rest)
+		default:
+			return opts, rejectUnknownFlag(rest[i])
+		}
+		if err != nil {
+			return opts, err
+		}
+	}
+	return opts, nil
+}
+
 func findGitRoot(dir string) (string, error) {
 	if dir == "" {
 		var err error
@@ -1498,34 +1572,9 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 		return a.errOut(a.out(map[string]any{"ok": true, "session_id": sess.ID, "host_id": sess.HostID, "persist_name": sess.Persist.Name, "bridge": "provisioned"}))
 	case "create":
 		host, rest := flagHost(args[1:])
-		opts := core.CreateOpts{HostID: host}
-		for i := 0; i < len(rest); i++ {
-			switch rest[i] {
-			case "--repo":
-				i++
-				if i < len(rest) {
-					opts.RepoRef = rest[i]
-				}
-			case "--cwd", "-R":
-				i++
-				if i < len(rest) {
-					opts.RemoteCWD = rest[i]
-				}
-			case "--container":
-				i++
-				if i < len(rest) {
-					opts.Container = rest[i]
-				}
-			case "--ephemeral":
-				opts.ContainerEphemeral = true
-			case "--name", "-s":
-				i++
-				if i < len(rest) {
-					opts.Name = rest[i]
-				}
-			default:
-				return a.fail(rejectUnknownFlag(rest[i]))
-			}
+		opts, err := parseSessionCreateArgs(host, rest)
+		if err != nil {
+			return a.fail(err)
 		}
 		if opts.RepoRef == "" && opts.RemoteCWD == "" {
 			root, err := findGitRoot("")
@@ -4351,7 +4400,7 @@ func (a *App) applySessionChrome(ctx context.Context, sess *core.Session) error 
 // Containers workspace up with relay's named volumes injected, tearing it
 // down, and reporting whether it is running.
 func (a *App) cmdContainer(ctx context.Context, args []string) int {
-	usage := "usage: relay container up|open|down|status -H HOST --container NAME [--name TMUX] [--recreate] [--reprovision] [--keep]"
+	usage := "usage: relay container up|open|down|status|stop|start -H HOST --container NAME [--name TMUX|INSTANCE] [--recreate] [--reprovision] [--keep]"
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
 		fmt.Println(usage)
 		return 0
@@ -4404,11 +4453,15 @@ func (a *App) cmdContainer(ctx context.Context, args []string) int {
 	case "open":
 		return a.cmdContainerOpen(ctx, host, name, tmuxName, recreate, reprovision, keep)
 	case "up":
-		st, err = a.Containers.Up(ctx, host, name, recreate, reprovision)
+		st, err = a.Containers.UpInstance(ctx, host, name, tmuxName, recreate, reprovision)
 	case "down":
-		st, err = a.Containers.Down(ctx, host, name)
+		st, err = a.Containers.DownInstance(ctx, host, name, tmuxName)
 	case "status":
-		st, err = a.Containers.Status(ctx, host, name)
+		st, err = a.Containers.StatusInstance(ctx, host, name, tmuxName)
+	case "stop":
+		st, err = a.Containers.Stop(ctx, host, name, tmuxName)
+	case "start":
+		st, err = a.Containers.Start(ctx, host, name, tmuxName)
 	default:
 		return a.fail(fmt.Errorf("unknown container subcommand %q\n%s", sub, usage))
 	}
@@ -4421,10 +4474,18 @@ func (a *App) cmdContainer(ctx context.Context, args []string) int {
 	state := "stopped"
 	if st.Running {
 		state = "running"
+	} else if !st.Present {
+		state = "absent"
 	}
 	fmt.Printf("%s on %s: %s\n", st.Name, st.HostID, state)
+	if st.Instance != "" {
+		fmt.Printf("  instance   %s\n", st.Instance)
+	}
 	if st.ContainerID != "" {
 		fmt.Printf("  container  %s (%s)\n", st.ContainerID, st.IDLabel)
+	}
+	if !st.Running && st.Present && st.Instance != "" {
+		fmt.Printf("  exit code  %d\n", st.ExitCode)
 	}
 	if st.Toolkit != "" {
 		fmt.Printf("  toolkit    volume %s\n", st.Toolkit)

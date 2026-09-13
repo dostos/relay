@@ -127,6 +127,54 @@ relay session send <id> -- "claude /login"
 The credential lands in the home volume and every later container mounting it is
 already logged in.
 
+## Image-backed containers: one instance per session
+
+A third kind beside `container:` (exists already, managed elsewhere) and
+`devcontainer:` (the repo's own workspace, brought up by the devcontainer
+CLI): declare `image:` with no `devcontainer:` block and relay runs the
+container itself, from that image, **one instance per session**. This is the
+shape a worker takes — a prebuilt image, an evidence volume, a GPU or two,
+and a command that is the whole point of the pane.
+
+```yaml
+containers:
+  - name: hammer
+    image: ghcr.io/dostos/hammer:v1
+    user: worker
+    gpu: none                       # all | none | "0,1"; a session may override
+    network: bridge                 # docker --network; a session may override
+    home: { volume: relay-home, target: /relay/home }
+    env: [ANTHROPIC_API_KEY]        # by NAME, as everywhere else
+```
+
+```bash
+# The session brings its own instance up, named <spec>-<session>, mounts what
+# it was given, and runs the trailing command as the pane's inner process.
+relay --json session create -H hamburg --container hammer --ephemeral --name order-42 \
+      --volume ev-order-42:/out --bind /data/corpus:/corpus:ro --gpus 0,1 --network host \
+      -- /opt/worker/entrypoint --order-file /out/order.json
+
+relay container status -H hamburg --container hammer --name order-42   # this instance
+relay container stop   -H hamburg --container hammer --name order-42   # park; filesystem and mounts survive
+relay container start  -H hamburg --container hammer --name order-42
+relay container up     -H hamburg --container hammer                   # the spec's own, unnamed instance
+```
+
+What is the same as a devcontainer: tmux stays on the host, the pane's inner
+command crosses into the container through `docker exec`, `session exec` /
+`send` / `capture` work unchanged, the relay volumes are chowned once for the
+exec user, the toolkit is provisioned once, and an ephemeral instance is
+removed when its session is destroyed while every volume survives.
+
+What is different: the instance idles on `sleep infinity` and the work is the
+session's command, so the **pane's** exit is the work's exit (tmux
+`remain-on-exit`, `session sensors`), not the container's. A worker whose
+entrypoint must be PID 1 does not fit this kind; that is deliberate — the
+pane is the record. `--volume`, `--bind`, `--gpus` and `--network` are
+refused on the other two kinds, because there is no per-session container to
+apply them to. A `--bind` source must be an absolute host path; a `--volume`
+source must be a docker volume name, and either may end in `:ro`.
+
 ## What relay does and does not do
 
 relay **shells out to the host's `devcontainer` CLI** against the repo's own
