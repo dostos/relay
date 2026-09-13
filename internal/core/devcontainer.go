@@ -429,6 +429,13 @@ func ImageUp(ctx context.Context, t ports.Transport, hostID string, inst ImageIn
 	if len(lines) >= 2 {
 		st.Detail = strings.TrimSpace(lines[len(lines)-2])
 	}
+	// A reused instance keeps the mounts, GPUs and network it was created
+	// with; the extras asked for now were not applied. Say so, rather than
+	// let a caller believe its --gpus took effect.
+	if (st.Detail == "running" || st.Detail == "started") &&
+		(len(inst.Volumes) > 0 || len(inst.Binds) > 0 || inst.GPUs != "" || inst.Network != "") {
+		st.Detail += "; existing instance reused, --volume/--bind/--gpus/--network not reapplied (use --recreate)"
+	}
 	if st.ContainerID == "" {
 		return nil, fmt.Errorf("container up on %s reported no container id\n--- output ---\n%s", hostID, combined)
 	}
@@ -508,10 +515,12 @@ func (s *ContainerService) stopStart(ctx context.Context, hostID, name, instance
 	if err != nil {
 		return nil, err
 	}
-	target := ""
+	target, err := instanceFor(spec, instance)
+	if err != nil {
+		return nil, err
+	}
 	switch {
 	case spec.ImageBacked():
-		target = spec.InstanceName(instance)
 	case spec.Devcontainer != nil:
 		out, _, rerr := t.Run(ctx, "", fmt.Sprintf("%s ps -aq --filter %s", spec.RuntimeVerb(), shellquote.Quote("label="+spec.ResolvedIDLabel())))
 		if rerr != nil {
@@ -521,8 +530,6 @@ func (s *ContainerService) stopStart(ctx context.Context, hostID, name, instance
 		if target == "" {
 			return nil, fmt.Errorf("no container carries label %s on %s", spec.ResolvedIDLabel(), hostID)
 		}
-	default:
-		target = spec.Container
 	}
 	cmd := ImageStopCommand(spec, target)
 	if verb == "start" {
@@ -602,11 +609,12 @@ func (s *ContainerService) UpInstance(ctx context.Context, hostID, name, instanc
 	if err != nil {
 		return nil, err
 	}
-	if spec.ImageBacked() {
-		return ImageUp(ctx, t, hostID, ImageInstance{Spec: spec, Name: spec.InstanceName(instance)}, removeExisting, forceProvision)
+	inst, err := instanceFor(spec, instance)
+	if err != nil {
+		return nil, err
 	}
-	if instance != "" {
-		return nil, fmt.Errorf("container %q is not image-backed; --name applies only to image: containers", name)
+	if spec.ImageBacked() {
+		return ImageUp(ctx, t, hostID, ImageInstance{Spec: spec, Name: inst}, removeExisting, forceProvision)
 	}
 	if spec.Devcontainer == nil {
 		return nil, fmt.Errorf("container %q declares container: only — it is managed outside relay, nothing to bring up", name)
@@ -700,17 +708,17 @@ func (s *ContainerService) DownInstance(ctx context.Context, hostID, name, insta
 	if err != nil {
 		return nil, err
 	}
+	inst, err := instanceFor(spec, instance)
+	if err != nil {
+		return nil, err
+	}
 	if spec.ImageBacked() {
-		inst := spec.InstanceName(instance)
 		out, errOut, runErr := t.Run(ctx, "", ImageDownCommand(spec, inst))
 		if runErr != nil {
 			return nil, fmt.Errorf("container down failed on %s: %w\n%s", hostID, runErr, strings.TrimSpace(out+"\n"+errOut))
 		}
 		return &ContainerStatus{OK: true, Name: name, HostID: hostID, IDLabel: spec.ResolvedIDLabel(),
 			Instance: inst, Running: false, Present: false, Detail: firstLine(out)}, nil
-	}
-	if instance != "" {
-		return nil, fmt.Errorf("container %q is not image-backed; --name applies only to image: containers", name)
 	}
 	if spec.Devcontainer == nil {
 		return nil, fmt.Errorf("container %q declares container: only — it is managed outside relay, nothing to take down", name)
@@ -737,13 +745,14 @@ func (s *ContainerService) StatusInstance(ctx context.Context, hostID, name, ins
 	if err != nil {
 		return nil, err
 	}
+	inst, err := instanceFor(spec, instance)
+	if err != nil {
+		return nil, err
+	}
 	if spec.ImageBacked() {
-		return imageStatus(ctx, t, hostID, spec, spec.InstanceName(instance))
+		return imageStatus(ctx, t, hostID, spec, inst)
 	}
-	if instance != "" {
-		return nil, fmt.Errorf("container %q is not image-backed; --name applies only to image: containers", name)
-	}
-	st := &ContainerStatus{OK: true, Name: name, HostID: hostID, IDLabel: spec.ResolvedIDLabel(), Present: true}
+	st := &ContainerStatus{OK: true, Name: name, HostID: hostID, IDLabel: spec.ResolvedIDLabel()}
 	if spec.Toolkit != nil {
 		st.Toolkit = spec.Toolkit.Volume
 	}
@@ -751,11 +760,17 @@ func (s *ContainerService) StatusInstance(ctx context.Context, hostID, name, ins
 		st.Home = spec.Home.Volume
 	}
 	if spec.Devcontainer == nil {
-		// A plain declared container: report the configured ref as-is.
+		// A plain declared container: report the configured ref as-is, but
+		// ask docker whether it exists at all — "stopped" and "absent" are
+		// different facts, and a probe that answered false for both hid a
+		// removed container behind a stopped one.
 		st.ContainerID = spec.Container
-		out, _, _ := t.Run(ctx, "", fmt.Sprintf("%s inspect -f {{.State.Running}} %s 2>/dev/null || echo false",
+		out, _, _ := t.Run(ctx, "", fmt.Sprintf("%s inspect -f {{.State.Running}} %s 2>/dev/null || echo absent",
 			spec.RuntimeVerb(), shellquote.Quote(spec.Container)))
-		st.Running = strings.TrimSpace(firstLine(out)) == "true"
+		st.Running, st.Present = parsePlainContainerState(out)
+		if !st.Present {
+			st.Detail = "absent"
+		}
 		return st, nil
 	}
 	out, _, err := t.Run(ctx, "", DevcontainerResolveCommand(spec))
@@ -763,9 +778,44 @@ func (s *ContainerService) StatusInstance(ctx context.Context, hostID, name, ins
 		st.Detail = err.Error()
 		return st, nil
 	}
+	// The resolve command lists RUNNING containers by label, so an empty
+	// answer means absent-or-stopped; the id being there means both present
+	// and running. A stopped devcontainer reads as absent here, which is what
+	// `up` will fix either way.
 	st.ContainerID = firstLine(out)
 	st.Running = st.ContainerID != ""
+	st.Present = st.Running
+	if !st.Present {
+		st.Detail = "no running container carries the id label"
+	}
 	return st, nil
+}
+
+// instanceFor names the container an operation acts on: the instance of an
+// image-backed spec, or the spec's one container for the other kinds — where
+// naming an instance is refused, because there is no per-session container
+// to select.
+func instanceFor(spec *ContainerSpec, instance string) (string, error) {
+	if spec.ImageBacked() {
+		return spec.InstanceName(instance), nil
+	}
+	if instance != "" {
+		return "", fmt.Errorf("container %q is not image-backed; --name applies only to image: containers", spec.Name)
+	}
+	return spec.Container, nil
+}
+
+// parsePlainContainerState reads a `docker inspect -f {{.State.Running}} …
+// || echo absent` answer into (running, present).
+func parsePlainContainerState(out string) (running, present bool) {
+	switch strings.TrimSpace(firstLine(out)) {
+	case "true":
+		return true, true
+	case "false":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func firstLine(s string) string {

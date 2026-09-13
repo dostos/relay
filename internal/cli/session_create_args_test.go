@@ -57,3 +57,13 @@ func TestSessionCreateArgsRefusals(t *testing.T) {
 		}
 	}
 }
+
+func TestSessionCreateArgsSingleBareWord(t *testing.T) {
+	opts, err := parseSessionCreateArgs("h", []string{"--cwd", "/x", "--", "ls"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Command != "'ls'" || opts.RemoteCWD != "/x" || opts.Container != "" {
+		t.Errorf("got %+v", opts)
+	}
+}

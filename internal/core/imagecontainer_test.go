@@ -289,3 +289,50 @@ func TestSessionOnImageBackedSpecBringsItsInstanceUp(t *testing.T) {
 		t.Errorf("the session's extras must reach the run: %v", tr.seen)
 	}
 }
+
+func TestInstanceForRefusesANameOffImageBacked(t *testing.T) {
+	// The three operations that take --name route through one helper, so one
+	// test covers the refusal for all of them.
+	for _, spec := range []*ContainerSpec{devSpec(), {Name: "plain", Container: "existing"}} {
+		if _, err := instanceFor(spec, "order-42"); err == nil || !strings.Contains(err.Error(), "not image-backed") {
+			t.Errorf("%s: expected a refusal naming the reason, got %v", spec.Name, err)
+		}
+		if got, err := instanceFor(spec, ""); err != nil || got != spec.Container {
+			t.Errorf("%s: bare instance should be the spec's container %q, got %q (%v)", spec.Name, spec.Container, got, err)
+		}
+	}
+	if got, err := instanceFor(imageSpec(), "order-42"); err != nil || got != "hammer-order-42" {
+		t.Errorf("image-backed: got %q (%v)", got, err)
+	}
+}
+
+func TestPlainContainerStateTellsAbsentFromStopped(t *testing.T) {
+	cases := map[string][2]bool{"true\n": {true, true}, "false": {false, true}, "absent": {false, false}, "": {false, false}}
+	for out, want := range cases {
+		running, present := parsePlainContainerState(out)
+		if running != want[0] || present != want[1] {
+			t.Errorf("%q: got running=%v present=%v, want %v", out, running, present, want)
+		}
+	}
+}
+
+func TestImageUpSaysWhenExtrasWereNotReapplied(t *testing.T) {
+	tr := &scriptedTransport{outputs: []string{"running\nabc123\n", "prepared\n"}}
+	inst := ImageInstance{Spec: imageSpec(), Name: "hammer-o1", GPUs: "2,3"}
+	st, err := ImageUp(context.Background(), tr, "hamburg", inst, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(st.Detail, "not reapplied") {
+		t.Errorf("a reused instance must say the extras were ignored: %q", st.Detail)
+	}
+	// Without extras a reuse is just a reuse.
+	tr = &scriptedTransport{outputs: []string{"running\nabc123\n", "prepared\n"}}
+	st, err = ImageUp(context.Background(), tr, "hamburg", ImageInstance{Spec: imageSpec(), Name: "hammer-o1"}, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Detail != "running" {
+		t.Errorf("no extras, no warning: %q", st.Detail)
+	}
+}

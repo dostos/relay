@@ -220,6 +220,12 @@ func ImageUpCommand(inst ImageInstance, recreate bool) (string, error) {
 	fmt.Fprintf(&b, "*) %s %s >/dev/null; echo created;; ", rt, strings.Join(runArgs, " "))
 	b.WriteString("esac; ")
 	fmt.Fprintf(&b, "%s inspect -f '{{.Id}}' %s", rt, q)
+	// Wrapped in the host's login shell — the only one of the image commands
+	// that is — for the same reason the devcontainer up is: `-e NAME` reads
+	// the value from the environment the docker client runs in, and on the
+	// fleet that value is set by the interactive profile, not by the
+	// non-interactive shell ssh gives relay. down/status/stop/start pass no
+	// environment through and run plain.
 	return HostLoginShell(b.String()), nil
 }
 
