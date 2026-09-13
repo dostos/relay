@@ -166,7 +166,7 @@ delegated work is blacksmith's; and the presenter — `viz`/`pane`, `viz serve`,
 `viz-broker`, `install-cmux-restore`, `container open` — Forge is the one.
 relay is the session substrate. `resume reap|prune` cover what `gc` did.
 
-Details: [`docs/2026-07-24-relay-design.md`](docs/2026-07-24-relay-design.md)
+Details: [`docs/archive/2026-07-24-relay-design.md`](docs/2026-07-24-relay-design.md)
 (historical; the delegation half is retired).
 
 ## Develop
