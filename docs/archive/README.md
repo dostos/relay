@@ -16,3 +16,4 @@ and the workspace's living system map is `dostos-workspace/docs/agent-infra.md`.
 | `superpowers-specs/2026-07-29-relay-container-handoff-design.md` | container handoffs | 2026-09-13 (devcontainers.md is current) |
 | `superpowers-specs/2026-08-01-relay-autonomous-{A,B,C,D}-*.md` | autonomous mode: nearest live ancestor, agent apex, lateral comms, control-plane locality | 2026-09-13 |
 | `superpowers-specs/2026-08-08-host-ensure-account-agents-design.md` | relay's own ccs/codex account discovery in `host ensure` | 2026-09-13 (agent-accounts is the source) |
+| `superpowers-plans/*` | the plans for the container-handoff MVP, autonomous mode A, and host-ensure account agents | 2026-09-13, with their designs |
