@@ -36,6 +36,36 @@ func exactSession(name string) string      { return "=" + name }
 func exactSessionScope(name string) string { return "=" + name + ":" }
 func exactPane(name string) string         { return exactSessionScope(name) }
 
+// resolvePaneID returns the live tmux pane id (%N) for a session's active
+// pane. send-keys against a bare exact-name session target ("=name") fails
+// with "can't find pane" on current tmux; even "=name:" can miss when the
+// caller retries across renames. An explicit pane id is the durable target.
+func (p *Persist) resolvePaneID(ctx context.Context, t ports.Transport, h ports.PersistHandle) (string, error) {
+	out, stderr, err := t.Run(ctx, "", fmt.Sprintf(
+		"tmux display-message -p -t %s '#{pane_id}'",
+		shellquote.Quote(exactPane(h.Name)),
+	))
+	if err != nil {
+		return "", fmt.Errorf("resolve pane id for %s: %w (%s)", h.Name, err, strings.TrimSpace(stderr))
+	}
+	pane := strings.TrimSpace(out)
+	if !strings.HasPrefix(pane, "%") {
+		return "", fmt.Errorf("resolve pane id for %s: malformed id %q", h.Name, pane)
+	}
+	return pane, nil
+}
+
+func (p *Persist) captureTarget(ctx context.Context, t ports.Transport, target string, lines int) (string, error) {
+	if lines <= 0 {
+		lines = 50
+	}
+	stdout, stderr, err := t.Run(ctx, "", fmt.Sprintf("tmux capture-pane -t %s -p -S -%d", target, lines))
+	if err != nil {
+		return "", fmt.Errorf("capture: %w (%s)", err, strings.TrimSpace(stderr))
+	}
+	return stdout, nil
+}
+
 func (p *Persist) Create(ctx context.Context, t ports.Transport, name, cwd, command string) (ports.PersistHandle, error) {
 	if err := shellquote.ValidateSessionName(name); err != nil {
 		return ports.PersistHandle{}, err
@@ -129,15 +159,11 @@ func (p *Persist) Destroy(ctx context.Context, t ports.Transport, h ports.Persis
 }
 
 func (p *Persist) Capture(ctx context.Context, t ports.Transport, h ports.PersistHandle, lines int) (string, error) {
-	if lines <= 0 {
-		lines = 50
-	}
-	cmd := fmt.Sprintf("tmux capture-pane -t %s -p -S -%d", shellquote.Quote(exactPane(h.Name)), lines)
-	stdout, stderr, err := t.Run(ctx, "", cmd)
+	pane, err := p.resolvePaneID(ctx, t, h)
 	if err != nil {
-		return "", fmt.Errorf("capture: %w (%s)", err, strings.TrimSpace(stderr))
+		return "", err
 	}
-	return stdout, nil
+	return p.captureTarget(ctx, t, shellquote.Quote(pane), lines)
 }
 
 // Launch acknowledges the holding shell, not any particular runtime. The
@@ -147,9 +173,17 @@ func (p *Persist) Launch(ctx context.Context, t ports.Transport, h ports.Persist
 	if strings.TrimSpace(command) == "" {
 		return fmt.Errorf("launch command required")
 	}
+	pane, err := p.resolvePaneID(ctx, t, h)
+	if err != nil {
+		return err
+	}
 	token := strconv.FormatInt(time.Now().UnixNano(), 36)
-	target := shellquote.Quote(exactPane(h.Name))
-	line := fmt.Sprintf("tmux set-option -t %s @relay_launch_ack %s; %s", target, shellquote.Quote(token), command)
+	target := shellquote.Quote(pane)
+	// set-option still needs a session-scoped target; the pane id is only for
+	// keystrokes. Keep the ack option on the exact session so show-option and
+	// the typed launch line agree.
+	optTarget := shellquote.Quote(exactPane(h.Name))
+	line := fmt.Sprintf("tmux set-option -t %s @relay_launch_ack %s; %s", optTarget, shellquote.Quote(token), command)
 	if _, stderr, err := t.Run(ctx, "", fmt.Sprintf("tmux send-keys -t %s -l -- %s", target, shellquote.Quote(line))); err != nil {
 		return fmt.Errorf("type launch: %w (%s)", err, strings.TrimSpace(stderr))
 	}
@@ -164,9 +198,9 @@ func (p *Persist) Launch(ctx context.Context, t ports.Transport, h ports.Persist
 			return &ports.DeliveryUncertainError{Err: ctx.Err()}
 		case <-time.After(sendConfirmDelay):
 		}
-		out, _, _ := t.Run(ctx, "", fmt.Sprintf("tmux show-option -t %s -v @relay_launch_ack 2>/dev/null", target))
+		out, _, _ := t.Run(ctx, "", fmt.Sprintf("tmux show-option -t %s -v @relay_launch_ack 2>/dev/null", optTarget))
 		if strings.TrimSpace(out) == token {
-			_, _, _ = t.Run(ctx, "", fmt.Sprintf("tmux set-option -u -t %s @relay_launch_ack", target))
+			_, _, _ = t.Run(ctx, "", fmt.Sprintf("tmux set-option -u -t %s @relay_launch_ack", optTarget))
 			return nil
 		}
 	}
@@ -177,7 +211,11 @@ func (p *Persist) ResolveGateChoice(ctx context.Context, t ports.Transport, h po
 	if selectedOffset < 0 {
 		return fmt.Errorf("gate choice offset must be non-negative")
 	}
-	target := shellquote.Quote(exactPane(h.Name))
+	pane, err := p.resolvePaneID(ctx, t, h)
+	if err != nil {
+		return err
+	}
+	target := shellquote.Quote(pane)
 	keys := []string{"Home"}
 	for i := 0; i < selectedOffset; i++ {
 		keys = append(keys, "Down")
@@ -191,7 +229,12 @@ func (p *Persist) ResolveGateChoice(ctx context.Context, t ports.Transport, h po
 }
 
 func (p *Persist) Send(ctx context.Context, t ports.Transport, h ports.PersistHandle, text string, enter bool) error {
-	cmd := fmt.Sprintf("tmux send-keys -t %s -l -- %s", shellquote.Quote(exactPane(h.Name)), shellquote.Quote(text))
+	pane, err := p.resolvePaneID(ctx, t, h)
+	if err != nil {
+		return &ports.DeliveryUncertainError{Err: err}
+	}
+	target := shellquote.Quote(pane)
+	cmd := fmt.Sprintf("tmux send-keys -t %s -l -- %s", target, shellquote.Quote(text))
 	_, stderr, err := t.Run(ctx, "", cmd)
 	if err != nil {
 		return &ports.DeliveryUncertainError{Err: fmt.Errorf("send: %w (%s)", err, strings.TrimSpace(stderr))}
@@ -203,8 +246,9 @@ func (p *Persist) Send(ctx context.Context, t ports.Transport, h ports.PersistHa
 	if len(marker) > 48 {
 		marker = marker[:48]
 	}
+	var lastScreen string
 	for attempt := 0; attempt < sendConfirmAttempts; attempt++ {
-		_, stderr, err = t.Run(ctx, "", fmt.Sprintf("tmux send-keys -t %s Enter", shellquote.Quote(exactPane(h.Name))))
+		_, stderr, err = t.Run(ctx, "", fmt.Sprintf("tmux send-keys -t %s Enter", target))
 		if err != nil {
 			return &ports.DeliveryUncertainError{Err: fmt.Errorf("submit: %w (%s)", err, strings.TrimSpace(stderr))}
 		}
@@ -213,19 +257,72 @@ func (p *Persist) Send(ctx context.Context, t ports.Transport, h ports.PersistHa
 			return ctx.Err()
 		case <-time.After(sendConfirmDelay):
 		}
-		screen, captureErr := p.Capture(ctx, t, h, sendConfirmLines)
+		screen, captureErr := p.captureTarget(ctx, t, target, sendConfirmLines)
 		if captureErr != nil {
 			return &ports.DeliveryUncertainError{Err: fmt.Errorf("confirm send: %w", captureErr)}
 		}
+		lastScreen = screen
 		if messageSubmitted(screen, marker) {
 			return nil
 		}
 	}
+	if depositedWithoutTurn(lastScreen, marker) {
+		return &ports.DeliveryUncertainError{Err: fmt.Errorf("text reached %s's input but no turn started after %d submit attempts", h.Name, sendConfirmAttempts)}
+	}
 	return &ports.DeliveryUncertainError{Err: fmt.Errorf("message is still unsent in %s's composer after %d attempts", h.Name, sendConfirmAttempts)}
 }
 
+// messageSubmitted reports positive evidence that a turn began or that a
+// recognizable composer released the typed marker. Marker-on-screen alone is
+// not enough: Codex often shows deposited text with no ›/>/❯ glyph, and the
+// old "marker present ∧ composer not holding" check treated that as success.
 func messageSubmitted(screen, marker string) bool {
-	return marker != "" && strings.Contains(screen, marker) && !composerHolds(screen, marker)
+	if turnStarted(screen) {
+		return true
+	}
+	if marker == "" || !hasComposerGlyph(screen) {
+		return false
+	}
+	return !composerHolds(screen, marker)
+}
+
+func depositedWithoutTurn(screen, marker string) bool {
+	if marker == "" || turnStarted(screen) {
+		return false
+	}
+	if composerHolds(screen, marker) {
+		return true
+	}
+	// Codex idle composers often lack a prompt glyph; deposited text still
+	// sits above the status line with no Working indicator.
+	return strings.Contains(screen, marker) || strings.Contains(screen, "[Pasted Content ")
+}
+
+func turnStarted(screen string) bool {
+	lower := strings.ToLower(screen)
+	for _, needle := range []string{
+		"esc to interrupt",
+		"• working",
+		"● working",
+		"working (",
+		"working…",
+		"working...",
+	} {
+		if strings.Contains(lower, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasComposerGlyph(screen string) bool {
+	for _, line := range strings.Split(screen, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "›") || strings.HasPrefix(trimmed, ">") || strings.HasPrefix(trimmed, "❯") {
+			return true
+		}
+	}
+	return false
 }
 
 func composerHolds(screen, marker string) bool {
@@ -240,6 +337,9 @@ func composerHolds(screen, marker string) bool {
 			composer = trimmed
 			composerLine = i
 		}
+	}
+	if composerLine < 0 {
+		return false
 	}
 	// Codex replaces large bracketed pastes with an opaque placeholder. The
 	// original marker is then absent even though the composer still owns the
@@ -257,7 +357,11 @@ func composerHolds(screen, marker string) bool {
 }
 
 func (p *Persist) Resize(ctx context.Context, t ports.Transport, h ports.PersistHandle) error {
-	q := shellquote.Quote(exactPane(h.Name))
+	pane, err := p.resolvePaneID(ctx, t, h)
+	if err != nil {
+		return err
+	}
+	q := shellquote.Quote(pane)
 	script := fmt.Sprintf(`
 pane=$(tmux display-message -p -t %s '#{pane_tty}')
 w=$(tmux display-message -p -t %s '#{pane_width}')
@@ -265,7 +369,7 @@ h=$(tmux display-message -p -t %s '#{pane_height}')
 stty -F "$pane" cols "$w" rows "$h" 2>/dev/null || stty <"$pane" cols "$w" rows "$h" 2>/dev/null || true
 tmux send-keys -t %s C-l
 `, q, q, q, q)
-	_, _, err := t.Run(ctx, "", script)
+	_, _, err = t.Run(ctx, "", script)
 	return err
 }
 
@@ -309,9 +413,13 @@ func (p *Persist) DeadStatus(ctx context.Context, t ports.Transport, h ports.Per
 	if !exists {
 		return true, 0, nil
 	}
+	pane, err := p.resolvePaneID(ctx, t, h)
+	if err != nil {
+		return false, 0, err
+	}
 	stdout, _, err := t.Run(ctx, "", fmt.Sprintf(
 		`tmux list-panes -t %s -F '#{pane_dead} #{pane_dead_status}' | head -n1`,
-		shellquote.Quote(exactPane(h.Name)),
+		shellquote.Quote(pane),
 	))
 	if err != nil {
 		return false, 0, err
@@ -364,9 +472,34 @@ tmux set-option -t "$SESS" remain-on-exit on
 		shellquote.Quote(exitCmd),
 		shellquote.Quote(idleCmd),
 	)
-	_, stderr, err := t.Run(ctx, "", hooks)
-	if err != nil {
-		return fmt.Errorf("install sensors: %w (%s)", err, strings.TrimSpace(stderr))
+	// Fresh sessions (especially right after create/rename) can briefly reject
+	// exact-name targets with "no such window". Wait until the active pane is
+	// resolvable, then install; retry only on those transient target misses.
+	var lastErr error
+	for attempt := 0; attempt < sendConfirmAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(sendConfirmDelay):
+			}
+		}
+		if _, err := p.resolvePaneID(ctx, t, h); err != nil {
+			lastErr = err
+			continue
+		}
+		_, stderr, err := t.Run(ctx, "", hooks)
+		if err == nil {
+			return nil
+		}
+		lastErr = fmt.Errorf("install sensors: %w (%s)", err, strings.TrimSpace(stderr))
+		detail := strings.ToLower(strings.TrimSpace(stderr) + " " + err.Error())
+		if !strings.Contains(detail, "no such window") && !strings.Contains(detail, "no such session") && !strings.Contains(detail, "can't find") {
+			return lastErr
+		}
 	}
-	return nil
+	if lastErr == nil {
+		lastErr = fmt.Errorf("install sensors: session %s never became targetable", h.Name)
+	}
+	return lastErr
 }
