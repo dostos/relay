@@ -178,7 +178,10 @@ func TestRetiredDelegationVerbsAreUnknownCommands(t *testing.T) {
 	// The delegation handshake retired as one unit (workspace decision
 	// 2026-09-13); none of its verbs may resolve to anything, and none may be
 	// mistaken for `relay HOST NAME` (which needs exactly two words).
-	for _, argv := range [][]string{{"agent", "protocol"}, {"parent", "list"}, {"handoff", "list"}, {"msg", "read", "x"}, {"resolve", "pm-1", "--", "yes"}, {"ask", "q"}, {"board", "query"}, {"root", "status"}, {"policy", "list"}, {"gc"}, {"events", "tail"}, {"history"}, {"supervise"}, {"log", "0"}} {
+	// `agent wait` is listed explicitly: issue #49's deadlock/empty-stdout bugs
+	// lived on that verb; the wake/envelope contract is preserved in
+	// internal/core/agentwait, but the CLI surface stays gone.
+	for _, argv := range [][]string{{"agent", "protocol"}, {"agent", "wait", "ho-1"}, {"parent", "list"}, {"handoff", "list"}, {"msg", "read", "x"}, {"resolve", "pm-1", "--", "yes"}, {"ask", "q"}, {"board", "query"}, {"root", "status"}, {"policy", "list"}, {"gc"}, {"events", "tail"}, {"history"}, {"supervise"}, {"log", "0"}} {
 		a := New()
 		a.JSON = true
 		out := captureStdout(t, func() {
