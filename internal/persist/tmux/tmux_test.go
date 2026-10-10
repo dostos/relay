@@ -460,3 +460,18 @@ func TestAttachCommandDistinguishesAttachFromCreate(t *testing.T) {
 		t.Errorf("create path must still hand over a login shell:\n%s", got)
 	}
 }
+
+// A session recreated after its host lost it must start where it ran, not in
+// $HOME: on 2026-10-10 a madrid reboot brought three sessions back in ~.
+func TestAttachCommandCreatesInRecordedCWD(t *testing.T) {
+	got := (&Persist{}).AttachCommand(ports.PersistHandle{Name: "work"}, "~/dev/ws")
+	if !strings.Contains(got, `new-session -s 'work' -c "$HOME"'/dev/ws' -- bash -lc`) {
+		t.Errorf("create path does not start in the recorded cwd:\n%s", got)
+	}
+	if strings.Contains(got[:strings.Index(got, "else")], "-c ") {
+		t.Errorf("attach path must not carry a cwd:\n%s", got)
+	}
+	if bare := (&Persist{}).AttachCommand(ports.PersistHandle{Name: "work"}, ""); strings.Contains(bare, " -c ") {
+		t.Errorf("empty cwd must not emit -c:\n%s", bare)
+	}
+}

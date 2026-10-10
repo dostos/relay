@@ -387,9 +387,18 @@ tmux send-keys -t %s C-l
 // A surface that looks alive while the agent behind it is gone is the exact
 // failure this control plane is worst at catching, so the create path
 // announces itself.
+//
+// The create path starts in the session's recorded cwd, as Create does. It
+// used to ignore cwd, so a session lost to a host reboot came back in $HOME
+// and its agent could not be resumed where it ran (madrid, 2026-10-10).
 func (p *Persist) AttachCommand(h ports.PersistHandle, cwd string) string {
-	_ = cwd
 	q := shellquote.Quote(h.Name)
+	startDir := ""
+	if cwd != "" {
+		if expr, err := shellquote.PathExpr(cwd); err == nil {
+			startDir = " -c " + expr
+		}
+	}
 	// The notice is written INSIDE the new session, as its first line, not
 	// before it. Printing beforehand does not work: `exec tmux new-session`
 	// repaints the screen and erases it. An earlier version paused two seconds
@@ -401,8 +410,8 @@ func (p *Persist) AttachCommand(h ports.PersistHandle, cwd string) string {
 		q)
 	return fmt.Sprintf(
 		"if tmux has-session -t %s 2>/dev/null; then exec tmux attach -t %s; "+
-			"else exec tmux new-session -s %s -- bash -lc %s; fi",
-		q, q, q, shellquote.Quote(banner))
+			"else exec tmux new-session -s %s%s -- bash -lc %s; fi",
+		q, q, q, startDir, shellquote.Quote(banner))
 }
 
 func (p *Persist) DeadStatus(ctx context.Context, t ports.Transport, h ports.PersistHandle) (bool, int, error) {
