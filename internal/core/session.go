@@ -163,7 +163,7 @@ func (s *SessionService) Create(ctx context.Context, opts CreateOpts) (*Session,
 	}
 	cmd := opts.Command
 	if cmd == "" {
-		cmd = "bash -l"
+		cmd = ports.HoldingShell
 	}
 	var cref *ContainerRef
 	if opts.Container != "" {

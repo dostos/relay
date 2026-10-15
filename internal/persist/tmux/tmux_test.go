@@ -456,8 +456,14 @@ func TestAttachCommandDistinguishesAttachFromCreate(t *testing.T) {
 	if !strings.Contains(got, "new-session -s 'work' -- bash -lc") {
 		t.Errorf("notice is not carried inside the new session:\n%s", got)
 	}
-	if !strings.Contains(got, "exec bash -l") {
-		t.Errorf("create path must still hand over a login shell:\n%s", got)
+	// The hand-over is the holding shell, not a second login shell: a login
+	// shell re-reads /etc/profile's TMOUT and logs the recreated session out
+	// after ten idle minutes (hamburg/oqb, 2026-10-15).
+	if !strings.Contains(got, "exec "+ports.HoldingShell) {
+		t.Errorf("create path must hand over the TMOUT-free holding shell:\n%s", got)
+	}
+	if strings.Contains(got, "exec bash -l") {
+		t.Errorf("create path re-enters a login shell, which restores TMOUT:\n%s", got)
 	}
 }
 

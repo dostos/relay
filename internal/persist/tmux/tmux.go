@@ -80,7 +80,7 @@ func (p *Persist) Create(ctx context.Context, t ports.Transport, name, cwd, comm
 	}
 	inner := command
 	if inner == "" {
-		inner = "exec bash -l"
+		inner = "exec " + ports.HoldingShell
 	}
 	startDir := `"$HOME"`
 	if cwd != "" {
@@ -406,8 +406,8 @@ func (p *Persist) AttachCommand(h ports.PersistHandle, cwd string) string {
 	// the same "looks healthy" failure a moment later. As the session's first
 	// scrollback line it stays until the operator scrolls past it.
 	banner := fmt.Sprintf(
-		`printf '\033[33mrelay: session %%s was not running on %%s; its previous work is gone. This is a NEW session.\033[0m\n' %s $(hostname -s); exec bash -l`,
-		q)
+		`printf '\033[33mrelay: session %%s was not running on %%s; its previous work is gone. This is a NEW session.\033[0m\n' %s $(hostname -s); exec %s`,
+		q, ports.HoldingShell)
 	return fmt.Sprintf(
 		"if tmux has-session -t %s 2>/dev/null; then exec tmux attach -t %s; "+
 			"else exec tmux new-session -s %s%s -- bash -lc %s; fi",

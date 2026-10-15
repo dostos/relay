@@ -8,6 +8,19 @@ import (
 	"io"
 )
 
+// HoldingShell is the shell a durable session hands its operator when no
+// runtime command is given (and after a lost session is recreated). It is
+// exec'd from inside `bash -lc`, which has already sourced the login profile,
+// so the environment and PATH are the login ones.
+//
+// It is deliberately not another login shell, and it drops TMOUT: lab hosts
+// set TMOUT in /etc/profile (hamburg: TMOUT=600), a login shell re-reads it,
+// and the export reaches every shell in the pane -- including the zsh that
+// ~/.bashrc execs. That shell then logs itself out after ten idle minutes at a
+// prompt, which ends the pane and with it the session. hamburg/oqb was lost
+// that way on 2026-10-15, ten minutes after its agent left the shell idle.
+const HoldingShell = "env -u TMOUT bash -i"
+
 // Transport reaches a remote host. SSH is the default implementation.
 type Transport interface {
 	ID() string
