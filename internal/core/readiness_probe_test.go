@@ -60,6 +60,16 @@ type scriptedPersist struct {
 	mu    sync.Mutex
 	calls []string
 	delay time.Duration
+	// gone names sessions whose tmux session does not exist; any other name
+	// makes the existence probe fail like the capture did (host unreachable).
+	gone map[string]bool
+}
+
+func (p *scriptedPersist) Exists(_ context.Context, _ ports.Transport, h ports.PersistHandle) (bool, error) {
+	if p.gone[h.Name] {
+		return false, nil
+	}
+	return false, errors.New("ssh: connect to host: Operation timed out")
 }
 
 func (p *scriptedPersist) Capture(ctx context.Context, _ ports.Transport, h ports.PersistHandle, _ int) (string, error) {
@@ -123,6 +133,31 @@ func TestReadinessOnADeadHostIsUnknownWithTheReasonAndAnError(t *testing.T) {
 	}
 	if _, _, err := svc.Readiness(context.Background(), "sess-missing", 0); err == nil {
 		t.Fatal("an unknown session id is an error")
+	}
+}
+
+func TestReadinessOfAMissingTmuxSessionIsGoneNotUnknown(t *testing.T) {
+	p := &scriptedPersist{text: map[string]string{}, gone: map[string]bool{"eval": true}}
+	svc := readinessFixture(t, p, sess("sess-1", "hamburg", "eval"))
+	_, rep, err := svc.Readiness(context.Background(), "sess-1", 0)
+	if err != nil {
+		t.Fatalf("a gone session is an answer, not a failure: %v", err)
+	}
+	if rep.State != AgentGone || rep.Reason == "" {
+		t.Fatalf("report: %+v", rep)
+	}
+	b, _ := json.Marshal(rep)
+	if !strings.Contains(string(b), `"state":"gone"`) {
+		t.Fatalf("json: %s", b)
+	}
+}
+
+func TestReadinessOnAnUnreachableHostStaysUnknownEvenIfExistsFails(t *testing.T) {
+	p := &scriptedPersist{text: map[string]string{}, gone: map[string]bool{}}
+	svc := readinessFixture(t, p, sess("sess-1", "hamburg", "eval"))
+	_, rep, err := svc.Readiness(context.Background(), "sess-1", 0)
+	if err == nil || rep.State != AgentUnknown {
+		t.Fatalf("unreachable must not read as gone: %+v %v", rep, err)
 	}
 }
 

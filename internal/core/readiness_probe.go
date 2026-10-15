@@ -103,6 +103,9 @@ func (s *SessionService) readinessOf(ctx context.Context, sess *Session, lines i
 	if err != nil {
 		if cctx.Err() != nil {
 			err = cctx.Err()
+		} else if exists, perr := s.Persist.Exists(cctx, t, sess.Persist); perr == nil && !exists {
+			// The capture failed because there is nothing to capture.
+			return ReadinessReport{AgentReadiness: AgentReadiness{State: AgentGone, Reason: "tmux session does not exist"}, Lines: lines, SampledAt: time.Now().UTC()}
 		}
 		return ReadinessReport{AgentReadiness: AgentReadiness{State: AgentUnknown, Reason: "capture failed: " + err.Error()}, Lines: lines, SampledAt: time.Now().UTC()}
 	}

@@ -86,7 +86,13 @@ type ResumeOpts struct {
 	TargetHost         string
 	BridgeLocalSocket  string
 	BridgeRemoteSocket string
+	// NoCreate refuses to create a missing remote session: the attach exits
+	// ports.ExitSessionAbsent and ResumeOpts returns ErrSessionAbsent.
+	NoCreate bool
 }
+
+// ErrSessionAbsent is returned by a NoCreate resume whose remote session is gone.
+var ErrSessionAbsent = errors.New("session does not exist")
 
 // ResumeOpts attaches with optional auto-reconnect (default on).
 // The resolved persistName/host are frozen for the reconnect loop so a
@@ -148,6 +154,13 @@ func (s *SessionService) ResumeOpts(ctx context.Context, persistName, cwd string
 		RememberResume(sess)
 	}
 	cmd := s.Persist.AttachCommand(connHandle, connRemote)
+	if opts.NoCreate {
+		ea, ok := s.Persist.(ports.ExistingAttacher)
+		if !ok {
+			return fmt.Errorf("persistence %q cannot refuse to create sessions (--no-create)", s.Persist.Kind())
+		}
+		cmd = ea.AttachExistingCommand(connHandle)
+	}
 	reconnect := autoReconnectEnabled(opts.NoReconnect)
 	delay := reconnectDelay()
 	target := connHost + "/" + connPersist
@@ -174,6 +187,10 @@ func (s *SessionService) ResumeOpts(ctx context.Context, persistName, cwd string
 				ui.Done(fmt.Sprintf("%s  ·  %d %s  ·  %s", target, n, ui.AttemptLabel(n), ui.FormatDuration(time.Since(started))))
 			}
 			return nil
+		}
+		if opts.NoCreate && code == ports.ExitSessionAbsent {
+			status.Clear()
+			return fmt.Errorf("%w: %s on %s", ErrSessionAbsent, connPersist, connHost)
 		}
 		if !shouldRetryAttach(code) || !reconnect {
 			status.Clear()

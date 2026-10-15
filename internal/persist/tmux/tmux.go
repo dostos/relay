@@ -414,6 +414,18 @@ func (p *Persist) AttachCommand(h ports.PersistHandle, cwd string) string {
 		q, q, q, startDir, shellquote.Quote(banner))
 }
 
+// AttachExistingCommand attaches only to a live session. A missing session is
+// reported (stderr line, exit ports.ExitSessionAbsent) and never created, so a
+// presenter reopening a put-away session learns the work is gone instead of
+// landing in an empty session of the same name.
+func (p *Persist) AttachExistingCommand(h ports.PersistHandle) string {
+	q := shellquote.Quote(h.Name)
+	return fmt.Sprintf(
+		"if tmux has-session -t %s 2>/dev/null; then exec tmux attach -t %s; "+
+			"else printf 'relay: tmux session %%s does not exist on %%s\\n' %s $(hostname -s) >&2; exit %d; fi",
+		q, q, q, ports.ExitSessionAbsent)
+}
+
 func (p *Persist) DeadStatus(ctx context.Context, t ports.Transport, h ports.PersistHandle) (bool, int, error) {
 	exists, err := p.Exists(ctx, t, h)
 	if err != nil {

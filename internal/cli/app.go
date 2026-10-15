@@ -449,8 +449,9 @@ Sessions (explicit id; no guesswork):
   relay session sensors ID [--silence SEC]   Reinstall quiet idle/exit hooks
 
 Attach (what a Forge tab, or any terminal, runs):
-  relay resume --session NAME [--host HOST] [--cwd DIR] [--no-reconnect]
+  relay resume --session NAME [--host HOST] [--cwd DIR] [--no-reconnect] [--no-create]
                                       Re-attach; waits/retries on SSH drop (session frozen).
+                                      --no-create: never make a missing session; exit 66 instead.
   relay resume list [--probe]               live | disconnected | cleaned
                                       --probe adds real remote tmux liveness
   relay resume reap [--dry-run]             Clean entries whose remote tmux is gone
@@ -1659,6 +1660,8 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 			}
 		case "--no-reconnect":
 			opts.NoReconnect = true
+		case "--no-create":
+			opts.NoCreate = true
 		case "list":
 			return a.cmdResume(ctx, []string{"list"})
 		default:
@@ -1666,7 +1669,7 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 		}
 	}
 	if session == "" {
-		return a.fail(fmt.Errorf("usage: relay resume --session NAME [--host HOST] [--cwd DIR] [--no-reconnect]  |  relay resume list|reap|prune"))
+		return a.fail(fmt.Errorf("usage: relay resume --session NAME [--host HOST] [--cwd DIR] [--no-reconnect] [--no-create]  |  relay resume list|reap|prune"))
 	}
 	bridgeSessionID := ""
 	if sess, findErr := a.Reg.FindByPersistName(session, cwd); findErr == nil {
@@ -1685,6 +1688,10 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 		opts.BridgeRemoteSocket = core.BridgeRemoteSocket(bridgeSessionID)
 	}
 	if err := a.Sessions.ResumeOpts(ctx, session, cwd, opts); err != nil {
+		if errors.Is(err, core.ErrSessionAbsent) {
+			ui.Warn(fmt.Sprintf("relay: %v (--no-create: not creating a new one)", err))
+			return ports.ExitSessionAbsent
+		}
 		msg := core.FormatResumeError(err)
 		ui.Warn(msg)
 		// Cleaned = intentional; never open a fake shell.

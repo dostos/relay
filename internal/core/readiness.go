@@ -27,6 +27,10 @@ const (
 	AgentBlocked AgentState = "blocked"
 	// AgentAbsent means no agent is running — typically a bare shell.
 	AgentAbsent AgentState = "absent"
+	// AgentGone means the durable (tmux) session itself no longer exists, so
+	// there is no pane to classify. Distinct from AgentAbsent (a live pane with
+	// no agent) and from AgentUnknown (could not verify).
+	AgentGone AgentState = "gone"
 	// AgentUnknown means Relay could not verify the pane. It never authorizes
 	// replacement or input because it may represent connectivity or trust loss.
 	AgentUnknown AgentState = "unknown"

@@ -3,6 +3,8 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os/exec"
 	"os"
 	"path/filepath"
 	"strings"
@@ -117,5 +119,79 @@ func TestAutoReconnectEnv(t *testing.T) {
 	t.Setenv("RELAY_AUTO_RECONNECT", "0")
 	if autoReconnectEnabled(false) {
 		t.Fatal("env off")
+	}
+}
+
+type noCreatePersist struct {
+	resumePersist
+	existing string
+}
+
+func (p noCreatePersist) AttachExistingCommand(h ports.PersistHandle) string {
+	p.existing = "existing:" + h.Name
+	return "tmux-existing " + h.Name
+}
+
+type exitTransport struct {
+	*fakeTransport
+	code int
+	ran  *[]string
+}
+
+func (e exitTransport) Interactive(_ context.Context, command string) error {
+	*e.ran = append(*e.ran, command)
+	return exec.Command("sh", "-c", fmt.Sprintf("exit %d", e.code)).Run()
+}
+
+func TestResumeNoCreateReportsAbsentSessionWithoutRetrying(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	var ran []string
+	svc := &SessionService{
+		Reg: &Registry{}, Persist: noCreatePersist{},
+		NewTransport: func(string) (ports.Transport, error) {
+			return exitTransport{fakeTransport: &fakeTransport{id: "hamburg"}, code: ports.ExitSessionAbsent, ran: &ran}, nil
+		},
+	}
+	err := svc.ResumeOpts(context.Background(), "gone", "", ResumeOpts{TargetHost: "hamburg", NoCreate: true})
+	if !errors.Is(err, ErrSessionAbsent) {
+		t.Fatalf("err=%v", err)
+	}
+	if len(ran) != 1 || ran[0] != "tmux-existing gone" {
+		t.Fatalf("must attach once with the non-creating command, no reconnect loop: %v", ran)
+	}
+}
+
+func TestResumeNoCreateStillRetriesOtherFailures(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	t.Setenv("RELAY_RECONNECT_DELAY", "1ms")
+	var ran []string
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	svc := &SessionService{
+		Reg: &Registry{}, Persist: noCreatePersist{},
+		NewTransport: func(string) (ports.Transport, error) {
+			return exitTransport{fakeTransport: &fakeTransport{id: "hamburg"}, code: 255, ran: &ran}, nil
+		},
+	}
+	err := svc.ResumeOpts(ctx, "x", "", ResumeOpts{TargetHost: "hamburg", NoCreate: true})
+	if errors.Is(err, ErrSessionAbsent) || len(ran) < 2 {
+		t.Fatalf("an ssh drop (255) must keep retrying: err=%v runs=%d", err, len(ran))
+	}
+}
+
+func TestResumeWithoutNoCreateUsesTheCreatingCommand(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	var ran []string
+	svc := &SessionService{
+		Reg: &Registry{}, Persist: noCreatePersist{},
+		NewTransport: func(string) (ports.Transport, error) {
+			return exitTransport{fakeTransport: &fakeTransport{id: "hamburg"}, code: 0, ran: &ran}, nil
+		},
+	}
+	if err := svc.ResumeOpts(context.Background(), "x", "", ResumeOpts{TargetHost: "hamburg"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(ran) != 1 || !strings.HasPrefix(ran[0], "tmux attach-session") {
+		t.Fatalf("default behavior changed: %v", ran)
 	}
 }

@@ -70,6 +70,20 @@ type Persistence interface {
 	InstallSensors(ctx context.Context, t Transport, h PersistHandle, silenceSec int, emitCmd func(kind string) (string, error)) error
 }
 
+// ExitSessionAbsent is the exit status of `relay resume --no-create` (and of
+// the remote attach command behind it) when the durable session does not
+// exist. It is distinct from 0 (clean detach), 1 (error), 2 (usage), 130
+// (SIGINT) and 255 (ssh failure), so a presenter can tell "the work is gone"
+// from "the network dropped".
+const ExitSessionAbsent = 66
+
+// ExistingAttacher is an optional Persistence capability: an attach command
+// that never creates. When the session is missing it prints a line to stderr
+// and exits ExitSessionAbsent.
+type ExistingAttacher interface {
+	AttachExistingCommand(h PersistHandle) string
+}
+
 // DeliveryUncertainError marks an adapter error after a mutating input command
 // was attempted. Callers must preserve the envelope and must not retry it
 // automatically because the target may already have received the message.

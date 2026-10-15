@@ -481,3 +481,18 @@ func TestAttachCommandCreatesInRecordedCWD(t *testing.T) {
 		t.Errorf("empty cwd must not emit -c:\n%s", bare)
 	}
 }
+
+func TestAttachExistingCommandNeverCreates(t *testing.T) {
+	got := (&Persist{}).AttachExistingCommand(ports.PersistHandle{Name: "work"})
+	if strings.Contains(got, "new-session") {
+		t.Errorf("--no-create attach must never create:\n%s", got)
+	}
+	for _, want := range []string{"has-session -t 'work'", "exec tmux attach -t 'work'", "does not exist on", ">&2", "exit 66"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+	if ports.ExitSessionAbsent != 66 {
+		t.Errorf("documented exit code changed: %d", ports.ExitSessionAbsent)
+	}
+}
