@@ -245,3 +245,31 @@ func (p *concurrencyPersist) Capture(_ context.Context, _ ports.Transport, h por
 	<-p.mu
 	return p.text, nil
 }
+
+// stuckPersist ignores its context, as a capture does when a killed ssh
+// client's stdout pipe is still held open by a ControlPersist master.
+type stuckPersist struct {
+	ports.Persistence
+	release chan struct{}
+}
+
+func (p *stuckPersist) Capture(context.Context, ports.Transport, ports.PersistHandle, int) (string, error) {
+	<-p.release
+	return readyPane, nil
+}
+
+func TestReadinessReturnsAtTheDeadlineEvenWhenCaptureIgnoresTheContext(t *testing.T) {
+	p := &stuckPersist{release: make(chan struct{})}
+	defer close(p.release)
+	svc := readinessFixture(t, p, sess("sess-1", "hamburg", "eval"))
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, rep, err := svc.Readiness(ctx, "sess-1", 0)
+	if time.Since(start) > 3*time.Second {
+		t.Fatal("readiness waited on a capture that ignores its context")
+	}
+	if err == nil || rep.State != AgentUnknown || !strings.Contains(rep.Reason, "deadline exceeded") {
+		t.Fatalf("a stuck capture is unknown with the deadline as reason: %+v %v", rep, err)
+	}
+}

@@ -157,8 +157,16 @@ func (t *Transport) sshBase(ctx context.Context, extra ...string) (*exec.Cmd, er
 	base = append(base, ctrl...)
 	base = append(base, t.Host)
 	base = append(base, extra...)
-	return exec.CommandContext(ctx, "ssh", base...), nil
+	cmd := exec.CommandContext(ctx, "ssh", base...)
+	// A ControlPersist master forked by this ssh can inherit its stdout/stderr
+	// pipes; Run then waits on them long after the context deadline killed ssh
+	// itself (readiness calls bounded at 8s held Forge for 30s+). WaitDelay
+	// closes the pipes shortly after the process is gone.
+	cmd.WaitDelay = sshWaitDelay
+	return cmd, nil
 }
+
+const sshWaitDelay = 2 * time.Second
 
 func (t *Transport) Run(ctx context.Context, cwd, command string) (string, string, error) {
 	remote := command

@@ -97,7 +97,9 @@ func (s *SessionService) readinessOf(ctx context.Context, sess *Session, lines i
 	if err != nil {
 		return ReadinessReport{AgentReadiness: AgentReadiness{State: AgentUnknown, Reason: err.Error()}, Lines: lines, SampledAt: time.Now().UTC()}
 	}
-	text, err := s.Persist.Capture(cctx, t, sess.Persist, lines)
+	text, err := captureBounded(cctx, func(c context.Context) (string, error) {
+		return s.Persist.Capture(c, t, sess.Persist, lines)
+	})
 	if err != nil {
 		if cctx.Err() != nil {
 			err = cctx.Err()
@@ -106,6 +108,31 @@ func (s *SessionService) readinessOf(ctx context.Context, sess *Session, lines i
 	}
 	rep := ReadinessReport{AgentReadiness: ClassifyAgentPane(text), Lines: lines, SampledAt: time.Now().UTC()}
 	return rep
+}
+
+// captureBounded returns when ctx is done even if fn does not. Cancelling the
+// context kills the ssh client, but cmd.Run still waits for stdout to reach
+// EOF, and a ControlPersist master (or a wedged one) that inherited the pipe
+// keeps it open for up to a minute. Observed: an 8s ReadinessTimeout became
+// 30s+ for the caller, which timed out and showed a live session as unknown.
+// The abandoned goroutine ends with the process (this is a one-shot CLI) or
+// when the pipe closes; its result is dropped.
+func captureBounded(ctx context.Context, fn func(context.Context) (string, error)) (string, error) {
+	type result struct {
+		text string
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		text, err := fn(ctx)
+		ch <- result{text, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.text, r.err
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
 }
 
 // ListWithReadiness is `session list --readiness`: every session, each with
