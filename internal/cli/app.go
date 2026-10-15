@@ -1674,7 +1674,9 @@ func (a *App) cmdResume(ctx context.Context, args []string) int {
 	} else if entry, lookupErr := core.LookupResume(session); lookupErr == nil {
 		bridgeSessionID = entry.SessionID
 	}
-	if bridgeSessionID != "" {
+	// The control bridge service owns the reverse tunnel of every tokened
+	// session; a second -R on the same remote socket would fight it.
+	if bridgeSessionID != "" && !core.BridgeTunnelManaged(bridgeSessionID) {
 		localSocket, bridgeErr := ensureDesktopBridge(ctx)
 		if bridgeErr != nil {
 			return a.fail(bridgeErr)

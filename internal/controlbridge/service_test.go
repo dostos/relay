@@ -49,3 +49,16 @@ func TestRemoveLocalLinkLeavesUnrelatedPath(t *testing.T) {
 		t.Fatalf("unrelated link removed: %v", err)
 	}
 }
+
+// Regression: the stale-socket cleanup must not share the (possibly wedged)
+// ControlMaster and must be bounded.
+func TestCleanupArgsBypassControlMaster(t *testing.T) {
+	got := cleanupArgs("/tmp/remote.sock", "worker")
+	want := []string{
+		"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=15",
+		"-o", "ControlMaster=no", "-o", "ControlPath=none", "worker", "rm -f -- /tmp/remote.sock",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args = %#v", got)
+	}
+}

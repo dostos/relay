@@ -87,6 +87,9 @@ func (s *Service) reconcile(ctx context.Context) error {
 		if !wanted[id] {
 			tunnel.cancel()
 			delete(s.tunnels, id)
+			// Destroyed (or untokened) session: do not leave its remote
+			// socket behind.
+			go s.removeRemoteSocket(ctx, id, tunnel.host)
 		}
 	}
 	s.mu.Unlock()
@@ -120,8 +123,7 @@ func localHostID() (string, error) {
 }
 
 func hasToken(sessionID string) bool {
-	raw, err := os.ReadFile(filepath.Join(core.BridgeTokensDir(), sessionID+".token"))
-	return err == nil && strings.TrimSpace(string(raw)) != ""
+	return core.BridgeTunnelManaged(sessionID)
 }
 
 func linkLocalSocket(path, target string) error {
@@ -169,15 +171,36 @@ func (s *Service) runTunnel(ctx context.Context, sessionID, host string, state *
 		s.mu.Unlock()
 	}()
 	remote := core.BridgeRemoteSocket(sessionID)
-	cleanup := exec.CommandContext(ctx, "ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", host, "rm -f -- "+remote)
-	cleanup.Stderr = s.Stderr
-	if err := cleanup.Run(); err != nil || ctx.Err() != nil {
+	if err := s.runRemoteRm(ctx, remote, host); err != nil || ctx.Err() != nil {
 		return
 	}
 	args := tunnelArgs(remote, s.BridgeSocket, host)
 	cmd := exec.CommandContext(ctx, "ssh", args...)
 	cmd.Stderr = s.Stderr
 	_ = cmd.Run()
+}
+
+func (s *Service) removeRemoteSocket(ctx context.Context, sessionID, host string) {
+	_ = s.runRemoteRm(ctx, core.BridgeRemoteSocket(sessionID), host)
+}
+
+// runRemoteRm unlinks a stale remote socket over a dedicated, bounded ssh
+// connection. It must not go through the shared ControlMaster: a wedged master
+// ("ControlSocket ... already exists, disabling multiplexing") would hang or
+// fail the cleanup and leave the tunnel unable to bind.
+func (s *Service) runRemoteRm(ctx context.Context, remote, host string) error {
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cleanup := exec.CommandContext(cctx, "ssh", cleanupArgs(remote, host)...)
+	cleanup.Stderr = s.Stderr
+	return cleanup.Run()
+}
+
+func cleanupArgs(remote, host string) []string {
+	return []string{
+		"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=15",
+		"-o", "ControlMaster=no", "-o", "ControlPath=none", host, "rm -f -- " + remote,
+	}
 }
 
 func tunnelArgs(remote, local, host string) []string {

@@ -36,6 +36,16 @@ func relaySessionCommand(command, sessionID, hostID, persistName, bridgeToken st
 	return "export " + strings.Join(exports, " ") + "; exec " + command
 }
 
+// BridgeTunnelManaged reports whether the always-on control bridge service owns
+// the reverse tunnel for this session. The remote stream-local socket can only
+// have one listener, so an attach must not open its own -R forward for a
+// managed session: two ssh clients racing rm -f + bind on the same path make
+// one of them fail with "remote port forwarding failed" and orphan the other.
+func BridgeTunnelManaged(sessionID string) bool {
+	raw, err := os.ReadFile(bridgeTokenPath(sessionID))
+	return err == nil && strings.TrimSpace(string(raw)) != ""
+}
+
 func bridgeTokenPath(sessionID string) string {
 	return filepath.Join(BridgeTokensDir(), sanitizeID(sessionID)+".token")
 }

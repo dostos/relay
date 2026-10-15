@@ -83,3 +83,18 @@ func TestLoadBridgeIdentityForPersist(t *testing.T) {
 		t.Fatal("expected unknown tmux session to fail closed")
 	}
 }
+
+// Regression: the control bridge service owns the reverse tunnel for a tokened
+// session, so attaches must not open a competing -R on the same remote socket.
+func TestBridgeTunnelManagedFollowsToken(t *testing.T) {
+	t.Setenv("RELAY_STATE_DIR", t.TempDir())
+	if BridgeTunnelManaged("sess-x") {
+		t.Fatal("session without token must not be managed")
+	}
+	if err := rememberBridgeToken("sess-x", "br-secret"); err != nil {
+		t.Fatal(err)
+	}
+	if !BridgeTunnelManaged("sess-x") {
+		t.Fatal("tokened session must be managed by the control bridge")
+	}
+}
