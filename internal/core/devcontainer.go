@@ -42,8 +42,11 @@ type ToolkitSpec struct {
 	Volume string `yaml:"volume" json:"volume"`                       // docker named volume
 	Target string `yaml:"target" json:"target"`                       // mount point in-container
 	BinDir string `yaml:"bin_dir,omitempty" json:"bin_dir,omitempty"` // PATH entry; default <target>/bin
+	// Agents selects built-in install recipes (claude, codex, ccs, cursor-agent).
+	// Ignored when Provision is set — raw provision remains the escape hatch.
+	Agents []string `yaml:"agents,omitempty" json:"agents,omitempty"`
 	// Provision populates the volume. Run once, guarded by a stamp file, as the
-	// container's exec user. Declarative data — relay has no per-agent install logic.
+	// container's exec user. When empty, Agents recipes are composed instead.
 	Provision string `yaml:"provision,omitempty" json:"provision,omitempty"`
 }
 
@@ -208,6 +211,21 @@ func DevcontainerUpCommand(c *ContainerSpec, removeExisting bool) (string, error
 		}
 		args = append(args, "--mount", shellquote.Quote(spec))
 	}
+	// expose: is the declared bind-mount list for a devcontainer. volumes:
+	// refuses host paths on purpose; these are the binds that belong here.
+	// A change to expose: needs --recreate — an already-running container
+	// keeps the mounts it was created with.
+	for _, raw := range c.Expose {
+		b, err := ParseBindMount(raw)
+		if err != nil {
+			return "", fmt.Errorf("expose: %w", err)
+		}
+		mount, err := bindMountFlag(b)
+		if err != nil {
+			return "", err
+		}
+		args = append(args, "--mount", mount)
+	}
 	for _, name := range c.Env {
 		if err := validateEnvName(name); err != nil {
 			return "", err
@@ -273,14 +291,21 @@ func DevcontainerDownCommand(c *ContainerSpec) string {
 // container, once. It is guarded by a stamp file on the volume so a recreated
 // container reuses the already-populated volume instead of reinstalling.
 func ToolkitProvisionCommand(c *ContainerSpec, ref ContainerRef, force bool) (string, error) {
-	if c == nil || c.Toolkit == nil || c.Toolkit.Provision == "" {
+	if c == nil || c.Toolkit == nil {
+		return "", fmt.Errorf("container %q has no toolkit.provision", containerName(c))
+	}
+	prov, err := c.Toolkit.ResolvedProvision()
+	if err != nil {
+		return "", err
+	}
+	if prov == "" {
 		return "", fmt.Errorf("container %q has no toolkit.provision", containerName(c))
 	}
 	stamp, err := shellquote.PathExpr(c.Toolkit.StampPath())
 	if err != nil {
 		return "", err
 	}
-	body := fmt.Sprintf("set -e; %s; mkdir -p $(dirname %s); date -Is > %s", c.Toolkit.Provision, stamp, stamp)
+	body := fmt.Sprintf("set -e; %s; mkdir -p $(dirname %s); date -Is > %s", prov, stamp, stamp)
 	inner := body
 	if !force {
 		inner = fmt.Sprintf("if [ -f %s ]; then echo already-provisioned; else %s; fi", stamp, body)
@@ -398,7 +423,10 @@ type ContainerStatus struct {
 	User     string `json:"user,omitempty"`
 	Toolkit  string `json:"toolkit,omitempty"`
 	Home     string `json:"home,omitempty"`
-	Detail   string `json:"detail,omitempty"`
+	// Agents reports per-agent binary/auth presence when the container is
+	// running and mounts a toolkit/home volume.
+	Agents []AgentVolumeStatus `json:"agents,omitempty"`
+	Detail string              `json:"detail,omitempty"`
 }
 
 // ImageUp brings an instance of an image-backed spec up over t and finishes
@@ -458,23 +486,41 @@ func ImageUp(ctx context.Context, t ports.Transport, hostID string, inst ImageIn
 				st.User, inst.Name, pRunErr, strings.TrimSpace(pOut+"\n"+pErr))
 		}
 	}
-	if spec.Toolkit != nil && spec.Toolkit.Provision != "" {
-		ref := spec.RefFor(inst.Name, "")
-		provCmd, err := ToolkitProvisionCommand(spec, ref, forceProvision)
-		if err != nil {
-			return nil, err
-		}
-		pOut, pErr, pRunErr := t.Run(ctx, "", provCmd)
-		pCombined := strings.TrimSpace(pOut + "\n" + pErr)
-		if pRunErr != nil {
-			return nil, fmt.Errorf("toolkit provision failed in %s: %w\n--- output ---\n%s", inst.Name, pRunErr, pCombined)
-		}
+	if err := provisionToolkit(ctx, t, spec, spec.RefFor(inst.Name, ""), forceProvision, st); err != nil {
+		return nil, err
+	}
+	st.OK = true
+	return st, nil
+}
+
+// provisionToolkit runs the toolkit install when the spec declares provision
+// or agents recipes. Shared by image and devcontainer up paths.
+func provisionToolkit(ctx context.Context, t ports.Transport, spec *ContainerSpec, ref ContainerRef, force bool, st *ContainerStatus) error {
+	if spec == nil || spec.Toolkit == nil {
+		return nil
+	}
+	prov, err := spec.Toolkit.ResolvedProvision()
+	if err != nil {
+		return err
+	}
+	if prov == "" {
+		return nil
+	}
+	provCmd, err := ToolkitProvisionCommand(spec, ref, force)
+	if err != nil {
+		return err
+	}
+	pOut, pErr, pRunErr := t.Run(ctx, "", provCmd)
+	pCombined := strings.TrimSpace(pOut + "\n" + pErr)
+	if pRunErr != nil {
+		return fmt.Errorf("toolkit provision failed in %s: %w\n--- output ---\n%s", ref.Ref, pRunErr, pCombined)
+	}
+	if st != nil {
 		if d := firstLine(pCombined); d != "" {
 			st.Detail = d
 		}
 	}
-	st.OK = true
-	return st, nil
+	return nil
 }
 
 // imageStatus reads one instance's state.
@@ -495,6 +541,9 @@ func imageStatus(ctx context.Context, t ports.Transport, hostID string, spec *Co
 	st.Running, st.ExitCode, st.ContainerID, st.Present = running, code, id, present
 	if !present {
 		st.Detail = "absent"
+	}
+	if st.Running {
+		probeAgentStatuses(ctx, t, spec, st)
 	}
 	return st, nil
 }
@@ -677,19 +726,10 @@ func (s *ContainerService) UpInstance(ctx context.Context, hostID, name, instanc
 				user, st.ContainerID, pRunErr, strings.TrimSpace(pOut+"\n"+pErr))
 		}
 	}
-	if spec.Toolkit != nil && spec.Toolkit.Provision != "" {
-		ref := spec.RefFor(st.ContainerID, "")
-		ref.User = user
-		provCmd, err := ToolkitProvisionCommand(spec, ref, forceProvision)
-		if err != nil {
-			return nil, err
-		}
-		pOut, pErr, pRunErr := t.Run(ctx, "", provCmd)
-		pCombined := strings.TrimSpace(pOut + "\n" + pErr)
-		if pRunErr != nil {
-			return nil, fmt.Errorf("toolkit provision failed in %s: %w\n--- output ---\n%s", st.ContainerID, pRunErr, pCombined)
-		}
-		st.Detail = firstLine(pCombined)
+	ref := spec.RefFor(st.ContainerID, "")
+	ref.User = user
+	if err := provisionToolkit(ctx, t, spec, ref, forceProvision, st); err != nil {
+		return nil, err
 	}
 	st.OK = true
 	return st, nil
@@ -787,6 +827,10 @@ func (s *ContainerService) StatusInstance(ctx context.Context, hostID, name, ins
 	st.Present = st.Running
 	if !st.Present {
 		st.Detail = "no running container carries the id label"
+	}
+	if st.Running {
+		st.User = ResolveContainerUser(ctx, t, spec, st.ContainerID)
+		probeAgentStatuses(ctx, t, spec, st)
 	}
 	return st, nil
 }

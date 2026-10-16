@@ -43,15 +43,18 @@ func LocalHostIDFromProfile() string {
 
 // HostProfile is authoritative on each remote (~/.config/relay/host.yaml).
 type HostProfile struct {
-	Version    int                    `yaml:"version" json:"version"`
-	HostID     string                 `yaml:"host_id,omitempty" json:"host_id,omitempty"`
-	Agents     []AgentSpec            `yaml:"agents" json:"agents"`
-	PathMap    []PathMapEntry         `yaml:"path_map" json:"path_map"`
-	Containers []ContainerSpec        `yaml:"containers,omitempty" json:"containers,omitempty"`
-	Defaults   HostDefaults           `yaml:"defaults" json:"defaults"`
-	Meta       map[string]any         `yaml:"meta,omitempty" json:"meta,omitempty"`
-	ProbedAt   *time.Time             `yaml:"probed_at,omitempty" json:"probed_at,omitempty"`
-	Probe      map[string]ProbeResult `yaml:"probe,omitempty" json:"probe,omitempty"`
+	Version    int             `yaml:"version" json:"version"`
+	HostID     string          `yaml:"host_id,omitempty" json:"host_id,omitempty"`
+	Agents     []AgentSpec     `yaml:"agents" json:"agents"`
+	PathMap    []PathMapEntry  `yaml:"path_map" json:"path_map"`
+	Containers []ContainerSpec `yaml:"containers,omitempty" json:"containers,omitempty"`
+	// AgentVolumes are host-level toolkit + home defaults applied to every
+	// container kind unless a spec overrides or sets agent_volumes: false.
+	AgentVolumes *AgentVolumesSpec      `yaml:"agent_volumes,omitempty" json:"agent_volumes,omitempty"`
+	Defaults     HostDefaults           `yaml:"defaults" json:"defaults"`
+	Meta         map[string]any         `yaml:"meta,omitempty" json:"meta,omitempty"`
+	ProbedAt     *time.Time             `yaml:"probed_at,omitempty" json:"probed_at,omitempty"`
+	Probe        map[string]ProbeResult `yaml:"probe,omitempty" json:"probe,omitempty"`
 }
 
 // AgentSpec describes an agent CLI available on the host.

@@ -108,6 +108,10 @@ type ContainerSpec struct {
 	// Volumes are extra named volume mounts, each "NAME:/container/path[:ro]".
 	Volumes []string `yaml:"volumes,omitempty" json:"volumes,omitempty"`
 
+	// AgentVolumes controls inheritance of the host-level agent_volumes:
+	// nil/true inherit toolkit+home defaults; false opts this spec out.
+	AgentVolumes *bool `yaml:"agent_volumes,omitempty" json:"agent_volumes,omitempty"`
+
 	// GPU and Network apply to an image-backed container (`image:` set,
 	// no `devcontainer:`), which relay runs itself: GPU is all | none | a
 	// device list "0,1"; Network is docker's --network value. A session may
@@ -161,14 +165,15 @@ func (c *ContainerSpec) ResolveCWD(localRepo string) string {
 	return "/"
 }
 
-// ResolveContainer finds a container spec by name in the host profile.
+// ResolveContainer finds a container spec by name in the host profile and
+// applies host-level agent_volumes defaults unless the spec opts out.
 func (p *HostProfile) ResolveContainer(name string) (*ContainerSpec, error) {
 	if p == nil {
 		return nil, fmt.Errorf("nil host profile")
 	}
 	for i := range p.Containers {
 		if p.Containers[i].Name == name {
-			return &p.Containers[i], nil
+			return p.ApplyAgentVolumes(&p.Containers[i]), nil
 		}
 	}
 	avail := make([]string, 0, len(p.Containers))

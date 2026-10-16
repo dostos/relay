@@ -294,6 +294,34 @@ func TestSessionContainerRefCarriesLifetimeAndIdentity(t *testing.T) {
 	}
 }
 
+func TestDevcontainerUpAppliesExposeBinds(t *testing.T) {
+	s := devSpec()
+	s.Expose = []string{"/data/shared:/data:ro", "~/gh/cache:/cache"}
+	got, err := DevcontainerUpCommand(s, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "type=bind,source=/data/shared,target=/data,readonly") {
+		t.Errorf("absolute expose bind missing:\n%s", got)
+	}
+	if !strings.Contains(got, "type=bind,source=$HOME") || !strings.Contains(got, "target=/cache") {
+		t.Errorf("~/ expose bind missing:\n%s", got)
+	}
+	// volumes: still refuses host paths — expose: is the bind path.
+	s.Volumes = []string{"/host/path:/in"}
+	if _, err := DevcontainerUpCommand(s, false); err == nil {
+		t.Fatal("volumes: must still refuse host paths")
+	}
+}
+
+func TestDevcontainerUpRejectsBadExpose(t *testing.T) {
+	s := devSpec()
+	s.Expose = []string{"relative:/in"}
+	if _, err := DevcontainerUpCommand(s, false); err == nil {
+		t.Fatal("relative expose host path must be refused")
+	}
+}
+
 func TestEphemeralTeardownLeavesTheVolumes(t *testing.T) {
 	// The whole point of the named volumes is that they outlive the container.
 	// A teardown that removed them would throw away the agent installs and the

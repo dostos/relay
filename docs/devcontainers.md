@@ -33,6 +33,19 @@ config into a container whose toolchain cannot run them.
 
 ```yaml
 # ~/.config/relay/host.yaml (authoritative on the host)
+
+# Host-level defaults: applied to every container kind (image + devcontainer +
+# existing) unless a spec overrides toolkit:/home: or sets agent_volumes: false.
+agent_volumes:
+  toolkit:
+    volume: relay-toolkit
+    target: /relay/toolkit        # bin_dir defaults to <target>/bin
+    agents: [claude, codex, ccs, cursor-agent]   # built-in install recipes
+    # provision: |                # optional raw shell escape hatch (wins over agents:)
+  home:
+    volume: relay-home
+    target: /relay/home
+
 containers:
   - name: oqb                       # relay handle → --container oqb
     devcontainer:
@@ -41,16 +54,8 @@ containers:
       # id_label: relay.container=oqb                              # default
       gpu: none                     # all | detect | none
       # cli: /abs/path/to/devcontainer                             # if not on the login PATH
-    toolkit:                        # named volume carrying the agent CLIs
-      volume: relay-toolkit
-      target: /relay/toolkit        # bin_dir defaults to <target>/bin
-      provision: |
-        npm i -g --prefix /relay/toolkit @anthropic-ai/claude-code @openai/codex
-        HOME=/relay/toolkit bash -c "curl -fsS https://cursor.com/install | bash"
-        ln -sf /relay/toolkit/.local/bin/cursor-agent /relay/toolkit/bin/cursor-agent
-    home:                           # named volume that becomes $HOME for agent execs
-      volume: relay-home
-      target: /relay/home
+    expose:                         # host bind mounts (/abs or ~/… → /abs[:ro])
+      - ~/data:/data:ro             # changes need --recreate
     volumes:                        # optional extra named volumes, NAME:/path
       - relay-pip:/home/node/.cache/pip
     env: [ANTHROPIC_API_KEY]        # passed through by NAME; the value never enters relay
@@ -62,6 +67,11 @@ containers:
 `user:` is optional. Left unset, relay reads the devcontainer CLI's own
 `remoteUser` and execs as it — a devcontainer's `Config.User` is still `root`,
 because the CLI applies `remoteUser` only to execs it runs itself.
+
+`expose:` is how a devcontainer sees shared host directories. `volumes:` still
+refuses host paths (those would silently become binds docker creates as root);
+put binds in `expose:`. Changing `expose:` on a running container needs
+`relay container up --recreate`.
 
 ## Use it
 
@@ -118,7 +128,36 @@ to.
 
 ## First login
 
-Auth once per host, into the home volume:
+Auth once per host, into the home volume. Prefer copying allowlisted credential
+files from the host (never a bind of `~/.claude`):
+
+```bash
+relay container auth sync -H hamburg --container oqb
+# or narrow: --agent claude|codex|ccs|cursor   and/or --dry-run
+relay container status -H hamburg --container oqb   # per-agent binary + auth
+```
+
+### Auth-sync allowlist
+
+Only these host paths are copied into the home volume (via a throwaway
+container; each path is mounted individually, never the whole tree):
+
+| Agent | Host path | Notes |
+|---|---|---|
+| claude | `~/.claude/.credentials.json` | required when syncing claude |
+| claude | `~/.claude.json` | optional |
+| codex | `~/.codex/auth.json` | required when syncing codex |
+| codex | `~/.codex/config.toml` | optional |
+| ccs | `~/.ccs/` | optional directory copy of instances |
+| cursor | `~/.cursor/auth.json`, `argv.json`, `cli-config.json` | optional |
+| cursor | `~/.config/cursor/auth.json`, `prompts/` | optional |
+
+**Not copied (security):** host hooks, plugins, MCP config, `settings.json`,
+or any other file under `~/.claude/` besides `.credentials.json`. Binding the
+host's `~/.claude` would drag those into a container whose toolchain cannot run
+them — that is why relay never bind-mounts it.
+
+Interactive login still works when a vendor has no copyable file yet:
 
 ```bash
 relay session create -H hamburg --container oqb
@@ -144,21 +183,38 @@ containers:
     user: worker
     gpu: none                       # all | none | "0,1"; a session may override
     network: bridge                 # docker --network; a session may override
-    home: { volume: relay-home, target: /relay/home }
+    # toolkit/home inherited from agent_volumes: unless overridden here
     env: [ANTHROPIC_API_KEY]        # by NAME, as everywhere else
+```
+
+Declare one without hand-editing `host.yaml`:
+
+```bash
+relay --json host container -H hamburg --name hammer --image ghcr.io/dostos/hammer:v1 \
+      --user worker --gpu none --network bridge \
+      --home relay-home:/relay/home --toolkit relay-toolkit:/relay/toolkit \
+      --volume ev:/out --bind /data/corpus:/corpus:ro --env ANTHROPIC_API_KEY \
+      --default-cwd /work
+# --image and --workspace-folder are mutually exclusive
 ```
 
 ```bash
 # The session brings its own instance up, named <spec>-<session>, mounts what
 # it was given, and runs the trailing command as the pane's inner process.
+# --workdir sets the in-container cwd for this session (absolute).
 relay --json session create -H hamburg --container hammer --ephemeral --name order-42 \
+      --workdir /workspaces/proj \
       --volume ev-order-42:/out --bind /data/corpus:/corpus:ro --gpus 0,1 --network host \
       -- /opt/worker/entrypoint --order-file /out/order.json
 
-relay container status -H hamburg --container hammer --name order-42   # this instance
+relay container status -H hamburg --container hammer --name order-42   # this instance (+ per-agent)
 relay container stop   -H hamburg --container hammer --name order-42   # park; filesystem and mounts survive
 relay container start  -H hamburg --container hammer --name order-42
 relay container up     -H hamburg --container hammer                   # the spec's own, unnamed instance
+
+# Before launch, clients can ask whether the host can run containers at all:
+relay --json host caps -H hamburg
+# → docker.{present,version,daemon,user_can_run}, devcontainer_cli.{…}, gpu.nvidia
 ```
 
 What is the same as a devcontainer: tmux stays on the host, the pane's inner
@@ -191,12 +247,14 @@ wrapped in `docker exec`.
 
 | Trap | What relay does |
 |---|---|
-| The `devcontainer` CLI is a global npm install under nvm, so it is absent from the non-interactive PATH relay's ssh transport uses (`node -v` is empty under `bash -lc`, `v20.19.5` under `bash -ilc` on hamburg) | Runs the CLI under `bash -ilc`; `devcontainer.cli` takes an absolute path as an escape hatch |
+| The `devcontainer` CLI is a global npm install under nvm, so it is absent from the non-interactive PATH relay's ssh transport uses (`node -v` is empty under `bash -lc`, `v20.19.5` under `bash -ilc` on hamburg) | Runs the CLI under `bash -ilc`; `devcontainer.cli` takes an absolute path as an escape hatch; `relay host caps` probes that same PATH |
 | A named volume whose mount point is absent from the image is created `root:root 0755`, so a non-root agent cannot write to it | One guarded root exec chowns the relay volumes to the exec user at `up` |
 | A devcontainer's `Config.User` is `root`, so every relay exec would run as root — which agents refuse and which writes root-owned files into the volumes | Resolves `remoteUser` from the `devcontainer.metadata` label |
 | A container recreate changes the container id, so a declared `container:` name goes stale | Resolves the id from the relay id label at handoff time, not at declare time |
-| A host path given as a volume source would silently become a bind mount that docker creates on the host | `volumes:` refuses anything that looks like a path; bind mounts belong in `expose:` |
-| A repo with no host `path_map` entry would fail to resolve a working directory, even though for a container session the host cwd is only where the pane sits | Falls back to `~` on the host; the directory that matters is resolved inside the container from the spec |
+| A host path given as a volume source would silently become a bind mount that docker creates on the host | `volumes:` refuses anything that looks like a path; bind mounts belong in `expose:` (injected as `--mount type=bind` on `devcontainer up`, and as `-v` on image-backed runs) |
+| A repo with no host `path_map` entry would fail to resolve a working directory, even though for a container session the host cwd is only where the pane sits | Falls back to `~` on the host; the directory that matters is resolved inside the container from the spec (or `session create --workdir`) |
+| Binding the host's `~/.claude` drags hooks/plugins/MCP config into a container that cannot run them | Named home volume + `relay container auth sync` copies only the allowlisted credential files |
+| Clients cannot tell whether a host can run containers before a failing `up` | `relay --json host caps -H HOST` probes docker, the devcontainer CLI (login-shell PATH) and nvidia in one round trip |
 
 ## Requirements on the host
 
@@ -210,17 +268,19 @@ Verified on hamburg, 2026-09-05, on `mcr.microsoft.com/devcontainers/javascript-
 (Debian, glibc 2.41), all running as the non-root `remoteUser` with `$HOME` on
 the home volume:
 
-| Agent | Install | Version |
+| Agent | Install recipe (`toolkit.agents`) | Version |
 |---|---|---|
-| `claude` | npm, honours `--prefix` | 2.1.197 |
-| `codex` | npm, honours `--prefix` | 0.153.4 |
+| `claude` | npm `@anthropic-ai/claude-code` with `--prefix` | 2.1.197 |
+| `codex` | npm `@openai/codex` with `--prefix` | 0.153.4 |
+| `ccs` | npm `ccs` (or `@agentclientprotocol/ccs`) with `--prefix` | — |
 | `cursor-agent` | native installer, **hardcoded to `$HOME/.local`** | 2026.09.02 |
 
 `cursor-agent` is the one that needs care: its installer takes no install-dir
-override, so the provision command runs it with `HOME` pointed at the toolkit
-volume and then symlinks the result into the volume's `bin_dir`. That keeps a
-single PATH entry for all three. This is provision data in `host.yaml`, not
-relay code — relay has no per-agent install logic.
+override, so the recipe runs it with `HOME` pointed at the toolkit volume and
+then symlinks the result into the volume's `bin_dir`. That keeps a single PATH
+entry for every agent. Prefer `toolkit.agents: […]` (or host `agent_volumes`)
+over a hand-written `provision:`; raw `provision:` remains the escape hatch and
+wins when both are set.
 
 The base `devcontainers/base:ubuntu-22.04` image has no node, so an npm-based
 provision fails there with `npm: command not found`. Use a node-bearing image or
