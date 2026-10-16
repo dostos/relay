@@ -401,15 +401,19 @@ Dev containers (declared under containers: in the remote host.yaml):
   relay container up -H HOST --container NAME [--recreate] [--reprovision]
                                       devcontainer up + relay named volumes; provisions the toolkit
   relay container status|down -H HOST --container NAME
-  relay session create -H HOST --container NAME [--ephemeral] [--volume V:/p] [--bind /h:/p] [--gpus 0,1] [--network N] [-- ARGV]
+  relay container auth sync -H HOST --container NAME [--agent claude|codex|ccs|cursor] [--dry-run]
+                                      Copy allowlisted agent credentials into the home volume
+  relay session create -H HOST --container NAME [--ephemeral] [--workdir /abs]
+                                      [--volume V:/p] [--bind /h:/p] [--gpus 0,1] [--network N] [-- ARGV]
                                       An image-backed container gets one instance per session;
-                                      the trailing command is what the pane runs.
+                                      --workdir sets the in-container cwd; the trailing command is the pane.
   relay container stop|start -H HOST --container NAME [--name INSTANCE]
 
 Host profiles (authoritative on each remote ~/.config/relay/host.yaml):
   relay host show -H HOST
   relay host fetch -H HOST
   relay host probe -H HOST
+  relay host caps -H HOST             Cheap docker/devcontainer/gpu probe (one ssh round trip)
   relay host cache -H HOST
   relay host map -H HOST --match NAME --remote-cwd DIR
                                       Record where a local repo lives on HOST
@@ -418,6 +422,8 @@ Host profiles (authoritative on each remote ~/.config/relay/host.yaml):
                                       Clone with the HOST's gh; reports if it has a devcontainer
   relay host container -H HOST --name NAME --workspace-folder DIR
                                       Declare a devcontainer so relay container up can launch it
+  relay host container -H HOST --name NAME --image REF [image flags…]
+                                      Declare an image-backed container (mutually exclusive with --workspace-folder)
   relay host example -H HOST          Print starter host.yaml
   relay host bootstrap -H HOST        Install host-local event service (unix socket; one quiet SSH)
 
@@ -694,6 +700,19 @@ func (a *App) cmdHost(ctx context.Context, args []string) int {
 			}
 		}
 		return a.errOut(a.out(p))
+	case "caps":
+		if err := requireNoExtra(rest); err != nil {
+			return a.fail(err)
+		}
+		if host == "" {
+			return a.fail(fmt.Errorf("-H HOST required"))
+		}
+		caps, err := a.Profiles.Caps(ctx, host)
+		if err != nil {
+			return a.fail(err)
+		}
+		a.JSON = true
+		return a.errOut(a.out(caps))
 	case "bootstrap":
 		if err := requireNoExtra(rest); err != nil {
 			return a.fail(err)
@@ -774,43 +793,94 @@ func (a *App) cmdHost(ctx context.Context, args []string) int {
 			"path_map": profile.PathMap,
 		}))
 	case "container":
-		// Declares a devcontainer in the host's profile so `relay container up`
-		// can launch it. Only the two fields that verb needs are written:
-		// toolkit and home volumes are decisions about what an agent requires,
-		// and inventing them would put volumes on a shared host nobody asked
-		// for.
+		// Declares a container in the host's profile so `relay container up`
+		// can launch it. --workspace-folder writes a minimal devcontainer;
+		// --image writes an image-backed worker. Toolkit/home are only written
+		// when the caller passes --toolkit/--home (or host agent_volumes apply).
 		if host == "" {
 			return a.fail(fmt.Errorf("-H HOST required"))
 		}
-		name, folder := "", ""
+		var (
+			name, folder, image string
+			decl                core.ImageContainerDecl
+		)
 		for i := 0; i < len(rest); i++ {
+			need := func(flag string) (string, error) {
+				if i+1 >= len(rest) {
+					return "", fmt.Errorf("%s requires a value", flag)
+				}
+				i++
+				return rest[i], nil
+			}
+			var err error
 			switch rest[i] {
 			case "--name":
-				i++
-				if i < len(rest) {
-					name = rest[i]
-				}
+				name, err = need("--name")
+				decl.Name = name
 			case "--workspace-folder":
-				i++
-				if i < len(rest) {
-					folder = rest[i]
-				}
+				folder, err = need("--workspace-folder")
+			case "--image":
+				image, err = need("--image")
+				decl.Image = image
+			case "--user":
+				decl.User, err = need("--user")
+			case "--gpu":
+				decl.GPU, err = need("--gpu")
+			case "--network":
+				decl.Network, err = need("--network")
+			case "--home":
+				decl.Home, err = need("--home")
+			case "--toolkit":
+				decl.Toolkit, err = need("--toolkit")
+			case "--volume":
+				var v string
+				v, err = need("--volume")
+				decl.Volumes = append(decl.Volumes, v)
+			case "--bind":
+				var v string
+				v, err = need("--bind")
+				decl.Binds = append(decl.Binds, v)
+			case "--env":
+				var v string
+				v, err = need("--env")
+				decl.Env = append(decl.Env, v)
+			case "--default-cwd":
+				decl.DefaultCWD, err = need("--default-cwd")
 			default:
 				return a.fail(rejectUnknownFlag(rest[i]))
 			}
+			if err != nil {
+				return a.fail(err)
+			}
 		}
-		if name == "" || folder == "" {
-			return a.fail(fmt.Errorf("usage: relay host container -H HOST --name NAME --workspace-folder DIR"))
+		if name == "" {
+			return a.fail(fmt.Errorf("usage: relay host container -H HOST --name NAME (--workspace-folder DIR | --image REF)"))
+		}
+		if folder != "" && image != "" {
+			return a.fail(fmt.Errorf("--workspace-folder and --image are mutually exclusive"))
+		}
+		if folder == "" && image == "" {
+			return a.fail(fmt.Errorf("usage: relay host container -H HOST --name NAME (--workspace-folder DIR | --image REF)"))
 		}
 		t, err := a.tf(host)
 		if err != nil {
 			return a.fail(err)
 		}
+		a.JSON = true
+		if image != "" {
+			profile, spec, err := a.Profiles.DeclareImageContainer(ctx, t, host, decl)
+			if err != nil {
+				return a.fail(err)
+			}
+			return a.errOut(a.out(map[string]any{
+				"ok": true, "host_id": host, "name": name, "image": image,
+				"spec": spec, "containers": profile.Containers,
+			}))
+		}
 		profile, err := a.Profiles.DeclareContainer(ctx, t, host, name, folder)
 		if err != nil {
 			return a.fail(err)
 		}
-		a.JSON = true
 		return a.errOut(a.out(map[string]any{
 			"ok": true, "host_id": host, "name": name,
 			"workspace_folder": folder, "containers": profile.Containers,
@@ -1155,6 +1225,13 @@ func parseSessionCreateArgs(host string, rest []string) (core.CreateOpts, error)
 		case "--network":
 			v, err = need(i, rest[i])
 			opts.ContainerNetwork = v
+			i++
+		case "--workdir":
+			v, err = need(i, rest[i])
+			if !strings.HasPrefix(v, "/") {
+				return opts, fmt.Errorf("--workdir %q must be an absolute container path", v)
+			}
+			opts.ContainerWorkdir = v
 			i++
 		case "--":
 			if i+1 >= len(rest) {
@@ -1909,12 +1986,15 @@ func isLegacyAuthorityProcess(command string, argv []string) bool {
 // Containers workspace up with relay's named volumes injected, tearing it
 // down, and reporting whether it is running.
 func (a *App) cmdContainer(ctx context.Context, args []string) int {
-	usage := "usage: relay container up|down|status|stop|start -H HOST --container NAME [--name INSTANCE] [--recreate] [--reprovision]"
+	usage := "usage: relay container up|down|status|stop|start|auth -H HOST --container NAME [--name INSTANCE] [--recreate] [--reprovision]"
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
 		fmt.Println(usage)
 		return 0
 	}
 	sub := args[0]
+	if sub == "auth" {
+		return a.cmdContainerAuth(ctx, args[1:])
+	}
 	host, name, tmuxName := "", "", ""
 	recreate, reprovision := false, false
 	rest := args[1:]
@@ -1998,8 +2078,73 @@ func (a *App) cmdContainer(ctx context.Context, args []string) int {
 	if st.Home != "" {
 		fmt.Printf("  home       volume %s\n", st.Home)
 	}
+	for _, ag := range st.Agents {
+		bin := "absent"
+		if ag.Binary {
+			bin = "present"
+			if ag.Version != "" {
+				bin += " " + ag.Version
+			}
+		}
+		auth := "no-auth"
+		if ag.Authed {
+			auth = "authed"
+		}
+		fmt.Printf("  agent      %s  %s  %s\n", ag.Agent, bin, auth)
+	}
 	if st.Detail != "" {
 		fmt.Printf("  detail     %s\n", st.Detail)
 	}
 	return 0
+}
+
+func (a *App) cmdContainerAuth(ctx context.Context, args []string) int {
+	usage := "usage: relay container auth sync -H HOST --container NAME [--agent claude|codex|ccs|cursor] [--dry-run]"
+	if len(args) == 0 {
+		return a.fail(fmt.Errorf("%s", usage))
+	}
+	if args[0] != "sync" {
+		return a.fail(fmt.Errorf("unknown container auth subcommand %q\n%s", args[0], usage))
+	}
+	host, name, agent := "", "", ""
+	dryRun := false
+	rest := args[1:]
+	for i := 0; i < len(rest); i++ {
+		switch rest[i] {
+		case "-H", "--host":
+			i++
+			if i < len(rest) {
+				host = rest[i]
+			}
+		case "--container", "-c":
+			i++
+			if i < len(rest) {
+				name = rest[i]
+			}
+		case "--agent":
+			i++
+			if i < len(rest) {
+				agent = rest[i]
+			}
+		case "--dry-run":
+			dryRun = true
+		default:
+			return a.fail(rejectUnknownFlag(rest[i]))
+		}
+	}
+	if host == "" {
+		return a.fail(fmt.Errorf("-H HOST required"))
+	}
+	if name == "" {
+		return a.fail(fmt.Errorf("--container NAME required"))
+	}
+	if a.Containers == nil {
+		return a.fail(fmt.Errorf("container service unavailable"))
+	}
+	res, err := a.Containers.AuthSync(ctx, host, name, agent, dryRun)
+	if err != nil {
+		return a.fail(err)
+	}
+	a.JSON = true
+	return a.errOut(a.out(res))
 }

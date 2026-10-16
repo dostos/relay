@@ -260,6 +260,37 @@ func TestImageUpPreparesVolumesForTheExecUser(t *testing.T) {
 	}
 }
 
+func TestSessionWorkdirOverridesResolveCWD(t *testing.T) {
+	profile := &HostProfile{Containers: []ContainerSpec{*imageSpec()}}
+	tr := &scriptedTransport{outputs: []string{"created\nabc123\n", "prepared\n"}}
+	opts := CreateOpts{HostID: "hamburg", Container: "hammer", Name: "order-42",
+		ContainerWorkdir: "/workspaces/proj", ContainerEphemeral: true}
+	ref, err := resolveSessionContainer(context.Background(), tr, profile, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref.CWD != "/workspaces/proj" {
+		t.Fatalf("workdir not applied: %+v", ref)
+	}
+	opts.ContainerWorkdir = "relative"
+	if _, err := resolveSessionContainer(context.Background(), tr, profile, opts); err == nil {
+		t.Fatal("relative workdir must be refused")
+	}
+}
+
+func TestImageUpAppliesSpecExpose(t *testing.T) {
+	s := imageSpec()
+	s.Expose = []string{"/data/corpus:/corpus:ro"}
+	args, err := imageRunArgs(ImageInstance{Spec: s, Name: "hammer"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := strings.Join(args, " ")
+	if !strings.Contains(run, "-v '/data/corpus:/corpus:ro'") {
+		t.Errorf("expose bind missing:\n%s", run)
+	}
+}
+
 func TestSessionExtrasRefusedOffImageBacked(t *testing.T) {
 	profile := &HostProfile{Containers: []ContainerSpec{*devSpec()}}
 	opts := CreateOpts{HostID: "h", Container: devSpec().Name, ContainerVolumes: []string{"x:/y"}}

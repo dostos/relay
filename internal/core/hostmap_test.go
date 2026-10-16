@@ -187,6 +187,79 @@ func TestUpsertContainerRefusesToOverwriteANonDevcontainer(t *testing.T) {
 	}
 }
 
+func TestUpsertImageContainerDeclaresSpec(t *testing.T) {
+	out, err := UpsertImageContainerEntry([]byte(commentedProfile), ImageContainerDecl{
+		Name: "hammer", Image: "ghcr.io/dostos/hammer:v1", User: "worker",
+		GPU: "none", Network: "bridge",
+		Home: "relay-home:/relay/home", Toolkit: "relay-toolkit:/relay/toolkit",
+		Volumes: []string{"ev:/out"}, Binds: []string{"/data/corpus:/corpus:ro"},
+		Env: []string{"ANTHROPIC_API_KEY"}, DefaultCWD: "/work",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, err := ParseHostProfileYAML(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *ContainerSpec
+	for i := range profile.Containers {
+		if profile.Containers[i].Name == "hammer" {
+			found = &profile.Containers[i]
+		}
+	}
+	if found == nil || !found.ImageBacked() || found.User != "worker" || found.DefaultCWD != "/work" {
+		t.Fatalf("declared wrong: %+v", found)
+	}
+	if found.Home == nil || found.Home.Volume != "relay-home" || found.Toolkit == nil {
+		t.Fatalf("home/toolkit missing: %+v", found)
+	}
+	if len(found.Expose) != 1 || found.Expose[0] != "/data/corpus:/corpus:ro" {
+		t.Fatalf("binds→expose: %+v", found.Expose)
+	}
+	// Idempotent upsert by name.
+	out2, err := UpsertImageContainerEntry(out, ImageContainerDecl{Name: "hammer", Image: "ghcr.io/dostos/hammer:v2", User: "worker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile2, _ := ParseHostProfileYAML(out2)
+	n := 0
+	for _, c := range profile2.Containers {
+		if c.Name == "hammer" {
+			n++
+			if c.Image != "ghcr.io/dostos/hammer:v2" {
+				t.Fatalf("not updated: %+v", c)
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("expected one hammer, got %d", n)
+	}
+}
+
+func TestUpsertImageContainerRefusesOtherKinds(t *testing.T) {
+	existing := "version: 1\nhost_id: c1\ncontainers:\n  - name: oqb\n    devcontainer:\n      workspace_folder: ~/gh/oqb\n"
+	if _, err := UpsertImageContainerEntry([]byte(existing), ImageContainerDecl{Name: "oqb", Image: "alpine"}); err == nil {
+		t.Fatal("must not clobber a devcontainer")
+	}
+	plain := "version: 1\nhost_id: c1\ncontainers:\n  - name: runner\n    container: bk-pilot\n"
+	if _, err := UpsertImageContainerEntry([]byte(plain), ImageContainerDecl{Name: "runner", Image: "alpine"}); err == nil {
+		t.Fatal("must not clobber an exec-into-existing container")
+	}
+}
+
+func TestImageContainerDeclValidatesFlags(t *testing.T) {
+	if _, err := (ImageContainerDecl{Name: "x", Image: "alpine", Home: "/bad:/x"}).Spec(); err == nil {
+		t.Fatal("home must be a named volume")
+	}
+	if _, err := (ImageContainerDecl{Name: "x", Image: "alpine", Env: []string{"BAD NAME"}}).Spec(); err == nil {
+		t.Fatal("env must be an identifier")
+	}
+	if _, err := (ImageContainerDecl{Name: "x", Image: "alpine", GPU: "gpu0"}).Spec(); err == nil {
+		t.Fatal("bad gpu must be refused")
+	}
+}
+
 func TestCloneCommandIsIdempotentAndReportsDevcontainer(t *testing.T) {
 	got, err := CloneRepoCommand("dostos/forge", "~/gh")
 	if err != nil {

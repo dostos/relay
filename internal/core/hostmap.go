@@ -233,6 +233,168 @@ func (p *ProfileService) DeclareContainer(ctx context.Context, t ports.Transport
 	return p.Fetch(ctx, hostID)
 }
 
+// ImageContainerDecl is the set of fields `relay host container --image` writes.
+type ImageContainerDecl struct {
+	Name       string
+	Image      string
+	User       string
+	GPU        string
+	Network    string
+	Home       string   // VOLUME:/target
+	Toolkit    string   // VOLUME:/target
+	Volumes    []string // NAME:/path[:ro]
+	Binds      []string // /abs:/abs[:ro] → expose:
+	Env        []string
+	DefaultCWD string
+}
+
+// Spec builds the ContainerSpec this declaration records.
+func (d ImageContainerDecl) Spec() (*ContainerSpec, error) {
+	name := strings.TrimSpace(d.Name)
+	image := strings.TrimSpace(d.Image)
+	if name == "" {
+		return nil, fmt.Errorf("container name required")
+	}
+	if image == "" {
+		return nil, fmt.Errorf("image required")
+	}
+	spec := &ContainerSpec{
+		Name:       name,
+		Image:      image,
+		User:       strings.TrimSpace(d.User),
+		GPU:        strings.TrimSpace(d.GPU),
+		Network:    strings.TrimSpace(d.Network),
+		DefaultCWD: strings.TrimSpace(d.DefaultCWD),
+		Volumes:    append([]string(nil), d.Volumes...),
+		Expose:     append([]string(nil), d.Binds...),
+		Env:        append([]string(nil), d.Env...),
+	}
+	if d.Home != "" {
+		vm, err := ParseVolumeMount(d.Home)
+		if err != nil {
+			return nil, fmt.Errorf("home: %w", err)
+		}
+		spec.Home = &HomeSpec{Volume: vm.Volume, Target: vm.Target}
+	}
+	if d.Toolkit != "" {
+		vm, err := ParseVolumeMount(d.Toolkit)
+		if err != nil {
+			return nil, fmt.Errorf("toolkit: %w", err)
+		}
+		spec.Toolkit = &ToolkitSpec{Volume: vm.Volume, Target: vm.Target}
+	}
+	for _, v := range spec.Volumes {
+		if _, err := ParseVolumeMount(v); err != nil {
+			return nil, fmt.Errorf("volume: %w", err)
+		}
+	}
+	for _, b := range spec.Expose {
+		if _, err := ParseBindMount(b); err != nil {
+			return nil, fmt.Errorf("bind: %w", err)
+		}
+	}
+	for _, e := range spec.Env {
+		if err := validateEnvName(e); err != nil {
+			return nil, err
+		}
+	}
+	if spec.GPU != "" {
+		switch spec.GPU {
+		case "all", "none":
+		default:
+			if _, err := gpuArgs(spec.GPU); err != nil {
+				return nil, fmt.Errorf("gpu: %w", err)
+			}
+		}
+	}
+	return spec, nil
+}
+
+// UpsertImageContainerEntry declares or replaces an image-backed container in
+// host.yaml. A pre-existing entry of another kind is refused.
+func UpsertImageContainerEntry(document []byte, decl ImageContainerDecl) ([]byte, error) {
+	spec, err := decl.Spec()
+	if err != nil {
+		return nil, err
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(document, &root); err != nil {
+		return nil, fmt.Errorf("parse host profile: %w", err)
+	}
+	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
+		return nil, fmt.Errorf("host profile is not a YAML document")
+	}
+	body := root.Content[0]
+	if body.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("host profile is not a mapping")
+	}
+	entry, err := containerSpecYAMLNode(spec)
+	if err != nil {
+		return nil, err
+	}
+	seq := findOrCreateSequence(body, "containers")
+	for i, existing := range seq.Content {
+		if existing.Kind != yaml.MappingNode {
+			continue
+		}
+		if value := mappingValue(existing, "name"); value != nil && value.Value == spec.Name {
+			if mappingValue(existing, "devcontainer") != nil {
+				return nil, fmt.Errorf("container %q already exists as a devcontainer; leaving it alone", spec.Name)
+			}
+			if mappingValue(existing, "container") != nil && mappingValue(existing, "image") == nil {
+				return nil, fmt.Errorf("container %q already exists as an exec-into-existing container; leaving it alone", spec.Name)
+			}
+			seq.Content[i] = entry
+			return encodeDocument(&root)
+		}
+	}
+	seq.Content = append(seq.Content, entry)
+	return encodeDocument(&root)
+}
+
+func containerSpecYAMLNode(spec *ContainerSpec) (*yaml.Node, error) {
+	raw, err := yaml.Marshal(spec)
+	if err != nil {
+		return nil, err
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return nil, err
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return nil, fmt.Errorf("marshal container spec produced no document")
+	}
+	return doc.Content[0], nil
+}
+
+// DeclareImageContainer records an image-backed container in the host profile.
+func (p *ProfileService) DeclareImageContainer(ctx context.Context, t ports.Transport, hostID string, decl ImageContainerDecl) (*HostProfile, *ContainerSpec, error) {
+	if hostID == "" {
+		return nil, nil, fmt.Errorf("host required")
+	}
+	spec, err := decl.Spec()
+	if err != nil {
+		return nil, nil, err
+	}
+	path := RemoteHostProfilePath()
+	raw, err := t.ReadFile(ctx, path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read %s on %s: %w", path, hostID, err)
+	}
+	updated, err := UpsertImageContainerEntry(raw, decl)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := t.WriteFile(ctx, path, updated, "644"); err != nil {
+		return nil, nil, fmt.Errorf("write %s on %s: %w", path, hostID, err)
+	}
+	profile, err := p.Fetch(ctx, hostID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return profile, spec, nil
+}
+
 // CloneRepoCommand clones a GitHub repo onto a host and reports what it found.
 //
 // It uses the HOST's gh, so the host's own credentials apply and no token from

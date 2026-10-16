@@ -31,6 +31,18 @@ path_map:
   - match: dostos-workspace
     remote_cwd: ~/gh/dostos-workspace
 
+# Shared agent CLI + credential volumes for every container on this host.
+# Specs inherit these unless they set toolkit:/home: themselves or
+# agent_volumes: false.
+agent_volumes:
+  toolkit:
+    volume: relay-toolkit
+    target: /relay/toolkit
+    agents: [claude, codex, ccs, cursor-agent]
+  home:
+    volume: relay-home
+    target: /relay/home
+
 defaults:
   preferred_agent: claude
   silence_sec: 45

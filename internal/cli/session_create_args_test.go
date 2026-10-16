@@ -67,3 +67,21 @@ func TestSessionCreateArgsSingleBareWord(t *testing.T) {
 		t.Errorf("got %+v", opts)
 	}
 }
+
+func TestSessionCreateArgsWorkdir(t *testing.T) {
+	opts, err := parseSessionCreateArgs("hamburg", []string{
+		"--container", "hammer", "--workdir", "/workspaces/proj", "--ephemeral",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.ContainerWorkdir != "/workspaces/proj" || opts.Container != "hammer" || !opts.ContainerEphemeral {
+		t.Fatalf("got %+v", opts)
+	}
+	if _, err := parseSessionCreateArgs("h", []string{"--workdir", "relative"}); err == nil {
+		t.Fatal("relative --workdir must be refused")
+	}
+	if _, err := parseSessionCreateArgs("h", []string{"--workdir"}); err == nil {
+		t.Fatal("--workdir requires a value")
+	}
+}

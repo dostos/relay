@@ -62,10 +62,11 @@ type BindMount struct {
 	ReadOnly bool   `json:"read_only,omitempty"`
 }
 
-// ParseBindMount reads "/abs/host:/abs/container[:ro]". Both sides must be
-// absolute: a relative host path would be resolved against whatever cwd the
-// docker client happens to have, and a relative container path is not a
-// mount. Named volumes are ParseVolumeMount's job, not this one's.
+// ParseBindMount reads "/abs/host:/abs/container[:ro]" (or "~/…:/abs[:ro]").
+// The host side must be absolute or home-relative (~ or ~/…): a relative host
+// path would be resolved against whatever cwd the docker client happens to
+// have. The container side must be absolute. Named volumes are
+// ParseVolumeMount's job, not this one's.
 func ParseBindMount(raw string) (BindMount, error) {
 	s := strings.TrimSpace(raw)
 	parts := strings.Split(s, ":")
@@ -73,8 +74,8 @@ func ParseBindMount(raw string) (BindMount, error) {
 		return BindMount{}, fmt.Errorf("bind %q must be /abs/host:/abs/container[:ro]", raw)
 	}
 	m := BindMount{Host: parts[0], Target: parts[1]}
-	if !strings.HasPrefix(m.Host, "/") {
-		return BindMount{}, fmt.Errorf("bind host path %q must be absolute", m.Host)
+	if !isAbsOrHomePath(m.Host) {
+		return BindMount{}, fmt.Errorf("bind host path %q must be absolute (or ~/…)", m.Host)
 	}
 	if !strings.HasPrefix(m.Target, "/") {
 		return BindMount{}, fmt.Errorf("bind target %q must be absolute", m.Target)
@@ -89,6 +90,55 @@ func ParseBindMount(raw string) (BindMount, error) {
 		}
 	}
 	return m, nil
+}
+
+func isAbsOrHomePath(p string) bool {
+	return strings.HasPrefix(p, "/") || p == "~" || strings.HasPrefix(p, "~/")
+}
+
+// bindMountFlag is the --mount value for a bind, suitable for HostLoginShell:
+// absolute hosts are single-quoted; ~/ hosts keep $HOME expandable.
+func bindMountFlag(b BindMount) (string, error) {
+	ro := ""
+	if b.ReadOnly {
+		ro = ",readonly"
+	}
+	if strings.HasPrefix(b.Host, "/") {
+		return shellquote.Quote(fmt.Sprintf("type=bind,source=%s,target=%s%s", b.Host, b.Target, ro)), nil
+	}
+	rest, err := homeRest(b.Host)
+	if err != nil {
+		return "", err
+	}
+	// Same expandability contract as --workspace-folder "$HOME"'/…'.
+	return `"type=bind,source=$HOME` + shellquote.Quote(rest) + `,target=` + b.Target + ro + `"`, nil
+}
+
+// bindVolumeFlag is the docker -v value for a bind (image-backed path).
+func bindVolumeFlag(b BindMount) (string, error) {
+	ro := ""
+	if b.ReadOnly {
+		ro = ":ro"
+	}
+	if strings.HasPrefix(b.Host, "/") {
+		return shellquote.Quote(b.Host + ":" + b.Target + ro), nil
+	}
+	rest, err := homeRest(b.Host)
+	if err != nil {
+		return "", err
+	}
+	return `"$HOME"` + shellquote.Quote(rest+":"+b.Target+ro), nil
+}
+
+func homeRest(host string) (string, error) {
+	switch {
+	case host == "~":
+		return "", nil
+	case strings.HasPrefix(host, "~/"):
+		return host[1:], nil // keep leading /
+	default:
+		return "", fmt.Errorf("bind host path %q must be absolute (or ~/…)", host)
+	}
 }
 
 // gpuArgs renders docker's --gpus for a declared value: nothing for "" or
@@ -170,16 +220,28 @@ func imageRunArgs(inst ImageInstance) ([]string, error) {
 		}
 		args = append(args, "-v", shellquote.Quote(spec))
 	}
+	// Spec-level expose: first, then per-instance --bind extras.
+	for _, raw := range c.Expose {
+		b, err := ParseBindMount(raw)
+		if err != nil {
+			return nil, fmt.Errorf("expose: %w", err)
+		}
+		flag, err := bindVolumeFlag(b)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, "-v", flag)
+	}
 	for _, raw := range inst.Binds {
 		b, err := ParseBindMount(raw)
 		if err != nil {
 			return nil, err
 		}
-		spec := b.Host + ":" + b.Target
-		if b.ReadOnly {
-			spec += ":ro"
+		flag, err := bindVolumeFlag(b)
+		if err != nil {
+			return nil, err
 		}
-		args = append(args, "-v", shellquote.Quote(spec))
+		args = append(args, "-v", flag)
 	}
 	for _, env := range c.Env {
 		if err := validateEnvName(env); err != nil {

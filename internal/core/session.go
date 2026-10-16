@@ -61,6 +61,9 @@ type CreateOpts struct {
 	ContainerBinds   []string
 	ContainerGPUs    string
 	ContainerNetwork string
+	// ContainerWorkdir is an absolute in-container cwd for this session,
+	// overriding the spec's ResolveCWD. Empty means use the spec.
+	ContainerWorkdir string
 }
 
 // hasContainerExtras reports whether any per-instance option was given.
@@ -725,6 +728,12 @@ func resolveSessionContainer(ctx context.Context, t ports.Transport, profile *Ho
 		return nil, fmt.Errorf("container %q declares neither container: nor devcontainer:", spec.Name)
 	}
 	cwd := spec.ResolveCWD(opts.RepoRef)
+	if opts.ContainerWorkdir != "" {
+		if !strings.HasPrefix(opts.ContainerWorkdir, "/") {
+			return nil, fmt.Errorf("--workdir %q must be an absolute container path", opts.ContainerWorkdir)
+		}
+		cwd = opts.ContainerWorkdir
+	}
 	ref := spec.RefFor(id, cwd)
 	if ref.User == "" {
 		ref.User = ResolveContainerUser(ctx, t, spec, id)
