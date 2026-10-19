@@ -17,3 +17,16 @@ and the workspace's living system map is `dostos-workspace/docs/agent-infra.md`.
 | `superpowers-specs/2026-08-01-relay-autonomous-{A,B,C,D}-*.md` | autonomous mode: nearest live ancestor, agent apex, lateral comms, control-plane locality | 2026-09-13 |
 | `superpowers-specs/2026-08-08-host-ensure-account-agents-design.md` | relay's own ccs/codex account discovery in `host ensure` | 2026-09-13 (agent-accounts is the source) |
 | `superpowers-plans/*` | the plans for the container-handoff MVP, autonomous mode A, and host-ensure account agents | 2026-09-13, with their designs |
+
+## Retired surface (moved from the top-level README)
+
+cmux is no longer the presenter, and relay has no presenter port: the viz
+client, `relay viz serve`, `viz-broker`, `install-cmux-restore` and the
+projection-only Mac split were retired on 2026-09-13 with Forge in their place.
+
+Retired 2026-09-13 (workspace decision *one owner per axis*): the delegation
+handshake — `agent`, `handoff`, `parent`, `resolve`, `ask`, `signal`, `board`,
+`policy`, `msg`, `events`, `log`, `root`, `gc`, `history`, `mcp` — a unit of
+delegated work is blacksmith's; and the presenter — `viz`/`pane`, `viz serve`,
+`viz-broker`, `install-cmux-restore`, `container open` — Forge is the one.
+relay is the session substrate. `resume reap|prune` cover what `gc` did.
