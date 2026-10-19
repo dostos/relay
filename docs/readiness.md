@@ -2,8 +2,8 @@
 
 A presenter wants one answer per session: is the agent **ready** (working),
 **blocked** at a gate only a human may answer (login, folder trust, a
-permission prompt — with its literal choices), **absent** (a bare shell), or
-**unknown** (relay could not look). The classifier is one piece of code in
+permission prompt — with its literal choices), **absent** (a bare shell), **gone** (the tmux session no longer
+exists, so there is no pane to classify), or **unknown** (relay could not look). The classifier is one piece of code in
 relay; two verbs reach it so nobody copies it:
 
 - For a pane the presenter is **attached** to, it already holds the screen

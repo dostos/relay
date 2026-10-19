@@ -8,7 +8,7 @@ Remote coding agents must survive laptop sleep, wifi drops, and closed windows,
 and come back as the *same* session. relay creates, names, and re-attaches that
 long-lived remote work. It has no window of its own: any terminal can present a
 session by running `relay resume`, and [Forge](https://github.com/dostos/forge)
-(my Ghostty fork, private) does exactly that per tab.
+(a private Ghostty fork) does exactly that per tab.
 
 **Status:** active · Go · macOS control host (launchd) + Linux remotes (systemd)
 **Links:** [Forge](https://github.com/dostos/forge) (presenter, private) · [Design archive](docs/archive/README.md) · [Dev containers](docs/devcontainers.md)
@@ -58,8 +58,8 @@ relay --json session list
 ```
 
 **Chaining from inside a session.** A session started with `relay HOST NAME`
-carries a reverse Unix-socket bridge to the control host, so `relay c1 followup`
-run *inside* `c3/research` is executed by the control plane — the remote never
+carries a reverse Unix-socket bridge to the control host, so `relay host-b followup`
+run *inside* `host-a/research` is executed by the control plane — the remote never
 gets the control host's credentials.
 
 **Bring a new machine online.**
@@ -97,10 +97,21 @@ flowchart LR
 relay owns sessions only. What a human looks at is the terminal's job (Forge);
 delegated, machine-judged work is blacksmith's.
 
+## Repository layout
+
+| Path | Responsibility |
+|---|---|
+| `cmd/relay` | `relay` CLI entry point |
+| `cmd/relayd` | Deprecated argv-compatibility shim for `relay`; the home service is `relay service run` (`internal/homeservice`) |
+| `internal/` | Packages: `cli`, `core` (sessions, readiness), `controlbridge` and `bridge`, `homeservice`, `transport`, `persist`, `selfupdate`, others |
+| `share/` | `host.yaml.example`, launchd and systemd units |
+| `scripts/` | `cutover-unified-service.sh`, `verify-unified-service.sh` |
+| `install.sh` | Binary and service bootstrap |
+
 ## Docs
 
 - [Architecture and control bridge](docs/architecture.md) — layers, bridge security, resume states
-- [Readiness for presenters](docs/readiness.md) — `ready / blocked / absent / unknown`
+- [Readiness for presenters](docs/readiness.md) — `ready / blocked / absent / gone / unknown`
 - [Dev containers on a fleet host](docs/devcontainers.md)
 - [Ghostty-native app design](docs/2026-09-05-ghostty-native-app-design.md)
 - [Archive](docs/archive/README.md) — retired cmux presenter and delegation surface ([founding design](docs/archive/2026-07-24-relay-design.md))
@@ -115,5 +126,4 @@ go build -o bin/relay ./cmd/relay
 
 ## License
 
-<!-- TODO(jingyu): no LICENSE file yet; add one, then state it here. -->
 No license file has been added yet.
