@@ -1,87 +1,26 @@
 # relay
 
-**Durable remote sessions** — SSH + tmux on a fleet host, one authoritative home
-service, and a small stateless CLI other programs can drive with `--json`.
+**Durable remote sessions for agent work** — SSH + tmux on a fleet host, one
+authoritative home service, and a small stateless CLI other programs can drive
+with `--json`.
 
-relay creates, names, and re-attaches long-lived remote work. It has no window
-of its own: **[Forge](../forge)** (a Ghostty fork, `projects/infrastructure/forge`)
-is the presenter, and a Forge tab is nothing more than a terminal running
+Remote coding agents must survive laptop sleep, wifi drops, and closed windows,
+and come back as the *same* session. relay creates, names, and re-attaches that
+long-lived remote work. It has no window of its own: any terminal can present a
+session by running `relay resume`, and [Forge](https://github.com/dostos/forge)
+(my Ghostty fork, private) does exactly that per tab.
 
-```bash
-relay resume --session NAME --host HOST
-```
-
-so any terminal can be the presenter, and relay never depends on one.
-
-## Why
-
-Remote agent work needs:
-
-1. **Persistence** — the process must survive laptop sleep, wifi blips, and closing the window
-2. **Reattach** — a tab should come back as the same session, not a fresh shell
-3. **Program-friendly control** — Forge, the command centre and scripts need `session list|create|send|capture|exec|destroy` with `--json`
-
-relay is the thin substrate for that. What a human looks at is the terminal's
-job (Forge); what runs as delegated, machine-judged work is blacksmith's.
-
-## Use cases
-
-### 1) Remote coding agent that survives closing the window
-
-Start Claude / Codex / cursor-agent in a durable session on a lab box. Close the
-tab, quit Forge, sleep the laptop. Reopen later — Forge restores the tab by
-running `relay resume --session …` and you are back in the same tmux session.
-
-```bash
-relay session create -H host-a --name eval -- cursor-agent "fix the flaky eval; keep tests green"
-relay resume --session eval --host host-a      # from any pane, later
-```
-
-### 2) A workspace with several durable remotes
-
-Adopt or create the sessions; Forge shows them as one workspace (train + eval,
-app + benchmark), each tab attached with `relay resume`:
-
-```bash
-relay session adopt -H host-a --name train
-relay session adopt -H host-b --name eval
-relay --json session list                          # what Forge reads
-```
-
-For the common interactive path, use the host/name shorthand. It creates (or
-reuses) the named remote tmux session and attaches to it in **this** terminal:
-
-```bash
-relay c3 research
-```
-
-That session carries a persistent reverse Unix-socket bridge to the control
-host. A `relay` command run inside it is executed by the control plane, so it
-can create the next session without giving a remote machine the control host's
-credentials; the reply names the `relay resume …` that attaches it:
-
-```bash
-# inside c3/research
-relay c1 followup
-```
-
-### 3) Bring a new machine online
-
-Discover SSH aliases, probe agent CLIs, propose `host.yaml`, and bootstrap the
-host-local event role from the primary binary:
-
-```bash
-relay targets --json
-relay host discover -H host-a --json
-relay host init -H host-a --apply   # installs relay + compatibility symlink
-```
+**Status:** active · Go · macOS control host (launchd) + Linux remotes (systemd)
+**Links:** [Forge](https://github.com/dostos/forge) (presenter, private) · [Design archive](docs/archive/README.md) · [Dev containers](docs/devcontainers.md)
 
 ## Install
+
+Requires Go (see `go.mod`), `ssh`, and `tmux` on the remotes.
 
 ```bash
 git clone https://github.com/dostos/relay.git
 cd relay
-./install.sh          # ~/.local/bin/relay{,d}
+./install.sh          # builds into ~/.local/bin/relay{,d}
 relay doctor --json
 ```
 
@@ -90,112 +29,83 @@ Forge finds `relay` at `~/.local/bin/relay` (or `$FORGE_RELAY`).
 ## Quick start
 
 ```bash
-# one-time per remote
-relay host init -H HOST --apply
+relay host init -H HOST --apply                       # one-time per remote
 
-# run work
-relay HOST NAME                     # current pane → named remote tmux
-relay session create -H HOST --name work -- claude   # or any CLI as the pane's command
-# or attach an existing tmux session
-relay session adopt -H HOST --name my-tmux
+relay HOST NAME                                       # this terminal → named remote tmux
+relay session create -H HOST --name work -- claude    # any CLI as the pane's command
+relay session adopt -H HOST --name my-tmux            # or adopt an existing tmux session
 
-# in a Forge tab, or any terminal (also after laptop sleep / wifi drop)
-relay resume list                 # live | disconnected | cleaned
-relay resume --session NAME --host HOST   # attach; waits/retries on SSH drop
+relay resume list                                     # live | disconnected | cleaned
+relay resume --session NAME --host HOST               # attach; retries on SSH drop
 ```
 
-`relay resume` keeps the tab alive across sleep and “Shared connection … closed”: on drop it shows a single animated status line (spinner + countdown) and retries after a short delay (default 3s), frozen to that session. Disable reconnect with `--no-reconnect` or `RELAY_AUTO_RECONNECT=0`.
+## Usage
 
+**An agent that survives closing the window.** Start Claude / Codex /
+cursor-agent on a lab box, close the tab, sleep the laptop, and reattach later:
 
-| Resume presence | Meaning | Resume? |
-|-----------------|---------|---------|
-| `live` | tracked locally | yes |
-| `disconnected` | SSH dropped; remote may still be up | yes |
-| `cleaned` | intentional destroy/finalize | **no** |
-| `unknown` | never created here | no |
+```bash
+relay session create -H host-a --name eval -- cursor-agent "fix the flaky eval; keep tests green"
+relay resume --session eval --host host-a      # from any pane, later
+```
 
-## How it fits together
+**Several durable remotes as one workspace.** Forge reads the JSON list:
 
-| Layer | Role |
-|-------|------|
-| **Forge** (or any terminal) | Tabs, splits, workspaces, restore; each tab runs `relay resume` |
-| **relay CLI** | Session ids and `--json` output for other programs |
-| **control bridge** | Unix-socket daemon on the control host; serializes authenticated remote requests |
-| **tmux** (remote) | Durable process surface |
-| **relay service event** (remote) | Always-on event bus over a **Unix socket only** (no TCP listen) |
+```bash
+relay session adopt -H host-a --name train
+relay session adopt -H host-b --name eval
+relay --json session list
+```
 
-Host profiles (`~/.config/relay/host.yaml` on each remote) list agent CLIs and `path_map`. Connection coords stay in your SSH config — relay only uses Host aliases.
+**Chaining from inside a session.** A session started with `relay HOST NAME`
+carries a reverse Unix-socket bridge to the control host, so `relay c1 followup`
+run *inside* `c3/research` is executed by the control plane — the remote never
+gets the control host's credentials.
 
-During the control-plane migration, the desktop bridge is started on demand by `relay resume`. Its socket is
-`~/.local/state/relay/desktop-bridge.sock` (0600). Each attached pane uses SSH
-stream-local reverse forwarding to expose a per-session socket under `/tmp` on
-the remote host. Requests carry a per-session token, and the bridge allowlist
-is limited to named-session operations. There is no TCP listener or
-inbound connection to the laptop; the forward lives and reconnects with the
-pane's dedicated SSH connection.
+**Bring a new machine online.**
 
-cmux is no longer the presenter, and relay has no presenter port: the viz
-client, `relay viz serve`, `viz-broker`, `install-cmux-restore` and the
-projection-only Mac split were retired on 2026-09-13 with Forge in their place.
+```bash
+relay targets --json
+relay host discover -H host-a --json
+relay host init -H host-a --apply   # installs relay + compatibility symlink
+```
 
-`install.sh` is only for initial binary/service bootstrap. Both outbound control and target attachment are
-batch-only with strict host-key checking. If the Mac is asleep, requests wait
-durably while control work continues on home.
-
-Remote-to-remote commands require a session created by this bridge-aware relay
-version. The shorthand can still adopt an older tmux session for attachment,
-but it warns that the legacy shell has no bridge identity; choose a new `NAME`
-to enable chaining.
-
-## CLI map
+### CLI map
 
 ```text
 relay targets / host discover / host init   # new machine
 relay HOST NAME                             # named tmux, attached in this terminal
-relay session … / session adopt             # durable tmux (create takes -- ARGV for the pane's command)
+relay session … / session adopt             # durable tmux (create takes -- ARGV)
 relay container up|down|status|stop|start   # devcontainer or image-backed instance
 relay auth status|login|copy                # agent CLI logins on a host
 relay service run|status                    # unified home service and component health
 relay resume --session NAME --host HOST     # what a Forge tab runs
-relay pane classify < TEXT                  # readiness of pane text you already hold (no ssh)
-relay session readiness ID [--lines N]      # capture + classify one put-away session
-relay session list|get --json --readiness [--readiness-lines N]   # every session with a readiness object
+relay pane classify / session readiness     # agent readiness for presenters
 ```
 
-### Readiness for presenters
+## Architecture
 
-A presenter wants one answer per session: is the agent **ready** (working),
-**blocked** at a gate only a human may answer (login, folder trust, a
-permission prompt — with its literal choices), **absent** (a bare shell), or
-**unknown** (relay could not look). The classifier is one piece of code in
-relay; two verbs reach it so nobody copies it:
+```mermaid
+flowchart LR
+  T["Forge tab / any terminal"] -->|relay resume| C["relay CLI (control host)"]
+  C --> B["control bridge (Unix socket)"]
+  B -->|ssh, batch, strict host keys| R["remote host"]
+  R --> X["tmux session (durable)"]
+  R --> E["relay service event (Unix socket only)"]
+```
 
-- For a pane the presenter is **attached** to, it already holds the screen
-  text: pipe the last ~40 lines to `relay pane classify` and get the JSON
-  back. No ssh, no registry — a local function behind a verb, so Forge can
-  classify every attached tab as often as it likes at no fleet cost.
-- For a **put-away** session, `relay session readiness ID` captures the pane
-  tail over the wire (bounded to ~8s) and classifies it. `session list
-  --readiness` does that for every session, one host at a time per host and
-  at most two hosts at once, never failing the list: an unreachable host
-  reports `unknown` with the ssh error as its reason.
+relay owns sessions only. What a human looks at is the terminal's job (Forge);
+delegated, machine-judged work is blacksmith's.
 
-Both print the same shape: `state`, `reason`, `gate` (with `choices` when the
-prompt is numbered), `lines`, `sampled_at`. A gate is reported, never
-answered: `readiness.go`'s rule is that a security prompt is a terminal state
-for automation.
+## Docs
 
-Retired 2026-09-13 (workspace decision *one owner per axis*): the delegation
-handshake — `agent`, `handoff`, `parent`, `resolve`, `ask`, `signal`, `board`,
-`policy`, `msg`, `events`, `log`, `root`, `gc`, `history`, `mcp` — a unit of
-delegated work is blacksmith's; and the presenter — `viz`/`pane`, `viz serve`,
-`viz-broker`, `install-cmux-restore`, `container open` — Forge is the one.
-relay is the session substrate. `resume reap|prune` cover what `gc` did.
+- [Architecture and control bridge](docs/architecture.md) — layers, bridge security, resume states
+- [Readiness for presenters](docs/readiness.md) — `ready / blocked / absent / unknown`
+- [Dev containers on a fleet host](docs/devcontainers.md)
+- [Ghostty-native app design](docs/2026-09-05-ghostty-native-app-design.md)
+- [Archive](docs/archive/README.md) — retired cmux presenter and delegation surface ([founding design](docs/archive/2026-07-24-relay-design.md))
 
-Details: [`docs/archive/2026-07-24-relay-design.md`](docs/2026-07-24-relay-design.md)
-(historical; the delegation half is retired).
-
-## Develop
+## Development and testing
 
 ```bash
 go test ./...
@@ -205,4 +115,5 @@ go build -o bin/relay ./cmd/relay
 
 ## License
 
-See repository for license terms.
+<!-- TODO(jingyu): no LICENSE file yet; add one, then state it here. -->
+No license file has been added yet.
