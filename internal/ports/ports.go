@@ -60,7 +60,12 @@ type Persistence interface {
 	Exists(ctx context.Context, t Transport, h PersistHandle) (bool, error)
 	Destroy(ctx context.Context, t Transport, h PersistHandle) error
 	Capture(ctx context.Context, t Transport, h PersistHandle, lines int) (string, error)
-	Send(ctx context.Context, t Transport, h PersistHandle, text string, enter bool) error
+	// Send types text into the session's active pane and, when enter is
+	// set, submits it exactly once. The receipt says how far delivery
+	// provably got; a non-nil *DeliveryUncertainError accompanies every
+	// receipt whose state is not SendSubmitted (or SendDeposited for
+	// enter=false).
+	Send(ctx context.Context, t Transport, h PersistHandle, text string, enter bool) (SendReceipt, error)
 	Resize(ctx context.Context, t Transport, h PersistHandle) error
 	AttachCommand(h PersistHandle, cwd string) string
 	DeadStatus(ctx context.Context, t Transport, h PersistHandle) (dead bool, code int, err error)
@@ -76,6 +81,41 @@ type Persistence interface {
 // (SIGINT) and 255 (ssh failure), so a presenter can tell "the work is gone"
 // from "the network dropped".
 const ExitSessionAbsent = 66
+
+// ExitDeliveryUncertain is the exit status of `relay session send` when the
+// text was (or may have been) typed but no fresh turn attributable to this
+// send was observed. Callers must not resend blindly: inspect the session,
+// or retry with the same --idempotency-key, which never types twice.
+const ExitDeliveryUncertain = 67
+
+// SendState is how far a session send provably got.
+type SendState string
+
+const (
+	// SendNotSent: Relay failed before typing anything. Safe to retry.
+	SendNotSent SendState = "not_sent"
+	// SendDeposited: the text reached the pane's input (enter=false), or it
+	// is visibly still sitting in the composer after the single submit.
+	SendDeposited SendState = "deposited"
+	// SendSubmitted: a turn that started after this send was observed.
+	SendSubmitted SendState = "submitted"
+	// SendUncertain: input was attempted but neither a fresh turn nor a
+	// held composer could be proven (transport loss, unknown TUI, ...).
+	SendUncertain SendState = "uncertain"
+)
+
+// SendReceipt is the structured outcome of one Persistence.Send.
+type SendReceipt struct {
+	State SendState `json:"state"`
+	// Evidence names the observation that decided State, e.g.
+	// "fresh_working_indicator", "working_timer_reset", "composer_released",
+	// "composer_holds_text", "no_fresh_turn".
+	Evidence string `json:"evidence,omitempty"`
+	// Submits is how many Enter keys were sent (0 or 1; never repeated).
+	Submits int `json:"submits"`
+	// Polls is how many post-submit pane reads were taken.
+	Polls int `json:"polls,omitempty"`
+}
 
 // ExistingAttacher is an optional Persistence capability: an attach command
 // that never creates. When the session is missing it prints a line to stderr

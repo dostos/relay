@@ -447,8 +447,22 @@ Sessions (explicit id; no guesswork):
   relay session list
   relay session get ID
   relay session capture ID [-n LINES]
-  relay session send ID -- TEXT
-  relay session exec ID -- CMD
+  relay session send ID [--idempotency-key KEY] -- TEXT
+                                      Type TEXT, press Enter once, and confirm a turn that started
+                                      after this send. Prints a receipt (--json): submitted |
+                                      deposited | uncertain. Unconfirmed → exit 67; never resend
+                                      blindly (same KEY replays the receipt, never retypes).
+  relay session submit ID [--idempotency-key KEY]
+                                      Press Enter once on text already deposited; same confirmation
+  relay session exec ID -- CMD        Run CMD (joined with spaces, parsed by the remote shell)
+  relay session exec ID --detach [--op-id OP] -- CMD
+                                      Start CMD as a durable operation; prints {op_id, cursor, state}.
+                                      Survives SSH loss; retry with the same --op-id never reruns.
+  relay session op status ID OP [--cursor N]
+  relay session op wait ID OP [--cursor N] [--timeout DUR]
+                                      Block until state moves past cursor N or is terminal
+  relay session op output ID OP [--stream stdout|stderr] [--offset N] [--limit BYTES]
+                                      Bounded explicit output read (default 16 KiB)
   relay session resize ID
   relay session attach ID             Interactive (humans only)
   relay session destroy ID [--keep-remote]
@@ -1516,29 +1530,43 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 			fmt.Println()
 		}
 		return 0
-	case "send":
+	case "send", "submit":
 		if len(args) < 2 {
 			return a.fail(fmt.Errorf("session id required"))
 		}
 		id := args[1]
-		text, ok := afterDashDash(args[2:])
-		if !ok || text == "" {
-			return a.fail(fmt.Errorf("usage: relay session send ID -- TEXT"))
-		}
-		if err := a.Sessions.Send(ctx, id, text, true); err != nil {
+		opts, err := parseSendArgs(sub, args[2:])
+		if err != nil {
 			return a.fail(err)
 		}
-		return 0
+		res, err := a.Sessions.SendWithReceipt(ctx, id, opts.text, true, opts.key)
+		return a.sendOutcome(res, err)
 	case "exec":
 		if len(args) < 2 {
 			return a.fail(fmt.Errorf("session id required"))
 		}
 		id := args[1]
-		cmd, ok := afterDashDash(args[2:])
-		if !ok || cmd == "" {
-			return a.fail(fmt.Errorf("usage: relay session exec ID -- CMD"))
+		opts, err := parseExecArgs(args[2:])
+		if err != nil {
+			return a.fail(err)
 		}
-		stdout, stderr, err := a.Sessions.Exec(ctx, id, cmd)
+		if opts.detach {
+			a.JSON = true
+			opID := opts.opID
+			if opID == "" {
+				opID = core.NewOpID()
+			}
+			rc, err := a.Sessions.StartOp(ctx, id, opID, opts.cmd)
+			if err != nil {
+				return a.failNext(err, map[string]any{
+					"op_id": opID, "session_id": id, "receipt": rc,
+					"next": "query the op, or retry the start with the same --op-id (never runs twice)",
+					"argv": []string{"relay", "session", "op", "status", id, opID},
+				})
+			}
+			return a.errOut(a.out(map[string]any{"ok": true, "receipt": rc}))
+		}
+		stdout, stderr, err := a.Sessions.Exec(ctx, id, opts.cmd)
 		if a.JSON {
 			return a.errOut(a.out(map[string]any{"stdout": stdout, "stderr": stderr, "error": errString(err)}))
 		}
@@ -1550,6 +1578,8 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 			return 1
 		}
 		return 0
+	case "op":
+		return a.cmdSessionOp(ctx, args[1:])
 	case "resize":
 		if len(args) < 2 {
 			return a.fail(fmt.Errorf("session id required"))
@@ -1606,6 +1636,176 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 		return a.errOut(a.out(map[string]any{"ok": true, "session_id": id, "sensors": "reinstalled"}))
 	default:
 		return a.fail(fmt.Errorf("unknown session subcommand %q", sub))
+	}
+}
+
+type sendArgs struct{ text, key string }
+
+// parseSendArgs reads `[--idempotency-key KEY] -- TEXT` (send) or
+// `[--idempotency-key KEY]` (submit). Flags are only recognised before `--`.
+func parseSendArgs(sub string, args []string) (sendArgs, error) {
+	var o sendArgs
+	usage := fmt.Errorf("usage: relay session send ID [--idempotency-key KEY] -- TEXT")
+	if sub == "submit" {
+		usage = fmt.Errorf("usage: relay session submit ID [--idempotency-key KEY]")
+	}
+	flags, text, hasDash := splitDashDash(args)
+	if !hasDash && sub == "send" {
+		// Legacy form: `send ID TEXT...` without `--`.
+		flags, text = nil, strings.Join(args, " ")
+	}
+	for i := 0; i < len(flags); i++ {
+		switch flags[i] {
+		case "--idempotency-key", "--key":
+			if i+1 >= len(flags) {
+				return o, fmt.Errorf("%s requires a value", flags[i])
+			}
+			o.key = flags[i+1]
+			i++
+		default:
+			return o, rejectUnknownFlag(flags[i])
+		}
+	}
+	o.text = text
+	if sub == "send" && text == "" {
+		return o, usage
+	}
+	if sub == "submit" && (hasDash || text != "") {
+		return o, usage
+	}
+	return o, nil
+}
+
+type execArgs struct {
+	cmd    string
+	detach bool
+	opID   string
+}
+
+func parseExecArgs(args []string) (execArgs, error) {
+	var o execArgs
+	flags, cmd, hasDash := splitDashDash(args)
+	if !hasDash {
+		flags, cmd = nil, strings.Join(args, " ")
+	}
+	for i := 0; i < len(flags); i++ {
+		switch flags[i] {
+		case "--detach", "-d":
+			o.detach = true
+		case "--op-id":
+			if i+1 >= len(flags) {
+				return o, fmt.Errorf("--op-id requires a value")
+			}
+			o.opID = flags[i+1]
+			i++
+		default:
+			return o, rejectUnknownFlag(flags[i])
+		}
+	}
+	if o.opID != "" && !o.detach {
+		return o, fmt.Errorf("--op-id requires --detach")
+	}
+	o.cmd = cmd
+	if cmd == "" {
+		return o, fmt.Errorf("usage: relay session exec ID [--detach [--op-id OP]] -- CMD")
+	}
+	return o, nil
+}
+
+func splitDashDash(args []string) (before []string, after string, ok bool) {
+	for i, a := range args {
+		if a == "--" {
+			return args[:i], strings.Join(args[i+1:], " "), true
+		}
+	}
+	return args, "", false
+}
+
+// sendOutcome prints a send receipt. Success prints nothing in text mode (as
+// before); an unconfirmed delivery exits ExitDeliveryUncertain so callers can
+// tell it from a pre-send failure (exit 1, nothing typed).
+func (a *App) sendOutcome(res core.SendResult, err error) int {
+	var uncertain *ports.DeliveryUncertainError
+	isUncertain := errors.As(err, &uncertain)
+	if a.JSON {
+		_ = a.out(map[string]any{"ok": err == nil, "receipt": res, "error": errString(err)})
+	} else if err != nil {
+		ui.Warn(err.Error())
+		if isUncertain {
+			ui.Warn(fmt.Sprintf("delivery %s (%s): do not resend blindly; inspect with `relay session capture %s`", res.State, res.Evidence, res.SessionID))
+		}
+	}
+	switch {
+	case err == nil:
+		return 0
+	case isUncertain:
+		return ports.ExitDeliveryUncertain
+	default:
+		return 1
+	}
+}
+
+func (a *App) cmdSessionOp(ctx context.Context, args []string) int {
+	a.JSON = true
+	if len(args) < 3 {
+		return a.fail(fmt.Errorf("usage: relay session op status|wait|output ID OP [flags]"))
+	}
+	verb, id, op := args[0], args[1], args[2]
+	cursor := int64(-1)
+	timeout := 60 * time.Second
+	stream, offset, limit := "stdout", int64(0), int64(core.DefaultOpOutputLimit)
+	rest := args[3:]
+	for i := 0; i < len(rest); i++ {
+		flag := rest[i]
+		if i+1 >= len(rest) {
+			return a.fail(fmt.Errorf("%s requires a value", flag))
+		}
+		val := rest[i+1]
+		i++
+		var err error
+		switch {
+		case flag == "--cursor" && verb != "output":
+			cursor, err = strconv.ParseInt(val, 10, 64)
+		case flag == "--timeout" && verb == "wait":
+			timeout, err = time.ParseDuration(val)
+		case flag == "--stream" && verb == "output":
+			stream = val
+		case flag == "--offset" && verb == "output":
+			offset, err = strconv.ParseInt(val, 10, 64)
+		case flag == "--limit" && verb == "output":
+			limit, err = strconv.ParseInt(val, 10, 64)
+		default:
+			return a.fail(rejectUnknownFlag(flag))
+		}
+		if err != nil {
+			return a.fail(fmt.Errorf("%s: %w", flag, err))
+		}
+	}
+	switch verb {
+	case "status":
+		rc, err := a.Sessions.OpStatus(ctx, id, op, cursor)
+		if err != nil {
+			return a.failNext(err, map[string]any{"receipt": rc})
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "receipt": rc}))
+	case "wait":
+		if cursor < 0 {
+			cursor = 0
+		}
+		rc, err := a.Sessions.WaitOp(ctx, id, op, cursor, timeout)
+		if err != nil {
+			return a.failNext(err, map[string]any{"receipt": rc,
+				"argv": []string{"relay", "session", "op", "wait", id, op, "--cursor", strconv.FormatInt(rc.Cursor, 10)}})
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "receipt": rc}))
+	case "output":
+		out, err := a.Sessions.ReadOpOutput(ctx, id, op, stream, offset, limit)
+		if err != nil {
+			return a.fail(err)
+		}
+		return a.errOut(a.out(map[string]any{"ok": true, "output": out}))
+	default:
+		return a.fail(fmt.Errorf("unknown op verb %q (status|wait|output)", verb))
 	}
 }
 

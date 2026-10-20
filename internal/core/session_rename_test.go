@@ -30,8 +30,8 @@ func (p *renamePersistence) Destroy(context.Context, ports.Transport, ports.Pers
 func (p *renamePersistence) Capture(context.Context, ports.Transport, ports.PersistHandle, int) (string, error) {
 	return "agent ready\n❯ ", nil
 }
-func (p *renamePersistence) Send(context.Context, ports.Transport, ports.PersistHandle, string, bool) error {
-	return nil
+func (p *renamePersistence) Send(context.Context, ports.Transport, ports.PersistHandle, string, bool) (ports.SendReceipt, error) {
+	return ports.SendReceipt{State: ports.SendSubmitted}, nil
 }
 func (p *renamePersistence) Resize(context.Context, ports.Transport, ports.PersistHandle) error {
 	return nil
