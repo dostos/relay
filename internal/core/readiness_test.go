@@ -184,3 +184,52 @@ dostos@Jingyu-Home:~/dev/dostos-workspace$ `)
 		t.Fatalf("a stopped agent must read as absent, not %+v", got)
 	}
 }
+
+// #67: approval menus of current Codex and Claude Code are gates; Enter on
+// them selects the highlighted "Yes".
+func TestCodexAndClaudeApprovalMenusAreBlocked(t *testing.T) {
+	cases := map[string]string{
+		"codex exec": `• Ran tests
+
+  Would you like to run the following command?
+
+  $ rm -rf build
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for this command in this session (a)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel`,
+		"codex patch": `  Would you like to make the following edits?
+
+  src/main.go (+2 -1)
+
+› 1. Yes, proceed (y)
+  2. No, and tell Codex what to do differently (esc)`,
+		"claude": ` Bash command
+
+   rm -rf build
+   Remove build output
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for rm commands in /home/u/project
+   3. No, and tell Claude what to do differently (esc)`,
+		"claude boxed": `╭──────────────────────────────────────────╮
+│ Edit file                                │
+│ Do you want to make this edit to a.go?   │
+│ ❯ 1. Yes                                 │
+│   2. No, and tell Claude what to do (esc) │
+╰──────────────────────────────────────────╯`,
+	}
+	for name, pane := range cases {
+		got := ClassifyAgentPane(pane)
+		if got.State != AgentBlocked || got.Reason != "waiting for tool-permission approval" || got.Gate == nil || len(got.Gate.Choices) < 2 {
+			t.Errorf("%s: approval menu not blocked: %+v", name, got)
+		}
+	}
+	quoted := "● The tool asked \"Do you want to proceed?\" earlier and I answered it.\n\n  Next I will run the tests.\n\n› \n"
+	if got := ClassifyAgentPane(quoted); got.State != AgentReady {
+		t.Fatalf("quoted prompt in prose = %+v", got)
+	}
+}

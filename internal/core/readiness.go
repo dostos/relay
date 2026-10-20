@@ -103,7 +103,7 @@ func parseSecurityGate(lines []string, reason string) *SecurityGate {
 		for _, line := range lines {
 			content := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), ">›❯→⚠"))
 			lower := strings.ToLower(content)
-			if strings.HasPrefix(lower, "run this command?") {
+			if strings.HasPrefix(lower, "run this command?") || strings.HasPrefix(lower, "would you like to ") || strings.HasPrefix(lower, "do you want to ") {
 				inBody = true
 				continue
 			}
@@ -136,7 +136,7 @@ func gateChoicesMatch(reason string, choices []GateChoice) bool {
 		"waiting for account login":             {"account", "subscription", "console", "sign in", "login"},
 		"waiting for folder-trust approval":     {"trust", "yes", "no", "continue", "quit", "exit"},
 		"waiting for first-run theme selection": {"mode", "light", "dark", "theme"},
-		"waiting for tool-permission approval":  {"run", "allow", "skip", "deny"},
+		"waiting for tool-permission approval":  {"run", "allow", "skip", "deny", "yes", "proceed", "no,"},
 	}
 	markers := want[reason]
 	if len(markers) == 0 {
@@ -183,6 +183,13 @@ var securityGates = []struct{ marker, reason string }{
 	{"dark mode (colorblind-friendly)", "waiting for first-run theme selection"},
 	{"enter to confirm", "waiting at an interactive confirmation"},
 	{"run this command?", "waiting for tool-permission approval"},
+	// Current Codex and Claude Code approval menus (#67). Enter on them picks
+	// the highlighted "Yes", so a sender must never treat them as ready.
+	{"would you like to run the following command?", "waiting for tool-permission approval"},
+	{"would you like to make the following edits?", "waiting for tool-permission approval"},
+	{"do you want to proceed?", "waiting for tool-permission approval"},
+	{"do you want to make this edit", "waiting for tool-permission approval"},
+	{"do you want to create", "waiting for tool-permission approval"},
 	{"not in allowlist", "waiting for tool-permission approval"},
 }
 
@@ -227,6 +234,8 @@ func ClassifyAgentPane(capture string) AgentReadiness {
 	// relaunch on top of a decision the human has not made. Gate type takes
 	// precedence over line recency so a generic trailing "Enter to confirm"
 	// cannot erase the specific login, trust, or theme decision above it.
+	// Claude Code draws some prompts inside a │ … │ box; read the content.
+	lines = unboxLines(lines)
 	for _, gate := range securityGates {
 		for i := len(lines) - 1; i >= 0; i-- {
 			if !promptLine(lines[i], gate.marker) {
@@ -274,4 +283,18 @@ func formatSecurityGate(gate *SecurityGate) string {
 		parts = append(parts, fmt.Sprintf("%d. %s", choice.Index, choice.Label))
 	}
 	return strings.Join(parts, " | ")
+}
+
+func unboxLines(lines []string) []string {
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "│") {
+			t = strings.TrimSpace(strings.TrimPrefix(t, "│"))
+			t = strings.TrimSpace(strings.TrimSuffix(t, "│"))
+			line = "  " + t
+		}
+		out[i] = line
+	}
+	return out
 }

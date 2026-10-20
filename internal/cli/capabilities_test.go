@@ -182,6 +182,9 @@ func TestCapabilitiesMatchHelp(t *testing.T) {
 		"session.op.wait":          "relay session op wait",
 		"session.op.output":        "relay session op output",
 		"cli.capabilities":         "relay capabilities",
+		"session.send.paste":       "Paste TEXT (bracketed)",
+		"session.send.serialized":  "serialized on its host",
+		"session.send.gate_guard":  "approval prompt is refused",
 	}
 	for _, c := range coord.Capabilities() {
 		if needle, ok := want[c]; ok && !strings.Contains(help, needle) {

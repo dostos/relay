@@ -4,10 +4,12 @@ package tmux
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/dostos/relay/internal/ports"
 	"github.com/dostos/relay/internal/shellquote"
@@ -25,6 +27,13 @@ const (
 )
 
 var sendConfirmDelay = 600 * time.Millisecond
+
+// sendSettleDelay separates the paste from the single Enter. Codex turns an
+// Enter that arrives within 120 ms of a fast keystroke run into a newline
+// (paste-burst detection), so an Enter sent straight after the text is
+// swallowed (#65). A bracketed paste avoids the burst path entirely; the delay
+// also covers TUIs that ignore bracketed paste.
+var sendSettleDelay = 300 * time.Millisecond
 
 // Persist is a tmux-backed persistence adapter.
 type Persist struct{}
@@ -266,8 +275,7 @@ func (p *Persist) Send(ctx context.Context, t ports.Transport, h ports.PersistHa
 	}
 	if text != "" {
 		rc.State = ports.SendUncertain
-		cmd := fmt.Sprintf("tmux send-keys -t %s -l -- %s", target, shellquote.Quote(text))
-		if _, stderr, err := t.Run(ctx, "", cmd); err != nil {
+		if _, stderr, err := t.Run(ctx, "", pasteCommand(target, text)); err != nil {
 			return rc, &ports.DeliveryUncertainError{Err: fmt.Errorf("send: %w (%s)", err, strings.TrimSpace(stderr))}
 		}
 		rc.State = ports.SendDeposited
@@ -277,9 +285,13 @@ func (p *Persist) Send(ctx context.Context, t ports.Transport, h ports.PersistHa
 		return rc, nil
 	}
 	rc.State = ports.SendUncertain
-	marker := text
-	if len(marker) > 48 {
-		marker = marker[:48]
+	marker := sendMarker(text)
+	if text != "" && sendSettleDelay > 0 {
+		select {
+		case <-ctx.Done():
+			return rc, &ports.DeliveryUncertainError{Err: ctx.Err()}
+		case <-time.After(sendSettleDelay):
+		}
 	}
 	if _, stderr, err := t.Run(ctx, "", fmt.Sprintf("tmux send-keys -t %s Enter", target)); err != nil {
 		return rc, &ports.DeliveryUncertainError{Err: fmt.Errorf("submit: %w (%s)", err, strings.TrimSpace(stderr))}
@@ -355,7 +367,7 @@ func freshTurn(before, after, marker string) string {
 		}
 	}
 	if marker != "" && hasComposerGlyph(after) && !composerHolds(after, marker) &&
-		strings.Count(after, marker) > strings.Count(before, marker) {
+		countMarker(after, marker) > countMarker(before, marker) {
 		return "composer_released"
 	}
 	return ""
@@ -425,10 +437,10 @@ func depositedWithoutTurn(before, after, marker string) bool {
 	}
 	// Codex idle composers often lack a prompt glyph; deposited text still
 	// sits above the status line with no Working indicator.
-	if strings.Contains(after, "[Pasted Content ") && !strings.Contains(before, "[Pasted Content ") {
+	if hasPastePlaceholder(after) && !hasPastePlaceholder(before) {
 		return true
 	}
-	return strings.Count(after, marker) > strings.Count(before, marker)
+	return countMarker(after, marker) > countMarker(before, marker)
 }
 
 func turnStarted(screen string) bool {
@@ -463,30 +475,99 @@ func composerHolds(screen, marker string) bool {
 		return false
 	}
 	lines := strings.Split(screen, "\n")
-	composer, composerLine := "", -1
+	composerLine := -1
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "›") || strings.HasPrefix(trimmed, ">") || strings.HasPrefix(trimmed, "❯") {
-			composer = trimmed
 			composerLine = i
 		}
 	}
 	if composerLine < 0 {
 		return false
 	}
+	// The composer is the last prompt-glyph line plus its continuation: a
+	// multiline draft wraps onto indented lines below it, and a later message
+	// can land there (#64). Unindented output below the glyph means the glyph
+	// line was a submitted transcript entry, not the live input. Rule lines
+	// (Claude Code draws the input box with them) are not output.
+	block := []string{lines[composerLine]}
+	for _, line := range lines[composerLine+1:] {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || isRuleLine(trimmed) {
+			continue
+		}
+		if len(line) == len(strings.TrimLeft(line, " \t")) {
+			return false
+		}
+		block = append(block, line)
+	}
+	composer := strings.Join(block, "\n")
 	// Codex replaces large bracketed pastes with an opaque placeholder. The
 	// original marker is then absent even though the composer still owns the
 	// message; treating that as delivered recreates the stuck-without-Enter bug.
-	pastedContent := strings.Contains(composer, "[Pasted Content ")
-	if !pastedContent && !strings.Contains(composer, marker) {
-		return false
+	if hasPastePlaceholder(composer) {
+		return true
 	}
-	for _, line := range lines[composerLine+1:] {
-		if strings.TrimSpace(line) != "" && len(line) == len(strings.TrimLeft(line, " \t")) {
-			return false
+	return countMarker(composer, marker) > 0
+}
+
+// hasPastePlaceholder reports the opaque stand-ins TUIs show for a large
+// paste: Codex "[Pasted Content N chars]", Claude Code "[Pasted text #1 +N lines]".
+func hasPastePlaceholder(s string) bool {
+	return strings.Contains(s, "[Pasted Content ") || strings.Contains(s, "[Pasted text #")
+}
+
+func isRuleLine(s string) bool {
+	return strings.Trim(s, "─━═-╌┄") == ""
+}
+
+// pasteCommand delivers text as one bracketed paste (#65). load-buffer reads
+// the bytes from stdin so nothing is interpreted as a key name; -p wraps the
+// paste in bracketed-paste markers when the application asked for them, -r
+// keeps LF as LF (a raw CR would submit each line separately), and -d removes
+// the uniquely named buffer.
+func pasteCommand(target, text string) string {
+	buf := "relay-send-" + strconv.FormatInt(time.Now().UnixNano(), 36) + "-" + strconv.Itoa(rand.Intn(1<<30))
+	qbuf := shellquote.Quote(buf)
+	return fmt.Sprintf("printf '%%s' %s | tmux load-buffer -b %s - && { tmux paste-buffer -p -r -d -b %s -t %s || { tmux delete-buffer -b %s 2>/dev/null; exit 1; }; }",
+		shellquote.Quote(text), qbuf, qbuf, target, qbuf)
+}
+
+// sendMarker is the text used to find the message on screen: its first
+// non-blank line, cut on a rune boundary. A marker that spans a newline never
+// matches a TUI that indents continuation lines, and a byte cut can split a
+// UTF-8 character (#64).
+func sendMarker(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
 		}
+		if r := []rune(line); len(r) > 32 {
+			line = string(r[:32])
+		}
+		return line
 	}
-	return true
+	return ""
+}
+
+// countMarker counts marker occurrences ignoring whitespace, so a message the
+// TUI wrapped or re-indented across lines still matches.
+func countMarker(screen, marker string) int {
+	m := squashSpace(marker)
+	if m == "" {
+		return 0
+	}
+	return strings.Count(squashSpace(screen), m)
+}
+
+func squashSpace(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 func (p *Persist) Resize(ctx context.Context, t ports.Transport, h ports.PersistHandle) error {

@@ -84,9 +84,9 @@ func paneScript(pane string, screens ...string) *recordingTransport {
 
 func noSendDelay(t *testing.T) {
 	t.Helper()
-	oldDelay := sendConfirmDelay
-	sendConfirmDelay = 0
-	t.Cleanup(func() { sendConfirmDelay = oldDelay })
+	oldDelay, oldSettle := sendConfirmDelay, sendSettleDelay
+	sendConfirmDelay, sendSettleDelay = 0, 0
+	t.Cleanup(func() { sendConfirmDelay, sendSettleDelay = oldDelay, oldSettle })
 }
 
 func enters(transport *recordingTransport, pane string) int {
@@ -108,7 +108,8 @@ func TestSendSubmitsOnceAndConfirmsFreshTurn(t *testing.T) {
 	if !strings.Contains(joined, "display-message -p -t '=agent:'") {
 		t.Fatalf("send must resolve an explicit pane id first: %v", transport.commands)
 	}
-	if enters(transport, "%42") != 1 || strings.Count(joined, "send-keys -t '%42' -l -- 'relay marker'") != 1 {
+	if enters(transport, "%42") != 1 || strings.Count(joined, "printf '%s' 'relay marker' | tmux load-buffer") != 1 ||
+		strings.Count(joined, "paste-buffer -p -r -d") != 1 || strings.Contains(joined, "send-keys -t '%42' -l") {
 		t.Fatalf("expected one type and exactly one Enter against pane id: %v", transport.commands)
 	}
 	if strings.Contains(joined, "send-keys -t '=agent:'") {
@@ -672,5 +673,78 @@ func TestSendRealTmuxFreshTurnVsStaleMarker(t *testing.T) {
 				t.Fatalf("submits = %d", rc.Submits)
 			}
 		})
+	}
+}
+
+// #64: a short follow-up landing on a continuation line of a multiline
+// composer that still holds an earlier, unsubmitted message is not delivery.
+func TestSendFollowUpBelowMultilineComposerIsNotSubmitted(t *testing.T) {
+	noSendDelay(t)
+	before := "previous answer\n\n› 핸드오프: read docs/handoff.md and continue\n  두 번째 줄 — keep tests green\n\n  gpt-5.6-sol default · ~/dev\n"
+	after := "previous answer\n\n› 핸드오프: read docs/handoff.md and continue\n  두 번째 줄 — keep tests green\n  status check: any progress?\n\n  gpt-5.6-sol default · ~/dev\n"
+	transport := paneScript("%4", before, after)
+	rc, err := New().Send(context.Background(), transport, ports.PersistHandle{Name: "oqb"}, "status check: any progress?", true)
+	var uncertain *ports.DeliveryUncertainError
+	if err == nil || !errors.As(err, &uncertain) || rc.State != ports.SendDeposited {
+		t.Fatalf("follow-up appended to a held composer was credited: %+v err=%v", rc, err)
+	}
+}
+
+// #64: a long multiline UTF-8 paste that has not begun a turn stays
+// uncertain/deposited, whether the TUI shows it verbatim or as a placeholder.
+func TestSendLongUTF8PasteWithoutTurnIsNotSubmitted(t *testing.T) {
+	noSendDelay(t)
+	var b strings.Builder
+	for i := 0; i < 60; i++ {
+		b.WriteString("줄 " + strconv.Itoa(i) + ": 빠른 갈색 여우가 게으른 개를 뛰어넘습니다 — the quick brown fox\n")
+	}
+	text := b.String()
+	idle := "done.\n\n› \n\n  gpt-5.6-sol default · ~/dev\n"
+	for name, held := range map[string]string{
+		"verbatim":    "done.\n\n› 줄 0: 빠른 갈색 여우가 게으른 개를 뛰어넘습니다 — the\n  quick brown fox\n  줄 1: 빠른 갈색 여우가\n\n  gpt-5.6-sol default · ~/dev\n",
+		"placeholder": "done.\n\n› [Pasted Content 4410 chars]\n\n  gpt-5.6-sol default · ~/dev\n",
+		"claude":      "done.\n\n────────\n> [Pasted text #1 +60 lines]\n────────\n  ? for shortcuts\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			transport := paneScript("%8", idle, held)
+			rc, err := New().Send(context.Background(), transport, ports.PersistHandle{Name: "oqb"}, text, true)
+			if err == nil || rc.State == ports.SendSubmitted {
+				t.Fatalf("held paste credited as submitted: %+v", rc)
+			}
+			if rc.State != ports.SendDeposited {
+				t.Fatalf("receipt = %+v", rc)
+			}
+		})
+	}
+}
+
+func TestSendMultilineMessageReleasedFromComposer(t *testing.T) {
+	noSendDelay(t)
+	idle := "› \n\n  gpt-5.6-sol default\n"
+	after := "› line one of the\n  message\n  line two\n\n• reply\n\n› \n\n  gpt-5.6-sol default\n"
+	transport := paneScript("%6", idle, after)
+	rc, err := New().Send(context.Background(), transport, ports.PersistHandle{Name: "b"}, "line one of the message\nline two", true)
+	if err != nil || rc.Evidence != "composer_released" {
+		t.Fatalf("receipt = %+v err=%v", rc, err)
+	}
+}
+
+func TestComposerHoldsClaudeRuledInputBox(t *testing.T) {
+	screen := "● previous reply\n\n────────────────\n> relay marker\n────────────────\n  ? for shortcuts\n"
+	if !composerHolds(screen, "relay marker") {
+		t.Fatal("rule lines around Claude's input box were mistaken for output")
+	}
+}
+
+func TestSendMarkerIsRuneSafeFirstLine(t *testing.T) {
+	if got := sendMarker("\n  첫 줄\nsecond"); got != "첫 줄" {
+		t.Fatalf("marker = %q", got)
+	}
+	long := strings.Repeat("가", 40)
+	if got := sendMarker(long); got != strings.Repeat("가", 32) {
+		t.Fatalf("marker = %q", got)
+	}
+	if countMarker("› 가나다라마바사\n  아자차", "가나다라 마바사아자차") != 1 {
+		t.Fatal("wrapped marker not matched")
 	}
 }

@@ -31,8 +31,11 @@ var capabilities = []string{
 	"session.op.output",        //
 	"session.op.status",        //
 	"session.op.wait",          //
+	"session.send.gate_guard",  // refuses to type into an approval prompt (#67)
 	"session.send.idempotency", // --idempotency-key replays a receipt (#59)
+	"session.send.paste",       // text arrives as one bracketed paste (#65)
 	"session.send.receipt",     // fresh-turn send receipts (#59)
+	"session.send.serialized",  // per-session host lock between senders (#66)
 	"session.submit",           // relay session submit (#59)
 }
 
