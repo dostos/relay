@@ -83,7 +83,17 @@ relay auth status|login|copy                # agent CLI logins on a host
 relay service run|status                    # unified home service and component health
 relay resume --session NAME --host HOST     # what a Forge tab runs
 relay pane classify / session readiness     # agent readiness for presenters
+relay capabilities [-H HOST] --json         # installed client + host service build and features
 ```
+
+Merged source and installed binaries can differ. Before relying on a feature,
+automation should check `relay --json capabilities -H HOST`: it lists what the
+installed client and the host's event service each report (for example
+`session.submit`, `session.op.wait`), with `missing_on_daemon` /
+`missing_on_client`. A service too old to report is `unreported`, a failed
+probe is `unknown`; neither borrows the client's list. Host reports are cached
+for five minutes per client build (`--refresh` to re-probe), and every
+identity carries a `cache_key`.
 
 ## Architecture
 

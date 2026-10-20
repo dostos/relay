@@ -105,3 +105,22 @@ func (c *Coord) RemoteBuild(ctx context.Context, t ports.Transport) (string, err
 	}
 	return resp.Build, nil
 }
+
+// RemotePing returns the raw ping reply of the event service on a host:
+// version, build and — from builds that report it (#62) — its capability
+// list. A reply without Capabilities comes from an older service and means
+// "not reported"; callers must not fill it in from the local list.
+func (c *Coord) RemotePing(ctx context.Context, t ports.Transport) (*coord.Response, error) {
+	stdout, stderr, err := t.Run(ctx, "", remoteBin+` ping`)
+	if err != nil {
+		return nil, fmt.Errorf("relayd ping on %s: %w (%s)", t.ID(), err, strings.TrimSpace(stderr))
+	}
+	var resp coord.Response
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &resp); err != nil {
+		return nil, fmt.Errorf("relayd ping on %s: %w", t.ID(), err)
+	}
+	if !resp.OK {
+		return nil, fmt.Errorf("relayd ping on %s: %s", t.ID(), strings.TrimSpace(resp.Error))
+	}
+	return &resp, nil
+}

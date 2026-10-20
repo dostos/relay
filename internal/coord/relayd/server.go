@@ -115,16 +115,18 @@ func (s *Server) handle(c net.Conn) {
 	}
 	switch req.Op {
 	case "ping":
-		writeJSON(c, coord.Response{OK: true, Version: coord.Version, Build: coord.Build})
+		writeJSON(c, coord.Response{OK: true, Version: coord.Version, Build: coord.Build, Release: coord.ReleaseVersion, Capabilities: coord.Capabilities()})
 	case "status":
 		s.mu.Lock()
 		started := s.started
 		s.mu.Unlock()
 		writeJSON(c, coord.Response{
-			OK:      true,
-			Version: coord.Version,
-			Build:   coord.Build,
-			Uptime:  time.Since(started).Round(time.Second).String(),
+			OK:           true,
+			Version:      coord.Version,
+			Build:        coord.Build,
+			Uptime:       time.Since(started).Round(time.Second).String(),
+			Capabilities: coord.Capabilities(),
+			Release:      coord.ReleaseVersion,
 		})
 	case "emit":
 		ev, err := s.Store.Emit(req.Session, req.Kind, req.Meta)
