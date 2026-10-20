@@ -4,6 +4,7 @@ package tmux
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -15,8 +16,12 @@ import (
 const kind = "tmux"
 
 const (
+	// sendConfirmAttempts bounds launch-ack and sensor-install polls.
 	sendConfirmAttempts = 3
-	sendConfirmLines    = 14
+	// sendConfirmPolls bounds post-submit pane reads for a send. Reads are
+	// cheap and idempotent; only the Enter is not, and it is sent once.
+	sendConfirmPolls = 8
+	sendConfirmLines = 14
 )
 
 var sendConfirmDelay = 600 * time.Millisecond
@@ -228,74 +233,202 @@ func (p *Persist) ResolveGateChoice(ctx context.Context, t ports.Transport, h po
 	return nil
 }
 
-func (p *Persist) Send(ctx context.Context, t ports.Transport, h ports.PersistHandle, text string, enter bool) error {
+// Send types text and, when enter is set, presses Enter exactly once.
+//
+// Success must be attributable to *this* send (#59). Before typing, Send
+// captures the pane; after the single Enter it polls (to tolerate delayed
+// rendering) for evidence that a turn began after the snapshot:
+//
+//   - a working indicator that was not on the pre-send screen at all,
+//   - a working indicator whose elapsed timer restarted below the pre-send
+//     value (the agent was mid-turn and a new turn began), or
+//   - a recognizable composer that released the text while the text newly
+//     appeared in the transcript.
+//
+// A `Working` line already present in scrollback before the send can never
+// satisfy the check on its own. Enter is never repeated: a second Enter after
+// delayed output can submit a different composer state or approve a gate, so
+// an unconfirmed submit returns a *DeliveryUncertainError with a deposited or
+// uncertain receipt instead.
+func (p *Persist) Send(ctx context.Context, t ports.Transport, h ports.PersistHandle, text string, enter bool) (ports.SendReceipt, error) {
+	rc := ports.SendReceipt{State: ports.SendNotSent}
 	pane, err := p.resolvePaneID(ctx, t, h)
 	if err != nil {
-		return &ports.DeliveryUncertainError{Err: err}
+		return rc, err
 	}
 	target := shellquote.Quote(pane)
-	cmd := fmt.Sprintf("tmux send-keys -t %s -l -- %s", target, shellquote.Quote(text))
-	_, stderr, err := t.Run(ctx, "", cmd)
-	if err != nil {
-		return &ports.DeliveryUncertainError{Err: fmt.Errorf("send: %w (%s)", err, strings.TrimSpace(stderr))}
+	var before string
+	if enter {
+		before, err = p.captureTarget(ctx, t, target, sendConfirmLines)
+		if err != nil {
+			return rc, fmt.Errorf("snapshot before send: %w", err)
+		}
+	}
+	if text != "" {
+		rc.State = ports.SendUncertain
+		cmd := fmt.Sprintf("tmux send-keys -t %s -l -- %s", target, shellquote.Quote(text))
+		if _, stderr, err := t.Run(ctx, "", cmd); err != nil {
+			return rc, &ports.DeliveryUncertainError{Err: fmt.Errorf("send: %w (%s)", err, strings.TrimSpace(stderr))}
+		}
+		rc.State = ports.SendDeposited
+		rc.Evidence = "typed"
 	}
 	if !enter {
-		return nil
+		return rc, nil
 	}
+	rc.State = ports.SendUncertain
 	marker := text
 	if len(marker) > 48 {
 		marker = marker[:48]
 	}
+	if _, stderr, err := t.Run(ctx, "", fmt.Sprintf("tmux send-keys -t %s Enter", target)); err != nil {
+		return rc, &ports.DeliveryUncertainError{Err: fmt.Errorf("submit: %w (%s)", err, strings.TrimSpace(stderr))}
+	}
+	rc.Submits = 1
 	var lastScreen string
-	for attempt := 0; attempt < sendConfirmAttempts; attempt++ {
-		_, stderr, err = t.Run(ctx, "", fmt.Sprintf("tmux send-keys -t %s Enter", target))
-		if err != nil {
-			return &ports.DeliveryUncertainError{Err: fmt.Errorf("submit: %w (%s)", err, strings.TrimSpace(stderr))}
-		}
+	for poll := 0; poll < sendConfirmPolls; poll++ {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return rc, &ports.DeliveryUncertainError{Err: ctx.Err()}
 		case <-time.After(sendConfirmDelay):
 		}
 		screen, captureErr := p.captureTarget(ctx, t, target, sendConfirmLines)
+		rc.Polls++
 		if captureErr != nil {
-			return &ports.DeliveryUncertainError{Err: fmt.Errorf("confirm send: %w", captureErr)}
+			// A failed read is not evidence either way; keep polling.
+			continue
 		}
 		lastScreen = screen
-		if messageSubmitted(screen, marker) {
-			return nil
+		if ev := freshTurn(before, screen, marker); ev != "" {
+			rc.State = ports.SendSubmitted
+			rc.Evidence = ev
+			return rc, nil
 		}
 	}
-	if depositedWithoutTurn(lastScreen, marker) {
-		return &ports.DeliveryUncertainError{Err: fmt.Errorf("text reached %s's input but no turn started after %d submit attempts", h.Name, sendConfirmAttempts)}
+	if lastScreen == "" {
+		rc.Evidence = "unobservable"
+		return rc, &ports.DeliveryUncertainError{Err: fmt.Errorf("could not read %s's pane after submit; delivery unknown", h.Name)}
 	}
-	return &ports.DeliveryUncertainError{Err: fmt.Errorf("message is still unsent in %s's composer after %d attempts", h.Name, sendConfirmAttempts)}
+	if depositedWithoutTurn(before, lastScreen, marker) {
+		rc.State = ports.SendDeposited
+		rc.Evidence = "composer_holds_text"
+		return rc, &ports.DeliveryUncertainError{Err: fmt.Errorf("text reached %s's input but no turn started after this send (Enter pressed once, not repeated)", h.Name)}
+	}
+	rc.Evidence = "no_fresh_turn"
+	return rc, &ports.DeliveryUncertainError{Err: fmt.Errorf("no fresh turn observed in %s after submit; message may be unsent or still pending", h.Name)}
 }
 
-// messageSubmitted reports positive evidence that a turn began or that a
-// recognizable composer released the typed marker. Marker-on-screen alone is
-// not enough: Codex often shows deposited text with no ›/>/❯ glyph, and the
-// old "marker present ∧ composer not holding" check treated that as success.
-func messageSubmitted(screen, marker string) bool {
-	if turnStarted(screen) {
-		return true
+// freshTurn returns the evidence name when after shows a turn that began
+// after before was captured, or "" when it does not.
+func freshTurn(before, after, marker string) string {
+	prev := workingLines(before)
+	cur := workingLines(after)
+	if len(cur) > 0 {
+		seen := map[string]bool{}
+		for _, l := range prev {
+			seen[l] = true
+		}
+		var fresh []string
+		for _, l := range cur {
+			if !seen[l] {
+				fresh = append(fresh, l)
+			}
+		}
+		if len(fresh) > 0 {
+			if len(prev) == 0 {
+				return "fresh_working_indicator"
+			}
+			// Something already looked like a turn before the send: either a
+			// stale line in scrollback or a live turn whose timer keeps
+			// ticking (our text is then only queued). Only a timer that
+			// restarted below every pre-send reading proves a new turn.
+			prevMax, prevOK := maxElapsed(prev)
+			curMin, curOK := minElapsed(fresh)
+			if prevOK && curOK && curMin < prevMax {
+				return "working_timer_reset"
+			}
+			if !prevOK && curOK {
+				// Pre-send indicators carried no timer (stale text such as
+				// "Working..."); a fresh, timed indicator is a new turn.
+				return "fresh_working_indicator"
+			}
+		}
 	}
-	if marker == "" || !hasComposerGlyph(screen) {
-		return false
+	if marker != "" && hasComposerGlyph(after) && !composerHolds(after, marker) &&
+		strings.Count(after, marker) > strings.Count(before, marker) {
+		return "composer_released"
 	}
-	return !composerHolds(screen, marker)
+	return ""
 }
 
-func depositedWithoutTurn(screen, marker string) bool {
-	if marker == "" || turnStarted(screen) {
+func workingLines(screen string) []string {
+	var out []string
+	for _, line := range strings.Split(screen, "\n") {
+		if turnStarted(line) {
+			out = append(out, strings.TrimSpace(line))
+		}
+	}
+	return out
+}
+
+var elapsedRE = regexp.MustCompile(`\((?:(\d+)h\s*)?(?:(\d+)m\s*)?(\d+)s\b`)
+
+func elapsedSeconds(line string) (int, bool) {
+	m := elapsedRE.FindStringSubmatch(line)
+	if m == nil {
+		return 0, false
+	}
+	h, _ := strconv.Atoi(m[1])
+	mi, _ := strconv.Atoi(m[2])
+	s, _ := strconv.Atoi(m[3])
+	return h*3600 + mi*60 + s, true
+}
+
+func maxElapsed(lines []string) (int, bool) {
+	best, ok := 0, false
+	for _, l := range lines {
+		if v, has := elapsedSeconds(l); has && (!ok || v > best) {
+			best, ok = v, true
+		}
+	}
+	return best, ok
+}
+
+func minElapsed(lines []string) (int, bool) {
+	best, ok := 0, false
+	for _, l := range lines {
+		if v, has := elapsedSeconds(l); has && (!ok || v < best) {
+			best, ok = v, true
+		}
+	}
+	return best, ok
+}
+
+// depositedWithoutTurn reports that the text is visibly still waiting in the
+// input after the submit. Working indicators already on the pre-send screen
+// are ignored; a new, unattributable one means "uncertain", not "deposited".
+func depositedWithoutTurn(before, after, marker string) bool {
+	if marker == "" {
 		return false
 	}
-	if composerHolds(screen, marker) {
+	seen := map[string]bool{}
+	for _, l := range workingLines(before) {
+		seen[l] = true
+	}
+	for _, l := range workingLines(after) {
+		if !seen[l] {
+			return false
+		}
+	}
+	if composerHolds(after, marker) {
 		return true
 	}
 	// Codex idle composers often lack a prompt glyph; deposited text still
 	// sits above the status line with no Working indicator.
-	return strings.Contains(screen, marker) || strings.Contains(screen, "[Pasted Content ")
+	if strings.Contains(after, "[Pasted Content ") && !strings.Contains(before, "[Pasted Content ") {
+		return true
+	}
+	return strings.Count(after, marker) > strings.Count(before, marker)
 }
 
 func turnStarted(screen string) bool {

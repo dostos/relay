@@ -76,6 +76,8 @@ relay host init -H host-a --apply   # installs relay + compatibility symlink
 relay targets / host discover / host init   # new machine
 relay HOST NAME                             # named tmux, attached in this terminal
 relay session … / session adopt             # durable tmux (create takes -- ARGV)
+relay session send|submit ID                # receipt: submitted | deposited | uncertain (exit 67)
+relay session exec ID --detach / session op # durable ops: status/wait by cursor, survive SSH loss
 relay container up|down|status|stop|start   # devcontainer or image-backed instance
 relay auth status|login|copy                # agent CLI logins on a host
 relay service run|status                    # unified home service and component health
@@ -112,6 +114,7 @@ delegated, machine-judged work is blacksmith's.
 
 - [Architecture and control bridge](docs/architecture.md) — layers, bridge security, resume states
 - [Readiness for presenters](docs/readiness.md) — `ready / blocked / absent / gone / unknown`
+- [Send receipts and durable operations](docs/session-send-and-ops.md) — fresh-turn confirmation, idempotency keys, `exec --detach` + cursor waits
 - [Dev containers on a fleet host](docs/devcontainers.md)
 - [Ghostty-native app design](docs/2026-09-05-ghostty-native-app-design.md)
 - [Archive](docs/archive/README.md) — retired cmux presenter and delegation surface ([founding design](docs/archive/2026-07-24-relay-design.md))

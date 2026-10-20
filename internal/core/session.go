@@ -426,18 +426,6 @@ func (s *SessionService) Exists(ctx context.Context, id string) (bool, error) {
 	return s.Persist.Exists(ctx, t, sess.Persist)
 }
 
-func (s *SessionService) Send(ctx context.Context, id, text string, enter bool) error {
-	sess, err := s.Reg.GetSession(id)
-	if err != nil {
-		return err
-	}
-	t, err := s.transportFor(sess)
-	if err != nil {
-		return err
-	}
-	return s.Persist.Send(ctx, t, sess.Persist, text, enter)
-}
-
 func (s *SessionService) Exec(ctx context.Context, id, command string) (stdout, stderr string, err error) {
 	sess, err := s.Reg.GetSession(id)
 	if err != nil {
