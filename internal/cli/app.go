@@ -453,10 +453,12 @@ Sessions (explicit id; no guesswork):
   relay session get ID
   relay session capture ID [-n LINES]
   relay session send ID [--idempotency-key KEY] -- TEXT
-                                      Type TEXT, press Enter once, and confirm a turn that started
-                                      after this send. Prints a receipt (--json): submitted |
-                                      deposited | uncertain. Unconfirmed → exit 67; never resend
-                                      blindly (same KEY replays the receipt, never retypes).
+                                      Paste TEXT (bracketed), press Enter once, and confirm a turn
+                                      that started after this send. Prints a receipt (--json):
+                                      submitted | deposited | uncertain. Unconfirmed → exit 67;
+                                      never resend blindly (same KEY replays the receipt, never
+                                      retypes). Sends to one session are serialized on its host;
+                                      a target at an approval prompt is refused (not_sent).
   relay session submit ID [--idempotency-key KEY]
                                       Press Enter once on text already deposited; same confirmation
   relay session exec ID -- CMD        Run CMD (joined with spaces, parsed by the remote shell)

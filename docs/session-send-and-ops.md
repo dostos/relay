@@ -14,9 +14,24 @@ relay --json session submit ID [--idempotency-key KEY]   # Enter only, same chec
 Delivery is one shared path (`internal/persist/tmux` `Persist.Send`); every
 caller that types into an agent pane goes through it.
 
+0. Take the **per-session send lock** on the target host
+   (`~/.local/state/relay/sends/<session>.lock`, atomic `mkdir`). Concurrent
+   senders, from any machine, wait their turn (up to 60 s), so their texts and
+   Enters never merge into one turn (#66). A lock older than 2 minutes is
+   abandoned and is taken over. Timeout: `not_sent`, evidence
+   `send_lock_busy`, exit 1.
+   Then **refuse when the target sits at a gate**: if `session readiness`
+   would say `blocked` (Codex `Would you like to run the following command?`,
+   Claude `Do you want to proceed?`, login/trust prompts), nothing is typed:
+   `not_sent`, evidence `target_at_gate`, exit 1. Enter on an approval menu
+   would select its highlighted "Yes" (#67).
 1. Resolve the pane id and **capture the pane before typing** (the
    baseline). If this fails nothing has been typed: `not_sent`, exit 1.
-2. Type the text literally, then press **Enter exactly once**.
+2. Deliver the text as **one bracketed paste** (`tmux load-buffer` +
+   `paste-buffer -p -r`), wait 300 ms, then press **Enter exactly once**.
+   Typed keystrokes (`send-keys -l`) look like a paste burst to Codex, which
+   turns an Enter arriving within 120 ms into a newline, so the message never
+   submitted (#65). Newlines, quotes, `$`, backticks and UTF-8 arrive verbatim.
 3. Poll the pane (8 reads, 600 ms apart) for evidence of a turn that began
    *after the baseline*:
    - `fresh_working_indicator`: a working/`esc to interrupt` line that was not
@@ -26,6 +41,10 @@ caller that types into an agent pane goes through it.
      *old* turn; the text was only queued;
    - `composer_released`: a recognizable composer (`›`, `>`, `❯`) no longer
      holds the text, and the text appears more often than on the baseline.
+     The composer is the last prompt-glyph line *and its indented
+     continuation lines*, so text appended to a multiline draft still counts
+     as held (#64). The text is matched by its first non-blank line (32 runes),
+     ignoring whitespace, so TUI wrapping does not hide it.
 
    A `Working` line that was already in scrollback can never satisfy the
    check by itself (#59).
@@ -47,7 +66,7 @@ Receipt (`--json`):
 | `submitted` | a turn started after this send | done |
 | `deposited` | text is in the input, no turn seen | inspect (`session capture`); `session submit` if you decide to |
 | `uncertain` | input attempted, outcome unknown | inspect; never resend blindly |
-| `not_sent` | failed before typing | safe to retry |
+| `not_sent` | failed before typing (incl. `send_lock_busy`, `target_at_gate`) | safe to retry; with a key, the same key is reusable |
 
 ### Idempotency keys
 
