@@ -2,6 +2,8 @@ package relayd
 
 import (
 	"net"
+
+	"github.com/dostos/relay/internal/coord"
 	"os"
 	"path/filepath"
 	"testing"
@@ -81,5 +83,39 @@ func TestCloseIsSafeWhileServerIsAccepting(t *testing.T) {
 	}
 	if err := <-done; err == nil {
 		t.Fatal("Serve returned nil after listener close")
+	}
+}
+
+func TestPingReportsBuildIdentityAndCapabilities(t *testing.T) {
+	dir := shortSocketDir(t)
+	sock := filepath.Join(dir, "relayd.sock")
+	store, err := NewStore(filepath.Join(dir, "events"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{SockPath: sock, Store: store}
+	go func() { _ = srv.Serve() }()
+	t.Cleanup(func() { _ = srv.Close() })
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		resp, err := PingLocal(sock)
+		if err == nil {
+			if resp.Release != coord.ReleaseVersion || resp.Build != coord.Build {
+				t.Fatalf("identity: %+v", resp)
+			}
+			want := coord.Capabilities()
+			if len(resp.Capabilities) != len(want) || resp.Capabilities[0] != want[0] {
+				t.Fatalf("capabilities %v, want %v", resp.Capabilities, want)
+			}
+			st, err := StatusLocal(sock)
+			if err != nil || len(st.Capabilities) != len(want) {
+				t.Fatalf("status: %+v %v", st, err)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ping: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

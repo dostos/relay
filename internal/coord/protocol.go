@@ -44,6 +44,12 @@ type Response struct {
 	Build   string         `json:"build,omitempty"`
 	Uptime  string         `json:"uptime,omitempty"`
 	Meta    map[string]any `json:"meta,omitempty"`
+	// Capabilities is set on ping/status by event services new enough to
+	// report it (#62). Absent means "not reported", never "none".
+	Capabilities []string `json:"capabilities,omitempty"`
+	// Release is the service binary's ReleaseVersion (Version above is the
+	// wire protocol). Absent from services older than #62.
+	Release string `json:"release,omitempty"`
 }
 
 // Event is one streamed/log event line.

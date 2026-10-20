@@ -296,8 +296,13 @@ func (a *App) Run(args []string) int {
 	case "help", "-h", "--help":
 		return a.cmdHelp()
 	case "version", "-V", "--version":
-		fmt.Println("relay 0.1.0")
+		if a.JSON {
+			return a.errOut(a.out(map[string]any{"ok": true, "client": coord.LocalIdentity()}))
+		}
+		fmt.Println("relay " + coord.ReleaseVersion)
 		return 0
+	case "capabilities", "caps":
+		return a.cmdCapabilities(ctx, filtered[1:])
 	case "build":
 		fmt.Println(coord.Build)
 		return 0
@@ -479,6 +484,14 @@ Attach (what a Forge tab, or any terminal, runs):
                                       Drop registry tombstones (default: cleaned)
 
   relay doctor
+
+Build identity (what the installed binaries support, not what main has):
+  relay version [--json]              --json adds build id, protocol and capability list
+  relay capabilities [-H HOST] [--refresh] [--json]
+                                      Client and HOST event-service builds + capabilities
+                                      (e.g. session.submit, session.op.wait). A service too old
+                                      to report is "unreported"; a failed probe is "unknown".
+                                      HOST reports are cached 5 min per client build.
 `)
 	return 0
 }
