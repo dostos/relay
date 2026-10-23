@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,24 +38,32 @@ type fleetOpts struct {
 }
 
 type fleetHost struct {
-	Host           string          `json:"host"`
-	Hub            bool            `json:"hub,omitempty"`
-	Reachable      bool            `json:"reachable"`
-	OS             string          `json:"os,omitempty"`
-	Arch           string          `json:"arch,omitempty"`
-	Platform       string          `json:"platform,omitempty"`
-	InstalledBuild string          `json:"installed_build"`
-	HubBuild       string          `json:"hub_build"`
-	UpToDate       bool            `json:"up_to_date"`
-	OnSSHPath      string          `json:"relay_on_ssh_path,omitempty"`
-	MissingCaps    []string        `json:"missing_capabilities,omitempty"`
-	Agents         json.RawMessage `json:"agents,omitempty"`
-	AgentsOK       *bool           `json:"agents_ok,omitempty"`
-	Action         string          `json:"action,omitempty"`
-	AfterBuild     string          `json:"after_build,omitempty"`
-	Restarted      string          `json:"restarted,omitempty"`
-	Error          string          `json:"error,omitempty"`
-	DurationMS     int64           `json:"duration_ms"`
+	Host           string `json:"host"`
+	Hub            bool   `json:"hub,omitempty"`
+	Reachable      bool   `json:"reachable"`
+	OS             string `json:"os,omitempty"`
+	Arch           string `json:"arch,omitempty"`
+	Platform       string `json:"platform,omitempty"`
+	InstalledBuild string `json:"installed_build"`
+	HubBuild       string `json:"hub_build"`
+	UpToDate       bool   `json:"up_to_date"`
+	OnSSHPath      string `json:"relay_on_ssh_path,omitempty"`
+	// Target is the file fleet installs into: ~/.local/bin/relay, or
+	// relay-real behind a host-side forwarding shim (#82).
+	Target string `json:"install_target,omitempty"`
+	Shim   bool   `json:"shim,omitempty"`
+	// MachineKey identifies the (machine, user, HOME) an alias resolves to;
+	// AliasOf names the host entry that was acted on for it (#79, #80).
+	MachineKey  string          `json:"-"`
+	AliasOf     string          `json:"alias_of,omitempty"`
+	MissingCaps []string        `json:"missing_capabilities,omitempty"`
+	Agents      json.RawMessage `json:"agents,omitempty"`
+	AgentsOK    *bool           `json:"agents_ok,omitempty"`
+	Action      string          `json:"action,omitempty"`
+	AfterBuild  string          `json:"after_build,omitempty"`
+	Restarted   string          `json:"restarted,omitempty"`
+	Error       string          `json:"error,omitempty"`
+	DurationMS  int64           `json:"duration_ms"`
 }
 
 func (a *App) cmdFleet(ctx context.Context, args []string) int {
@@ -126,38 +136,118 @@ func (a *App) cmdFleet(ctx context.Context, args []string) int {
 
 func (a *App) fleetRun(ctx context.Context, hosts []string, o fleetOpts, upgrade bool) []fleetHost {
 	results := make([]fleetHost, len(hosts))
-	sem := make(chan struct{}, o.parallel)
-	var wg sync.WaitGroup
-	bins := &binCache{m: map[string]*binEntry{}}
-	tmp, err := os.MkdirTemp("", "relay-fleet-")
-	if err == nil {
-		defer os.RemoveAll(tmp)
-	}
-	for i, h := range hosts {
-		wg.Add(1)
-		go func(i int, h string) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			start := time.Now()
-			r := a.fleetProbe(ctx, h)
-			if upgrade && r.Reachable {
-				a.fleetUpgrade(ctx, &r, o, bins, tmp)
-			} else if upgrade {
-				r.Action = "unreachable"
+	starts := make([]time.Time, len(hosts))
+	a.fleetEach(len(hosts), o.parallel, func(i int) {
+		starts[i] = time.Now()
+		results[i] = a.fleetProbe(ctx, hosts[i])
+	})
+	// Two host entries can be one machine (an ssh alias, a tunnel, the hub
+	// under its own name and "local"). Acting on both races on the same
+	// files (#79, #80), so act once per machine and report the rest as
+	// aliases of the entry that was acted on.
+	primary := fleetPrimaries(results)
+	if upgrade {
+		bins := &binCache{m: map[string]*binEntry{}}
+		tmp, err := os.MkdirTemp("", "relay-fleet-")
+		if err == nil {
+			defer os.RemoveAll(tmp)
+		}
+		a.fleetEach(len(hosts), o.parallel, func(i int) {
+			if primary[i] != i {
+				return
 			}
-			r.DurationMS = time.Since(start).Milliseconds()
-			results[i] = r
-		}(i, h)
+			if results[i].Reachable {
+				a.fleetUpgrade(ctx, &results[i], o, bins, tmp)
+			} else {
+				results[i].Action = "unreachable"
+			}
+		})
 	}
-	wg.Wait()
+	for i := range results {
+		if p := primary[i]; p != i {
+			results[i] = fleetAlias(results[i], results[p])
+		}
+		results[i].DurationMS = time.Since(starts[i]).Milliseconds()
+	}
 	return results
 }
 
-const fleetProbeScript = `R="$HOME/.local/bin/relay"
-printf 'os=%s\n' "$(uname -s)"
+func (a *App) fleetEach(n, parallel int, f func(i int)) {
+	if parallel < 1 {
+		parallel = 1
+	}
+	sem := make(chan struct{}, parallel)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			f(i)
+		}(i)
+	}
+	wg.Wait()
+}
+
+// fleetPrimaries maps each result index to the index acted on for its
+// machine: the hub entry if one resolves there, else the first listed.
+func fleetPrimaries(results []fleetHost) []int {
+	primary := make([]int, len(results))
+	first := map[string]int{}
+	for i, r := range results {
+		primary[i] = i
+		if !r.Reachable || r.MachineKey == "" {
+			continue
+		}
+		p, ok := first[r.MachineKey]
+		if !ok {
+			first[r.MachineKey] = i
+			continue
+		}
+		if r.Hub && !results[p].Hub {
+			first[r.MachineKey] = i
+		}
+	}
+	for i, r := range results {
+		if r.Reachable && r.MachineKey != "" {
+			primary[i] = first[r.MachineKey]
+		}
+	}
+	return primary
+}
+
+// fleetAlias reports an alias entry with the state of the entry acted on.
+func fleetAlias(alias, p fleetHost) fleetHost {
+	out := p
+	out.Host = alias.Host
+	out.Hub = alias.Hub || p.Hub
+	out.OnSSHPath = alias.OnSSHPath
+	out.AliasOf = p.Host
+	if p.Action != "" {
+		out.Action = "alias_of " + p.Host
+	}
+	if out.Error != "" {
+		out.Error = p.Host + ": " + out.Error
+	}
+	return out
+}
+
+// fleetResolveScript picks the relay binary fleet manages on a host. A
+// text ~/.local/bin/relay next to relay-real is a host-side forwarding shim
+// (e.g. one that docker-execs into a relay container and falls back to
+// relay-real); fleet must manage relay-real and leave the shim alone (#82).
+const fleetResolveScript = `B="$HOME/.local/bin"; R="$B/relay"; SHIM=""
+if [ -f "$R" ] && [ -x "$B/relay-real" ] && [ "$(head -c 2 "$R" 2>/dev/null)" = "#!" ]; then R="$B/relay-real"; SHIM=1; fi
+`
+
+const fleetProbeScript = fleetResolveScript + `printf 'os=%s\n' "$(uname -s)"
 printf 'arch=%s\n' "$(uname -m)"
 printf 'path=%s\n' "$(command -v relay 2>/dev/null)"
+printf 'target=%s\n' "$R"
+printf 'shim=%s\n' "$SHIM"
+MID="$(cat /etc/machine-id 2>/dev/null || ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4}')"
+printf 'machine=%s|%s|%s|%s\n' "$MID" "$(hostname 2>/dev/null || uname -n)" "$(id -un 2>/dev/null)" "$HOME"
 if [ -x "$R" ]; then
   printf 'build=%s\n' "$(RELAY_BRIDGE_LOCAL_INVOKE=1 "$R" build 2>/dev/null)"
   printf 'version=%s\n' "$(RELAY_BRIDGE_LOCAL_INVOKE=1 "$R" --json version 2>/dev/null | tr -d '\n')"
@@ -195,6 +285,10 @@ func (a *App) fleetProbe(ctx context.Context, host string) fleetHost {
 	r.Reachable = true
 	kv := parseKV(out)
 	r.OS, r.Arch, r.OnSSHPath = kv["os"], kv["arch"], kv["path"]
+	r.Target, r.Shim = kv["target"], kv["shim"] == "1"
+	if m := kv["machine"]; strings.Trim(m, "|") != "" {
+		r.MachineKey = m
+	}
 	if goos, goarch, err := core.GoPlatform(r.OS, r.Arch); err == nil {
 		r.Platform = goos + "/" + goarch
 	}
@@ -248,14 +342,22 @@ func (c *binCache) get(ctx context.Context, platform, dir string) (string, error
 	return e.path, e.err
 }
 
-const fleetInstallScript = `set -e
-B="$HOME/.local/bin"; N="$B/.relay.new.fleet"; WANT=%s
+// fleetInstallScript verifies and installs a staged binary. %[1]s is the
+// staged file name (unique per run, #79), %[2]s the wanted build.
+const fleetInstallScript = fleetResolveScript + `set -e
+N="$B/"%[1]s; WANT=%[2]s
 mkdir -p "$B" "$HOME/.local/state/relay"
-GOT="$(RELAY_BRIDGE_LOCAL_INVOKE=1 "$N" build 2>/dev/null || true)"
-if [ "$GOT" != "$WANT" ]; then rm -f "$N"; echo "error=staged build $GOT, want $WANT"; exit 3; fi
-if [ -e "$B/relay" ]; then cp -p "$B/relay" "$B/relay.previous" 2>/dev/null || true; fi
-mv -f "$N" "$B/relay"
-ln -sfn relay "$B/relayd" 2>/dev/null || true
+if [ ! -f "$N" ]; then echo "error=staged binary $N vanished before verify (another upgrade of this machine running?)"; exit 3; fi
+GOT="$(RELAY_BRIDGE_LOCAL_INVOKE=1 "$N" build 2>"$N.err" || true)"
+if [ "$GOT" != "$WANT" ]; then
+  why="$(head -c 300 "$N.err" 2>/dev/null | tr '\n' ' ')"
+  rm -f "$N" "$N.err"
+  echo "error=staged build '$GOT', want $WANT: $why"; exit 3
+fi
+rm -f "$N.err"
+if [ -e "$R" ]; then cp -p "$R" "$R.previous" 2>/dev/null || true; fi
+mv -f "$N" "$R"
+if [ -z "$SHIM" ]; then ln -sfn relay "$B/relayd" 2>/dev/null || true; fi
 restarted=""
 if [ "$(uname -s)" = Linux ] && command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
   for u in relay-event.service relay.service relay-control.service; do
@@ -269,12 +371,18 @@ fi
 if [ -z "$restarted" ] && pgrep -f '[r]elay service event run' >/dev/null 2>&1; then
   pkill -f '[r]elay service event run' 2>/dev/null || true
   sleep 0.3
-  nohup "$B/relay" service event run >/tmp/relay-event.log 2>&1 &
+  nohup "$R" service event run >/tmp/relay-event.log 2>&1 &
   restarted="nohup:relay-event"
 fi
 echo "restarted=$restarted"
-echo "build=$(RELAY_BRIDGE_LOCAL_INVOKE=1 "$B/relay" build)"
+echo "build=$(RELAY_BRIDGE_LOCAL_INVOKE=1 "$R" build)"
 `
+
+func fleetStageName() string {
+	var b [6]byte
+	_, _ = rand.Read(b[:])
+	return ".relay.new.fleet." + hex.EncodeToString(b[:])
+}
 
 func (a *App) fleetUpgrade(ctx context.Context, r *fleetHost, o fleetOpts, bins *binCache, dir string) {
 	t, err := a.tf(r.Host)
@@ -314,11 +422,12 @@ func (a *App) fleetUpgrade(ctx context.Context, r *fleetHost, o fleetOpts, bins 
 		}
 		uctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 		defer cancel()
-		if err := t.WriteFile(uctx, "~/.local/bin/.relay.new.fleet", data, "755"); err != nil {
+		stage := fleetStageName()
+		if err := t.WriteFile(uctx, "~/.local/bin/"+stage, data, "755"); err != nil {
 			r.Action, r.Error = "failed", "upload: "+err.Error()
 			return
 		}
-		out, stderr, err := t.Run(uctx, "", fmt.Sprintf(fleetInstallScript, shellquote.Quote(coord.Build)))
+		out, stderr, err := t.Run(uctx, "", fmt.Sprintf(fleetInstallScript, shellquote.Quote(stage), shellquote.Quote(coord.Build)))
 		kv := parseKV(out)
 		r.Restarted = strings.TrimSpace(kv["restarted"])
 		r.AfterBuild = kv["build"]
@@ -340,7 +449,7 @@ func (a *App) fleetUpgrade(ctx context.Context, r *fleetHost, o fleetOpts, bins 
 	}
 	actx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	out, stderr, err := t.Run(actx, "", `RELAY_BRIDGE_LOCAL_INVOKE=1 "$HOME/.local/bin/relay" --json agents install | tr -d '\n'`)
+	out, stderr, err := t.Run(actx, "", fleetResolveScript+`RELAY_BRIDGE_LOCAL_INVOKE=1 "$R" --json agents install | tr -d '\n'`)
 	raw := strings.TrimSpace(out)
 	if json.Valid([]byte(raw)) && strings.HasPrefix(raw, "{") {
 		r.Agents = json.RawMessage(raw)
@@ -387,12 +496,26 @@ func (a *App) printFleet(verb string, o fleetOpts, results []fleetHost) int {
 			summary["agents_problems"]++
 		}
 	}
-	next := []string{}
-	if verb == "status" && summary["behind"] > 0 {
-		next = []string{"relay", "fleet", "upgrade"}
+	// argv is the suggested next command (the global --json convention),
+	// never this invocation's argv: only present when hosts are behind, and
+	// scoped to exactly those hosts (#81).
+	var next []string
+	var behind []string
+	for _, r := range results {
+		if r.Reachable && !r.UpToDate && r.AliasOf == "" {
+			behind = append(behind, r.Host)
+		}
+	}
+	if verb == "status" && len(behind) > 0 {
+		next = []string{"relay", "fleet", "upgrade", "--hosts", strings.Join(behind, ",")}
 	}
 	if a.JSON {
-		_ = a.out(map[string]any{"ok": code == 0, "verb": verb, "dry_run": o.dryRun, "hub_build": coord.Build, "summary": summary, "hosts": results, "argv": next})
+		payload := map[string]any{"ok": code == 0, "verb": verb, "dry_run": o.dryRun, "hub_build": coord.Build, "summary": summary, "hosts": results}
+		if len(next) > 0 {
+			payload["next"] = fmt.Sprintf("%d host(s) behind the hub build; upgrade them", len(behind))
+			payload["argv"] = next
+		}
+		_ = a.out(payload)
 		return code
 	}
 	sort.SliceStable(results, func(i, j int) bool { return results[i].Host < results[j].Host })

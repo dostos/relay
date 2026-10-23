@@ -139,3 +139,52 @@ func TestPathFixForNonInteractiveBash(t *testing.T) {
 		t.Fatalf("second install planned more PATH fixes: %+v", again.PathFix)
 	}
 }
+
+// #83: ccs bookkeeping dot-dirs (~/.ccs/instances/.locks) are not instances;
+// a relay skill an earlier install left there is removed, nothing else is.
+func TestCcsDotDirsAreNotInstances(t *testing.T) {
+	e := testEnv(t, "/bin/sh")
+	mkdir(t, filepath.Join(e.Home, ".claude", "skills"))
+	mkdir(t, filepath.Join(e.Home, ".ccs", "instances", "bare", "skills"))
+	locks := filepath.Join(e.Home, ".ccs", "instances", ".locks")
+	mkdir(t, locks)
+	_ = os.WriteFile(filepath.Join(e.Home, ".ccs", "instances", "stray-file"), []byte("x"), 0o644)
+	leftover := filepath.Join(locks, "skills", "relay", "SKILL.md")
+	mkdir(t, filepath.Dir(leftover))
+	_ = os.WriteFile(leftover, []byte(SkillFile()), 0o644)
+	// a user file under another dot-dir is never touched
+	other := filepath.Join(e.Home, ".ccs", "instances", ".cache", "skills", "relay", "SKILL.md")
+	mkdir(t, filepath.Dir(other))
+	_ = os.WriteFile(other, []byte("mine"), 0o644)
+
+	if st := Status(e); st.OK {
+		t.Fatalf("status should flag the orphan: %+v", st)
+	}
+	r := Install(e, Options{NoPath: true})
+	if !r.OK {
+		t.Fatalf("install: %+v", r.Problems)
+	}
+	for _, tg := range r.Targets {
+		if strings.Contains(tg.ID, "stray-file") || tg.ID == "ccs-skill:.locks" || strings.Contains(tg.ID, ".cache") {
+			t.Fatalf("non-instance targeted: %+v", tg)
+		}
+	}
+	if exists(leftover) || exists(filepath.Join(locks, "skills")) {
+		t.Fatal("orphaned relay skill (and its empty dirs) not removed")
+	}
+	if !exists(locks) {
+		t.Fatal(".locks itself must stay")
+	}
+	if b, _ := os.ReadFile(other); string(b) != "mine" {
+		t.Fatal("user file touched")
+	}
+	if exists(filepath.Join(e.Home, ".ccs", "instances", ".locks", "skills", "relay", "SKILL.md")) {
+		t.Fatal("skill rewritten into .locks")
+	}
+	if !exists(filepath.Join(e.Home, ".ccs", "instances", "bare", "skills", "relay", "SKILL.md")) {
+		t.Fatal("real instance lost its skill")
+	}
+	if st := Status(e); !st.OK {
+		t.Fatalf("status after install: %+v", st.Problems)
+	}
+}

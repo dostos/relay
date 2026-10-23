@@ -67,9 +67,9 @@ type Target struct {
 	Agent string `json:"agent"`
 	Path  string `json:"path"`
 	Kind  string `json:"kind"` // skill | block
-	// State: missing | current | stale | conflict | shared
+	// State: missing | current | stale | conflict | shared | orphan | removed
 	State string `json:"state"`
-	// Action planned/taken: create | update | none | skip_conflict | skip_agent_absent | backup_and_replace
+	// Action planned/taken: create | update | none | skip_conflict | skip_agent_absent | backup_and_replace | remove
 	Action string `json:"action,omitempty"`
 	Detail string `json:"detail,omitempty"`
 }
@@ -163,13 +163,29 @@ func Targets(e Env) []Target {
 	}
 	// ccs profiles normally share ~/.claude/skills through symlinks; a
 	// profile-local (bare) instance has its own skills dir and needs a copy.
+	// Only real profile directories count: ccs keeps bookkeeping in dot-dirs
+	// (~/.ccs/instances/.locks) that are not instances (#83).
 	if inst, err := filepath.Glob(filepath.Join(e.Home, ".ccs", "instances", "*")); err == nil {
 		sort.Strings(inst)
 		for _, d := range inst {
+			if st, err := os.Stat(d); err != nil || !st.IsDir() {
+				continue
+			}
 			skills := filepath.Join(d, "skills")
-			st, err := os.Lstat(skills)
 			t := Target{ID: "ccs-skill:" + filepath.Base(d), Agent: "ccs", Kind: "skill", Path: filepath.Join(skills, "relay", "SKILL.md")}
-			if err == nil && st.Mode()&os.ModeSymlink != 0 {
+			if strings.HasPrefix(filepath.Base(d), ".") {
+				// Not an instance. Only report it when an earlier install left a
+				// relay-managed skill there, so install removes it.
+				raw, err := os.ReadFile(t.Path)
+				if err != nil || !strings.Contains(string(raw), skillMarker) {
+					continue
+				}
+				t.ID, t.Kind = "ccs-orphan:"+filepath.Base(d), "orphan"
+				t.Detail = "not a ccs instance; relay-managed skill left by an earlier install"
+				ts = append(ts, t)
+				continue
+			}
+			if st, err := os.Lstat(skills); err == nil && st.Mode()&os.ModeSymlink != 0 {
 				t.Kind = "shared"
 				t.Detail = "skills shared via symlink (~/.ccs/shared/skills → ~/.claude/skills)"
 			}
@@ -185,6 +201,12 @@ func Targets(e Env) []Target {
 func stateOf(t Target) string {
 	if t.Kind == "shared" {
 		return "shared"
+	}
+	if t.Kind == "orphan" {
+		if _, err := os.Stat(t.Path); err != nil {
+			return "removed"
+		}
+		return "orphan"
 	}
 	raw, err := os.ReadFile(t.Path)
 	if err != nil {
@@ -258,6 +280,11 @@ func present(agents []Agent, name string) bool {
 func Status(e Env) Result {
 	r := Result{OK: true, Version: Version, Hash: Hash(), Agents: Agents(e), Targets: Targets(e)}
 	for i, t := range r.Targets {
+		if t.State == "orphan" {
+			r.OK = false
+			r.Problems = append(r.Problems, fmt.Sprintf("%s: relay-managed skill in a non-instance dir (install removes it)", t.Path))
+			continue
+		}
 		if !present(r.Agents, t.Agent) && t.State == "missing" {
 			r.Targets[i].Action = "skip_agent_absent"
 			continue
@@ -285,6 +312,21 @@ func Install(e Env, o Options) Result {
 		t := &r.Targets[i]
 		if t.Kind == "shared" {
 			t.Action = "none"
+			continue
+		}
+		if t.Kind == "orphan" {
+			t.Action = "remove"
+			r.Changed = true
+			if o.DryRun {
+				continue
+			}
+			if err := removeManaged(t.Path, filepath.Dir(filepath.Dir(filepath.Dir(t.Path)))); err != nil {
+				t.Detail = err.Error()
+				r.OK = false
+				r.Problems = append(r.Problems, err.Error())
+				continue
+			}
+			t.State = stateOf(*t)
 			continue
 		}
 		if !o.All && !present(r.Agents, t.Agent) {
@@ -355,6 +397,21 @@ func Install(e Env, o Options) Result {
 		}
 	}
 	return r
+}
+
+// removeManaged deletes a relay-managed file and then each now-empty parent
+// directory up to (not including) stop. Non-empty directories are kept.
+func removeManaged(path, stop string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	_ = os.Remove(path + ".relay-tmp")
+	for d := filepath.Dir(path); d != stop && strings.HasPrefix(d, stop+string(filepath.Separator)); d = filepath.Dir(d) {
+		if os.Remove(d) != nil {
+			break
+		}
+	}
+	return nil
 }
 
 func backup(path string) error {
