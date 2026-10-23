@@ -196,10 +196,12 @@ timeout (e.g. 100s) and loop on 124.`,
 		usage:   "relay [--json] fleet upgrade [--hosts a,b] [--dry-run] [--force] [--skip-agents] [--parallel N]",
 		summary: "Install the hub build on each host and refresh agent guidance. Idempotent: current hosts only get relay agents install.",
 		body: `Per host: probe → cross-compile the hub commit for its GOOS/GOARCH (once per platform; refuses a
-dirty hub build) → upload ~/.local/bin/.relay.new.fleet → verify its build → atomic mv to
-~/.local/bin/relay (previous kept as relay.previous) → restart active user services
+dirty hub build) → upload ~/.local/bin/.relay.new.fleet.<rand> → verify its build → atomic mv to
+~/.local/bin/relay, or relay-real behind a text forwarding shim (previous kept as .previous) → restart active user services
 (relay-event/relay/relay-control systemd units, com.dostos.relay-supervisor launchd agent, or a
 nohup event service) → verify → relay agents install. The hub itself is skipped (./install.sh).
+Entries that resolve to one machine (machine-id + hostname + user + HOME) are acted on once;
+the rest report alias_of.
 Exit 1 if any reachable host failed.`,
 		examples: []string{"relay fleet upgrade --dry-run", "relay --json fleet upgrade", "relay fleet upgrade --hosts jetson --force"},
 	},

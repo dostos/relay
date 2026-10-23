@@ -22,8 +22,21 @@ relay fleet report [--hosts a,b] [--since 24h] [--json]
 `missing_capabilities`), `command -v relay` in a non-interactive ssh shell
 (`relay_on_ssh_path`; empty means agents and scripts that run `relay` over
 ssh will not find it), and `relay agents status` (`agents_ok`). Summary:
-`up_to_date | behind | unreachable | agents_problems`; when hosts are behind,
-`argv` is `relay fleet upgrade`.
+`up_to_date | behind | unreachable | agents_problems`. `argv` follows the
+global `--json` convention (the suggested next command, not this command's
+argv): it is present only when hosts are behind and is
+`relay fleet upgrade --hosts <the behind hosts>`, with `next` saying why.
+
+Host entries that resolve to the same machine (same `/etc/machine-id` or
+macOS platform UUID, hostname, user and `$HOME` — e.g. an ssh alias through a
+tunnel, or the hub as both `local` and its own name) are acted on once; the
+others are reported with `alias_of` and the primary's state, so two entries
+never race on the same files.
+
+If `~/.local/bin/relay` is a text forwarding shim and `~/.local/bin/relay-real`
+exists (e.g. a shim that `docker exec`s into a relay container and falls back
+to relay-real), fleet probes and installs **relay-real** and leaves the shim
+untouched (`shim: true`, `install_target`).
 
 **upgrade**, per host:
 
@@ -32,9 +45,10 @@ ssh will not find it), and `relay agents status` (`agents_ok`). Summary:
    (linux/amd64, linux/arm64 incl. Jetson, linux/arm, darwin/*; WSL is linux)
    once per platform, `CGO_ENABLED=0`, stamped with the hub build. A dirty or
    unstamped hub build is refused: reinstall the hub from a clean checkout.
-3. upload to `~/.local/bin/.relay.new.fleet`; verify its `relay build`.
+3. upload to a per-run `~/.local/bin/.relay.new.fleet.<random>`; verify its
+   `relay build` (a failure reports the staged binary's stderr).
 4. keep the old binary as `relay.previous`; atomic `mv` to
-   `~/.local/bin/relay`; `relayd` symlink.
+   `~/.local/bin/relay` (or `relay-real` behind a shim); `relayd` symlink.
 5. restart what is running: active user systemd units `relay-event`,
    `relay`, `relay-control`; on macOS the loaded `com.dostos.relay-supervisor`
    / `com.dostos.relay-system` launchd agents (`kickstart -k`); otherwise a

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/dostos/relay/internal/coord"
 	"github.com/dostos/relay/internal/ports"
+	"github.com/dostos/relay/internal/shellquote"
 )
 
 // homeTransport simulates a remote host: every script runs locally under
@@ -70,8 +72,97 @@ func TestFleetStatusProbe(t *testing.T) {
 		Summary map[string]int `json:"summary"`
 		Argv    []string       `json:"argv"`
 	}
-	if err := json.Unmarshal([]byte(out), &parsed); err != nil || parsed.Summary["unreachable"] != 1 || parsed.Summary["behind"] != 1 || len(parsed.Argv) == 0 {
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil || parsed.Summary["unreachable"] != 1 || parsed.Summary["behind"] != 1 ||
+		strings.Join(parsed.Argv, " ") != "relay fleet upgrade --hosts h1" {
 		t.Fatalf("status json: %s", out)
+	}
+	// #81: nothing behind → no suggested argv at all
+	h1.UpToDate = true
+	out = captureStdout(t, func() { _ = app.printFleet("status", fleetOpts{}, []fleetHost{h1}) })
+	if strings.Contains(out, `"argv"`) || strings.Contains(out, `"next"`) {
+		t.Fatalf("up-to-date status still suggests a command: %s", out)
+	}
+}
+
+// #79/#80: two host entries that resolve to one machine (same machine-id,
+// user and HOME) are acted on once; the other is reported as its alias.
+func TestFleetAliasesActOnce(t *testing.T) {
+	home := t.TempDir()
+	bin := filepath.Join(home, ".local", "bin")
+	_ = os.MkdirAll(bin, 0o755)
+	_ = os.WriteFile(filepath.Join(bin, "relay"), []byte("#!/bin/sh\n[ \"$1\" = build ] && echo oldbuild\n"), 0o755)
+	other := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(other, ".local", "bin"), 0o755)
+	_ = os.WriteFile(filepath.Join(other, ".local", "bin", "relay"), []byte("#!/bin/sh\n[ \"$1\" = build ] && echo oldbuild\n"), 0o755)
+	tr := map[string]ports.Transport{"tunnel": &homeTransport{home: home}, "wsl": &homeTransport{home: home}, "elsewhere": &homeTransport{home: other}}
+	app := &App{tf: func(h string) (ports.Transport, error) { return tr[h], nil }, noUsage: true}
+	res := app.fleetRun(context.Background(), []string{"wsl", "tunnel", "elsewhere"}, fleetOpts{parallel: 3, dryRun: true, skipAgents: true}, true)
+	if !strings.HasPrefix(res[0].Action, "would_upgrade") || res[0].AliasOf != "" {
+		t.Fatalf("primary: %+v", res[0])
+	}
+	if res[1].AliasOf != "wsl" || res[1].Action != "alias_of wsl" || res[1].Host != "tunnel" {
+		t.Fatalf("alias: %+v", res[1])
+	}
+	if !strings.HasPrefix(res[2].Action, "would_upgrade") || res[2].AliasOf != "" {
+		t.Fatalf("distinct home treated as alias: %+v", res[2])
+	}
+	app.JSON, app.CompactJSON = true, true
+	out := captureStdout(t, func() { _ = app.printFleet("status", fleetOpts{}, res) })
+	if !strings.Contains(out, `"argv":["relay","fleet","upgrade","--hosts","wsl,elsewhere"]`) {
+		t.Fatalf("argv should name each machine once: %s", out)
+	}
+}
+
+// #82: a text ~/.local/bin/relay forwarding shim next to relay-real is left
+// alone; fleet probes and installs relay-real.
+func TestFleetShimInstallsRelayReal(t *testing.T) {
+	home := t.TempDir()
+	bin := filepath.Join(home, ".local", "bin")
+	_ = os.MkdirAll(bin, 0o755)
+	shim := "#!/bin/sh\n# forwarding shim\nexec \"$HOME/.local/bin/relay-real\" \"$@\"\n"
+	_ = os.WriteFile(filepath.Join(bin, "relay"), []byte(shim), 0o755)
+	_ = os.WriteFile(filepath.Join(bin, "relay-real"), []byte("#!/bin/sh\n[ \"$1\" = build ] && echo oldbuild\n"), 0o755)
+	h := &homeTransport{home: home}
+	app := &App{tf: func(string) (ports.Transport, error) { return h, nil }, noUsage: true}
+	r := app.fleetProbe(context.Background(), "sharo")
+	if !r.Shim || !strings.HasSuffix(r.Target, "/relay-real") || r.InstalledBuild != "oldbuild" {
+		t.Fatalf("probe: %+v", r)
+	}
+	stage := fleetStageName()
+	_ = os.WriteFile(filepath.Join(bin, stage), []byte("#!/bin/sh\n[ \"$1\" = build ] && echo newbuild\n"), 0o755)
+	out, stderr, err := h.Run(context.Background(), "", fmt.Sprintf(fleetInstallScript, shellquote.Quote(stage), shellquote.Quote("newbuild")))
+	if err != nil || !strings.Contains(out, "build=newbuild") {
+		t.Fatalf("install: %v %s %s", err, out, stderr)
+	}
+	if b, _ := os.ReadFile(filepath.Join(bin, "relay")); string(b) != shim {
+		t.Fatal("shim overwritten")
+	}
+	if _, err := os.Lstat(filepath.Join(bin, "relayd")); err == nil {
+		t.Fatal("relayd symlink created next to a shim")
+	}
+	if _, err := os.Stat(filepath.Join(bin, "relay-real.previous")); err != nil {
+		t.Fatal("no rollback copy of relay-real")
+	}
+}
+
+// #79/#80: a stage that vanished or reports the wrong build fails with the
+// real reason instead of "staged build , want X".
+func TestFleetInstallScriptReportsWhy(t *testing.T) {
+	home := t.TempDir()
+	bin := filepath.Join(home, ".local", "bin")
+	_ = os.MkdirAll(bin, 0o755)
+	h := &homeTransport{home: home}
+	out, _, _ := h.Run(context.Background(), "", fmt.Sprintf(fleetInstallScript, shellquote.Quote(".relay.new.fleet.gone"), shellquote.Quote("want")))
+	if !strings.Contains(out, "vanished") {
+		t.Fatalf("missing stage: %s", out)
+	}
+	_ = os.WriteFile(filepath.Join(bin, ".relay.new.fleet.bad"), []byte("#!/bin/sh\necho 'exec format error' >&2; exit 126\n"), 0o755)
+	out, _, _ = h.Run(context.Background(), "", fmt.Sprintf(fleetInstallScript, shellquote.Quote(".relay.new.fleet.bad"), shellquote.Quote("want")))
+	if !strings.Contains(out, "exec format error") {
+		t.Fatalf("stderr of the staged binary not reported: %s", out)
+	}
+	if _, err := os.Stat(filepath.Join(bin, ".relay.new.fleet.bad")); err == nil {
+		t.Fatal("bad stage not cleaned up")
 	}
 }
 
