@@ -226,13 +226,13 @@ func TestTimeoutEnvelope(t *testing.T) {
 
 func TestParseUntil(t *testing.T) {
 	cases := map[string]Until{
-		"":             UntilEvent,
-		"event":        UntilEvent,
-		"needs-input":  UntilNeedsInput,
-		"needs_input":  UntilNeedsInput,
-		"send":         UntilNeedsInput,
-		"terminal":     UntilTerminal,
-		"done":         UntilTerminal,
+		"":            UntilEvent,
+		"event":       UntilEvent,
+		"needs-input": UntilNeedsInput,
+		"needs_input": UntilNeedsInput,
+		"send":        UntilNeedsInput,
+		"terminal":    UntilTerminal,
+		"done":        UntilTerminal,
 	}
 	for in, want := range cases {
 		got, err := ParseUntil(in)

@@ -154,4 +154,3 @@ func TestWaitIdle(t *testing.T) {
 		t.Fatalf("stale: %+v", res)
 	}
 }
-

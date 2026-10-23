@@ -20,8 +20,9 @@ Requires Go (see `go.mod`), `ssh`, and `tmux` on the remotes.
 ```bash
 git clone https://github.com/dostos/relay.git
 cd relay
-./install.sh          # builds into ~/.local/bin/relay{,d}
+./install.sh          # builds into ~/.local/bin/relay{,d}, then relay agents install
 relay doctor --json
+relay fleet upgrade   # same build on every known host + agent guidance there
 ```
 
 Forge finds `relay` at `~/.local/bin/relay` (or `$FORGE_RELAY`).
@@ -76,7 +77,9 @@ relay host init -H host-a --apply   # installs relay + compatibility symlink
 relay targets / host discover / host init   # new machine
 relay HOST NAME                             # named tmux, attached in this terminal
 relay session … / session adopt             # durable tmux (create takes -- ARGV)
-relay session send|submit ID                # receipt: submitted | deposited | uncertain (exit 67)
+relay session send|submit ID                # receipt: submitted | queued | deposited | uncertain (67) | not_sent
+relay session wait ID --idle                # wait for the peer's reply (0 idle, 65 gate, 66 gone, 124 timeout)
+                                            # ID = sess-… | HOST/NAME | unique NAME
 relay session exec ID --detach / session op # durable ops: status/wait by cursor, survive SSH loss
 relay container up|down|status|stop|start   # devcontainer or image-backed instance
 relay auth status|login|copy                # agent CLI logins on a host
@@ -84,6 +87,10 @@ relay service run|status                    # unified home service and component
 relay resume --session NAME --host HOST     # what a Forge tab runs
 relay pane classify / session readiness     # agent readiness for presenters
 relay capabilities [-H HOST] --json         # installed client + host service build and features
+relay fleet status|upgrade|report           # every known host: build drift, rollout, usage
+relay agents install|status|doctor          # relay skill/AGENTS.md for Claude Code, ccs, Codex, cursor-agent
+relay report --since 24h --json             # this machine's send/wait outcomes + findings
+relay CMD --help · relay help exit-codes    # per-command flags and examples
 ```
 
 Merged source and installed binaries can differ. Before relying on a feature,
@@ -124,7 +131,8 @@ delegated, machine-judged work is blacksmith's.
 
 - [Architecture and control bridge](docs/architecture.md) — layers, bridge security, resume states
 - [Readiness for presenters](docs/readiness.md) — `ready / blocked / absent / gone / unknown`
-- [Send receipts and durable operations](docs/session-send-and-ops.md) — fresh-turn confirmation, idempotency keys, `exec --detach` + cursor waits
+- [Send receipts and durable operations](docs/session-send-and-ops.md) — addressing, fresh-turn/queued confirmation, composer guard, `wait --idle`, idempotency keys, detached sends, `exec --detach` + cursor waits
+- [Fleet, usage report and agent CLIs](docs/fleet-and-agents.md) — `relay fleet`, `relay report`, `relay agents`, the daily review loop
 - [Dev containers on a fleet host](docs/devcontainers.md)
 - [Ghostty-native app design](docs/2026-09-05-ghostty-native-app-design.md)
 - [Archive](docs/archive/README.md) — retired cmux presenter and delegation surface ([founding design](docs/archive/2026-07-24-relay-design.md))

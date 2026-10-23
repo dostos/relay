@@ -173,7 +173,7 @@ func TestVersionJSONReportsBuildIdentity(t *testing.T) {
 // Every advertised CLI capability must be a real command in this binary's
 // help, so the list cannot claim something the binary does not do.
 func TestCapabilitiesMatchHelp(t *testing.T) {
-	help := captureStdout(t, func() { (&App{}).cmdHelp() })
+	help := fullHelpText
 	want := map[string]string{
 		"session.submit":              "relay session submit",
 		"session.send.idempotency":    "--idempotency-key",
@@ -185,6 +185,9 @@ func TestCapabilitiesMatchHelp(t *testing.T) {
 		"session.send.paste":          "Paste TEXT (bracketed)",
 		"session.send.serialized":     "serialized on its host",
 		"session.send.gate_guard":     "approval prompt is refused",
+		"cli.agents":                  "relay agents install",
+		"cli.fleet":                   "relay fleet upgrade",
+		"cli.report":                  "relay report",
 		"session.wait.idle":           "relay session wait ID --idle",
 		"session.send.queued":         "queued",
 		"session.send.composer_guard": "--force-append",
