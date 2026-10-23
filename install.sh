@@ -190,3 +190,11 @@ unlink_relay_skills "$HOME/.agents/skills"
 unlink_relay_skills "$HOME/.claude/skills"
 unlink_relay_skills "$HOME/.codex/skills"
 unlink_relay_skills "$HOME/.cursor/skills"
+
+# Agent CLI guidance (#76): the relay skill for Claude Code/ccs/Codex/
+# cursor-agent, the ~/.codex/AGENTS.md block, and ~/.local/bin on PATH where
+# a shell would miss relay. Idempotent; user content is never overwritten.
+# RELAY_SKIP_AGENTS=1 skips it.
+if [[ "${RELAY_SKIP_AGENTS:-0}" != "1" ]]; then
+  RELAY_BRIDGE_LOCAL_INVOKE=1 "$INSTALL_DIR/relay" agents install || echo "relay: agents install reported problems (relay agents doctor)" >&2
+fi

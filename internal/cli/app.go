@@ -296,6 +296,14 @@ func (a *App) Run(args []string) int {
 	if len(args) == 0 {
 		return a.cmdHelp()
 	}
+	// `session send ID --stdin` reads the message from stdin here, before any
+	// bridge forwarding (the bridge carries argv, not stdin): no shell
+	// quoting of multi-line text with quotes, $ or backticks.
+	if rewritten, err := rewriteStdinSend(args, a.stdin()); err != nil {
+		return a.fail(err)
+	} else {
+		args = rewritten
+	}
 	if code, forwarded := a.forwardThroughDesktopBridge(args); forwarded {
 		return code
 	}
@@ -307,6 +315,9 @@ func (a *App) Run(args []string) int {
 			a.JSON = true
 		case "-h", "--help", "help":
 			if len(filtered) == 0 && i == 0 {
+				if args[i] == "help" {
+					return a.helpFor(helpPath(args[1:]), 0)
+				}
 				return a.cmdHelp()
 			}
 			filtered = append(filtered, args[i])
@@ -320,11 +331,14 @@ func (a *App) Run(args []string) int {
 	if len(filtered) == 0 {
 		return a.cmdHelp()
 	}
+	if wantsHelp(filtered) {
+		return a.helpFor(helpPath(filtered), 0)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	switch filtered[0] {
 	case "help", "-h", "--help":
-		return a.cmdHelp()
+		return a.helpFor(filtered[1:], 0)
 	case "version", "-V", "--version":
 		if a.JSON {
 			return a.errOut(a.out(map[string]any{"ok": true, "client": coord.LocalIdentity()}))
@@ -354,6 +368,12 @@ func (a *App) Run(args []string) int {
 		return a.cmdResume(ctx, filtered[1:])
 	case "doctor":
 		return a.cmdDoctor(ctx, filtered[1:])
+	case "fleet":
+		return a.cmdFleet(ctx, filtered[1:])
+	case "agents":
+		return a.cmdAgents(filtered[1:])
+	case "report":
+		return a.cmdReport(filtered[1:])
 	default:
 		// `relay HOST NAME` is the only two-word form, and HOST has to be a
 		// real ssh alias: a retired verb typed from habit (`relay parent list`)
@@ -418,7 +438,11 @@ func (a *App) cmdClient(args []string) int {
 }
 
 func (a *App) cmdHelp() int {
-	fmt.Print(`relay — durable remote sessions (SSH + tmux; Forge or any terminal attaches with relay resume)
+	return a.helpFor(nil, 0)
+}
+
+// fullHelpText is `relay help all`: the complete command reference.
+const fullHelpText = `relay — durable remote sessions (SSH + tmux; Forge or any terminal attaches with relay resume)
 
 Usage:
   relay [--json] <command> ...
@@ -482,7 +506,7 @@ Sessions (ID = sess-ID, HOST/NAME (tmux NAME on HOST) or a unique NAME; ambiguou
   relay session list
   relay session get ID
   relay session capture ID [-n LINES]
-  relay session send ID [--idempotency-key KEY] [--force-append] -- TEXT
+  relay session send ID [--idempotency-key KEY] [--force-append] (-- TEXT | --stdin)
                                       Paste TEXT (bracketed), press Enter once, and confirm a turn
                                       that started after this send. Prints a receipt (--json):
                                       submitted | queued (accepted behind a busy turn) | deposited |
@@ -525,6 +549,29 @@ Attach (what a Forge tab, or any terminal, runs):
 
   relay doctor
 
+Fleet (run on the control host; hosts = ~/.local/state/relay/hosts/*.json):
+  relay fleet status [--hosts a,b] [--json]
+                                      Per host: reachable, platform, installed vs hub build,
+                                      missing capabilities, relay on ssh PATH, agent guidance
+  relay fleet upgrade [--hosts a,b] [--dry-run] [--force] [--skip-agents] [--json]
+                                      Cross-compile the hub build per GOOS/GOARCH, ship over ssh,
+                                      install ~/.local/bin/relay atomically, restart host services,
+                                      verify the build, then run relay agents install on each host
+  relay fleet report [--hosts a,b] [--since 24h] [--json]
+                                      relay report from every host, with totals and findings
+
+Agent CLIs (Claude Code, ccs, Codex, cursor-agent) on THIS machine:
+  relay agents status [--json]        Guidance files and their state
+  relay agents install [--dry-run] [--all] [--force] [--no-path] [--json]
+                                      Write/refresh the relay skill + AGENTS.md block (marked;
+                                      user content never overwritten) and put ~/.local/bin on PATH
+  relay agents doctor [--json]        Can each agent CLI run relay and see the guidance?
+
+Usage review:
+  relay report [--since 24h|7d] [--examples N] [--json]
+                                      Aggregate this machine's send/wait/op outcomes: states,
+                                      refusal reasons, errors, replays, lock contention, findings
+
 Build identity (what the installed binaries support, not what main has):
   relay version [--json]              --json adds build id, protocol and capability list
   relay capabilities [-H HOST] [--refresh] [--json]
@@ -532,9 +579,7 @@ Build identity (what the installed binaries support, not what main has):
                                       (e.g. session.submit, session.op.wait). A service too old
                                       to report is "unreported"; a failed probe is "unknown".
                                       HOST reports are cached 5 min per client build.
-`)
-	return 0
-}
+`
 
 func flagHost(args []string) (host string, rest []string) {
 	rest = make([]string, 0, len(args))
@@ -1393,7 +1438,7 @@ func (a *App) openNamedAndAttach(ctx context.Context, opts core.CreateOpts) int 
 
 func (a *App) cmdSession(ctx context.Context, args []string) int {
 	if len(args) == 0 {
-		return a.fail(fmt.Errorf("session subcommand required"))
+		return a.helpFor([]string{"session"}, 2)
 	}
 	sub := args[0]
 	if code, done := a.resolveSessionArg(ctx, sub, args); done {

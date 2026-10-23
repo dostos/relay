@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dostos/relay/internal/core"
@@ -217,4 +219,47 @@ func wantsHelp(args []string) bool {
 		}
 	}
 	return false
+}
+
+// maxStdinMessage bounds `session send --stdin`.
+const maxStdinMessage = 1 << 20
+
+// rewriteStdinSend turns `session send ID [flags] --stdin` into
+// `session send ID [flags] -- TEXT` with TEXT read from in.
+func rewriteStdinSend(args []string, in io.Reader) ([]string, error) {
+	w := firstWords(args, 2)
+	if len(w) < 2 || (w[0] != "session" && w[0] != "sess") || w[1] != "send" {
+		return args, nil
+	}
+	idx := -1
+	for i, a := range args {
+		if a == "--" {
+			break
+		}
+		if a == "--stdin" {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		return args, nil
+	}
+	for _, a := range args[idx+1:] {
+		if a == "--" {
+			return nil, fmt.Errorf("--stdin and -- TEXT are mutually exclusive")
+		}
+	}
+	raw, err := io.ReadAll(io.LimitReader(in, maxStdinMessage+1))
+	if err != nil {
+		return nil, fmt.Errorf("read message from stdin: %w", err)
+	}
+	if len(raw) > maxStdinMessage {
+		return nil, fmt.Errorf("message on stdin exceeds %d bytes", maxStdinMessage)
+	}
+	text := strings.TrimRight(string(raw), "\n")
+	if strings.TrimSpace(text) == "" {
+		return nil, fmt.Errorf("--stdin: empty message")
+	}
+	out := append([]string{}, args[:idx]...)
+	out = append(out, args[idx+1:]...)
+	return append(out, "--", text), nil
 }

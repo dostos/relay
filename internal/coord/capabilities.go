@@ -21,7 +21,11 @@ const ReleaseVersion = "0.1.0"
 // Names are stable dotted identifiers; never rename one (automation keys on
 // them), only add.
 var capabilities = []string{
+	"cli.agents",                  // relay agents install|status|doctor (#76)
 	"cli.capabilities",            // relay capabilities / relay version --json (#62)
+	"cli.fleet",                   // relay fleet status|upgrade|report (#74)
+	"cli.help.layered",            // relay CMD --help with examples; relay help exit-codes (#76)
+	"cli.report",                  // relay report + usage log (#75)
 	"coord.capabilities",          // event service reports these in ping/status (#62)
 	"coord.emit",                  // event service ops
 	"coord.ping",                  //

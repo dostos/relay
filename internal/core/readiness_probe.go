@@ -37,7 +37,7 @@ type ReadinessReport struct {
 	AgentReadiness
 	// Activity is whether the agent is mid-turn: busy | idle | blocked |
 	// unknown (#69). A bare shell (state absent) is idle.
-	Activity string `json:"activity"`
+	Activity  string    `json:"activity"`
 	Lines     int       `json:"lines"`
 	SampledAt time.Time `json:"sampled_at"`
 	text      string
