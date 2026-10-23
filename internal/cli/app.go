@@ -46,6 +46,8 @@ type App struct {
 	// Stdin is the pane text source for `pane classify`; nil means os.Stdin.
 	Stdin io.Reader
 	tf    core.TransportFactory
+	// noUsage disables the usage log (tests).
+	noUsage bool
 }
 
 // New constructs the default App (SSH + tmux + relayd coord).
@@ -61,7 +63,7 @@ func New() *App {
 		// "local" is an identity, not a resolvable hostname. Sending it to ssh
 		// made every local session — including root manager panes — fail with
 		// "could not resolve hostname local".
-		if hostID == core.LocalHostID || hostID == "self" || (localHostID != "" && hostID == localHostID) {
+		if hostID == core.LocalHostID || hostID == "self" || (localHostID != "" && hostID == localHostID) || core.IsThisHost(hostID) {
 			return localtransport.New(), nil
 		}
 		return sshtransport.New(hostID), nil
@@ -173,7 +175,15 @@ func (a *App) forwardThroughDesktopBridge(args []string) (int, bool) {
 		if arg == "signal" || arg == "hook" || arg == "ask" || arg == "pane" {
 			return 0, false
 		}
+		// Host-local by definition: agent guidance files and the usage log
+		// of THIS machine, and help text (#75, #76).
+		if arg == "agents" || arg == "report" || arg == "help" || arg == "-h" || arg == "--help" {
+			return 0, false
+		}
 		break
+	}
+	if wantsHelp(args) {
+		return 0, false
 	}
 	sock := strings.TrimSpace(os.Getenv(bridge.SocketEnv))
 	source := bridge.Source{
@@ -199,6 +209,26 @@ func (a *App) forwardThroughDesktopBridge(args []string) (int, bool) {
 	}
 	resp, err := (bridge.Client{SockPath: sock}).Invoke(context.Background(), args, source)
 	if err != nil {
+		if errors.Is(err, bridge.ErrUnavailable) {
+			for _, arg := range args {
+				if arg == "--json" {
+					a.JSON = true
+				}
+			}
+			if directCapable(args) {
+				// Detached session (#73): nothing reached the control host,
+				// so run the messaging command here. Targets resolve as
+				// HOST/NAME (or same-host NAME) straight through tmux/ssh.
+				core.DirectMode = true
+				fmt.Fprintf(os.Stderr, "relay: %v; running %s directly on this host (control-host registry not consulted)\n", err, strings.Join(firstWords(args, 2), " "))
+				return 0, false
+			}
+			return a.failStructured(err, map[string]any{
+				"reason": "bridge_unavailable",
+				"next":   "this command needs the control host; reattach this session there (or run it on the control host). Messaging (session send/submit/wait/readiness/capture with HOST/NAME targets) works without the bridge",
+				"argv":   []string{"relay", "session", "bridge", source.SessionID},
+			}), true
+		}
 		return a.fail(err), true
 	}
 	if resp.Build == "" {
@@ -443,7 +473,7 @@ Agent auth (claude / cursor-agent / codex / ccs:<profile> / …):
   relay auth copy --from HOST --to HOST --agent NAME
                                       Copy known cred files between Linux hosts (when supported)
 
-Sessions (explicit id; no guesswork):
+Sessions (ID = sess-ID, HOST/NAME (tmux NAME on HOST) or a unique NAME; ambiguous → error + candidates):
   relay session create -H HOST [--repo DIR] [--cwd REMOTE] [--name NAME]
   relay session adopt -H HOST --name TMUX [--cwd REMOTE] [--repo DIR]
                                       Register an already-running remote tmux
@@ -452,13 +482,21 @@ Sessions (explicit id; no guesswork):
   relay session list
   relay session get ID
   relay session capture ID [-n LINES]
-  relay session send ID [--idempotency-key KEY] -- TEXT
+  relay session send ID [--idempotency-key KEY] [--force-append] -- TEXT
                                       Paste TEXT (bracketed), press Enter once, and confirm a turn
                                       that started after this send. Prints a receipt (--json):
-                                      submitted | deposited | uncertain. Unconfirmed → exit 67;
+                                      submitted | queued (accepted behind a busy turn) | deposited |
+                                      uncertain | not_sent. Unconfirmed → exit 67;
                                       never resend blindly (same KEY replays the receipt, never
                                       retypes). Sends to one session are serialized on its host;
-                                      a target at an approval prompt is refused (not_sent).
+                                      a target at an approval prompt is refused (not_sent), and so is
+                                      one whose input already holds other text (composer_not_empty;
+                                      --force-append appends anyway; the draft is never cleared).
+                                      When the bridge is down, send/submit/wait/readiness/capture
+                                      run on this host and resolve HOST/NAME targets directly.
+  relay session wait ID --idle [--timeout 5m] [--settle 3s] [--tail N]
+                                      Block until the target finished its turn (idle for --settle).
+                                      Exit 0 idle, 65 at a gate, 66 gone, 124 timeout (+ argv to resume).
   relay session submit ID [--idempotency-key KEY]
                                       Press Enter once on text already deposited; same confirmation
   relay session exec ID -- CMD        Run CMD (joined with spaces, parsed by the remote shell)
@@ -1358,6 +1396,9 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 		return a.fail(fmt.Errorf("session subcommand required"))
 	}
 	sub := args[0]
+	if code, done := a.resolveSessionArg(ctx, sub, args); done {
+		return code
+	}
 	switch sub {
 	case "list":
 		withReadiness, lines, err := parseReadinessFlags(args[1:])
@@ -1422,12 +1463,12 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 			if sess == nil {
 				return a.fail(err)
 			}
-			_ = a.out(map[string]any{"ok": false, "error": err.Error(), "session_id": sess.ID, "host_id": sess.HostID, "state": core.AgentUnknown, "lines": lines})
+			_ = a.out(map[string]any{"ok": false, "error": err.Error(), "session_id": sess.ID, "host_id": sess.HostID, "state": core.AgentUnknown, "activity": core.ActivityUnknown, "lines": lines})
 			return 1
 		}
 		return a.errOut(a.out(map[string]any{
 			"ok": true, "session_id": sess.ID, "host_id": sess.HostID,
-			"state": rep.State, "reason": rep.Reason, "gate": rep.Gate,
+			"state": rep.State, "activity": rep.Activity, "reason": rep.Reason, "gate": rep.Gate,
 			"lines": rep.Lines, "sampled_at": rep.SampledAt,
 		}))
 	case "rename":
@@ -1554,8 +1595,14 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 		if err != nil {
 			return a.fail(err)
 		}
-		res, err := a.Sessions.SendWithReceipt(ctx, id, opts.text, true, opts.key)
-		return a.sendOutcome(res, err)
+		started := time.Now()
+		res, err := a.Sessions.SendWith(ctx, id, opts.text, core.SendOptions{Enter: true, Key: opts.key, ForceAppend: opts.forceAppend})
+		code := a.sendOutcome(res, err)
+		a.recordUsage(usageEvent{Cmd: "session." + sub, Target: a.targetOf(id), SessionID: id, State: string(res.State), Evidence: res.Evidence,
+			Exit: code, Error: errString(err), Replayed: res.Replayed, Keyed: opts.key != "", DurationMS: time.Since(started).Milliseconds()})
+		return code
+	case "wait":
+		return a.cmdSessionWait(ctx, args[1:])
 	case "exec":
 		if len(args) < 2 {
 			return a.fail(fmt.Errorf("session id required"))
@@ -1654,13 +1701,16 @@ func (a *App) cmdSession(ctx context.Context, args []string) int {
 	}
 }
 
-type sendArgs struct{ text, key string }
+type sendArgs struct {
+	text, key   string
+	forceAppend bool
+}
 
 // parseSendArgs reads `[--idempotency-key KEY] -- TEXT` (send) or
 // `[--idempotency-key KEY]` (submit). Flags are only recognised before `--`.
 func parseSendArgs(sub string, args []string) (sendArgs, error) {
 	var o sendArgs
-	usage := fmt.Errorf("usage: relay session send ID [--idempotency-key KEY] -- TEXT")
+	usage := fmt.Errorf("usage: relay session send ID [--idempotency-key KEY] [--force-append] -- TEXT")
 	if sub == "submit" {
 		usage = fmt.Errorf("usage: relay session submit ID [--idempotency-key KEY]")
 	}
@@ -1677,6 +1727,11 @@ func parseSendArgs(sub string, args []string) (sendArgs, error) {
 			}
 			o.key = flags[i+1]
 			i++
+		case "--force-append":
+			if sub != "send" {
+				return o, rejectUnknownFlag(flags[i])
+			}
+			o.forceAppend = true
 		default:
 			return o, rejectUnknownFlag(flags[i])
 		}
@@ -1808,6 +1863,7 @@ func (a *App) cmdSessionOp(ctx context.Context, args []string) int {
 			cursor = 0
 		}
 		rc, err := a.Sessions.WaitOp(ctx, id, op, cursor, timeout)
+		a.recordUsage(usageEvent{Cmd: "session.op.wait", Target: a.targetOf(id), SessionID: id, State: string(rc.State), Error: errString(err)})
 		if err != nil {
 			return a.failNext(err, map[string]any{"receipt": rc,
 				"argv": []string{"relay", "session", "op", "wait", id, op, "--cursor", strconv.FormatInt(rc.Cursor, 10)}})

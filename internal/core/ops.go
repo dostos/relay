@@ -113,7 +113,7 @@ printf '%s\n' "$rc" > "$d/exit.tmp" && mv "$d/exit.tmp" "$d/exit"
 `
 
 func (s *SessionService) opTarget(sessionID, opID string) (*Session, ports.Transport, string, error) {
-	sess, err := s.Reg.GetSession(sessionID)
+	sess, err := s.lookup(sessionID)
 	if err != nil {
 		return nil, nil, "", err
 	}

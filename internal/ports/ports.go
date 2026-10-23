@@ -102,7 +102,23 @@ const (
 	// SendUncertain: input was attempted but neither a fresh turn nor a
 	// held composer could be proven (transport loss, unknown TUI, ...).
 	SendUncertain SendState = "uncertain"
+	// SendQueued: the target was mid-turn; its composer accepted the text
+	// (it left the input) while the earlier turn kept running, so the agent
+	// will read it when that turn ends. Success, but not a fresh turn (#71).
+	SendQueued SendState = "queued"
 )
+
+// SendAccepted reports whether a receipt state means the message is in the
+// agent's hands (exit 0): a fresh turn, or queued behind a running one.
+func SendAccepted(s SendState) bool { return s == SendSubmitted || s == SendQueued }
+
+// ExitTargetBlocked is the exit status of `relay session wait` when the
+// target stopped at an approval/login/trust gate that only a human answers.
+const ExitTargetBlocked = 65
+
+// ExitWaitTimeout is the exit status of a bounded wait that ran out of time
+// (same as timeout(1)); the JSON output carries the argv to resume.
+const ExitWaitTimeout = 124
 
 // SendReceipt is the structured outcome of one Persistence.Send.
 type SendReceipt struct {
@@ -115,6 +131,16 @@ type SendReceipt struct {
 	Submits int `json:"submits"`
 	// Polls is how many post-submit pane reads were taken.
 	Polls int `json:"polls,omitempty"`
+	// Leftover is the unrelated text already in the target's composer when
+	// a send was refused with evidence composer_not_empty (#70).
+	Leftover string `json:"leftover,omitempty"`
+}
+
+// ComposerReader is an optional Persistence capability: the text currently
+// held in the pane's input composer (placeholder hints excluded). found is
+// false when no composer is recognizable.
+type ComposerReader interface {
+	ComposerDraft(ctx context.Context, t Transport, h PersistHandle) (draft string, found bool, err error)
 }
 
 // ExistingAttacher is an optional Persistence capability: an attach command

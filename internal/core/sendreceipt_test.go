@@ -221,7 +221,7 @@ func TestSendLockBusyAndStaleTakeover(t *testing.T) {
 	old := sendLockWait
 	sendLockWait = 400 * time.Millisecond
 	t.Cleanup(func() { sendLockWait = old })
-	lock := filepath.Join(tr.home, ".local/state/relay/sends/sess-ops.lock")
+	lock := filepath.Join(tr.home, ".local/state/relay/sends/tmux=ops.lock")
 	if err := os.MkdirAll(lock, 0o755); err != nil {
 		t.Fatal(err)
 	}

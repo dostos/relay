@@ -73,8 +73,27 @@ func (s *SessionService) Send(ctx context.Context, id, text string, enter bool) 
 // typing may have begun replays as uncertain. Uncertain stays explicit; the
 // caller decides, after looking, whether to send under a new key.
 func (s *SessionService) SendWithReceipt(ctx context.Context, id, text string, enter bool, key string) (SendResult, error) {
+	return s.SendWith(ctx, id, text, SendOptions{Enter: enter, Key: key})
+}
+
+// SendOptions configures SendWith.
+type SendOptions struct {
+	Enter bool
+	Key   string
+	// ForceAppend types even when the target's composer already holds
+	// unrelated text (#70). The default refuses and shows that text.
+	ForceAppend bool
+}
+
+// ErrComposerNotEmpty means the target's input already held text this send
+// did not put there. Nothing was typed and nothing was cleared.
+var ErrComposerNotEmpty = errors.New("target composer already holds unrelated text")
+
+// SendWith is SendWithReceipt with options.
+func (s *SessionService) SendWith(ctx context.Context, id, text string, o SendOptions) (SendResult, error) {
+	enter, key := o.Enter, o.Key
 	res := SendResult{SendReceipt: ports.SendReceipt{State: ports.SendNotSent}, SessionID: id, IdempotencyKey: key, At: time.Now().UTC()}
-	sess, err := s.Reg.GetSession(id)
+	sess, err := s.lookup(id)
 	if err != nil {
 		return res, err
 	}
@@ -86,7 +105,7 @@ func (s *SessionService) SendWithReceipt(ctx context.Context, id, text string, e
 		return res, err
 	}
 	if key == "" {
-		rc, err := s.deliver(ctx, t, sess, text, enter)
+		rc, err := s.deliverWith(ctx, t, sess, text, enter, o.ForceAppend, nil)
 		res.SendReceipt = rc
 		res.Error = errString(err)
 		return res, err
@@ -128,7 +147,7 @@ echo relay-send=in-progress
 		}
 		prior.Replayed = true
 		prior.RecordWarning = ""
-		if prior.State == ports.SendSubmitted || (prior.State == ports.SendDeposited && !enter) {
+		if ports.SendAccepted(prior.State) || (prior.State == ports.SendDeposited && !enter) {
 			prior.Error = ""
 			return prior, nil
 		}
@@ -154,7 +173,7 @@ echo relay-send=in-progress
 		return res, fmt.Errorf("record send intent: unexpected reply %q", strings.TrimSpace(out))
 	}
 	marked := false
-	rc, sendErr := s.deliverWith(ctx, t, sess, text, enter, func() error {
+	rc, sendErr := s.deliverWith(ctx, t, sess, text, enter, o.ForceAppend, func() error {
 		marked = true
 		if _, stderr, err := t.Run(ctx, "", fmt.Sprintf(`: > %s/typing`, d)); err != nil {
 			// The marker may or may not exist; a replay will conservatively
@@ -215,21 +234,20 @@ var (
 	sendGateLines    = 40
 )
 
-func sendLockDir(sessionID string) string {
-	return remoteStateRoot + "/sends/" + shellquote.Quote(sessionID+".lock")
-}
-
-func (s *SessionService) deliver(ctx context.Context, t ports.Transport, sess *Session, text string, enter bool) (ports.SendReceipt, error) {
-	return s.deliverWith(ctx, t, sess, text, enter, nil)
+// sendLockDir keys the lock by the tmux session name, which is unique on the
+// host: a registered session and an ad-hoc HOST/NAME address of the same pane
+// must serialize against each other (#72).
+func sendLockDir(persistName string) string {
+	return remoteStateRoot + "/sends/" + shellquote.Quote("tmux="+persistName+".lock")
 }
 
 // deliverWith serializes sends to one session on its host (#66), refuses to
 // type into a pane that is waiting at a gate (#67), then delivers through the
 // persistence adapter. before runs under the lock right before typing; an
 // error from it aborts with nothing typed.
-func (s *SessionService) deliverWith(ctx context.Context, t ports.Transport, sess *Session, text string, enter bool, before func() error) (ports.SendReceipt, error) {
+func (s *SessionService) deliverWith(ctx context.Context, t ports.Transport, sess *Session, text string, enter, forceAppend bool, before func() error) (ports.SendReceipt, error) {
 	notSent := ports.SendReceipt{State: ports.SendNotSent}
-	release, err := acquireSendLock(ctx, t, sess.ID)
+	release, err := acquireSendLock(ctx, t, sess.Persist.Name)
 	if err != nil {
 		if errors.Is(err, ErrSendBusy) {
 			notSent.Evidence = "send_lock_busy"
@@ -243,6 +261,17 @@ func (s *SessionService) deliverWith(ctx context.Context, t ports.Transport, ses
 				fmt.Errorf("%w (%s); nothing was typed. Inspect with `relay session readiness %s` and answer the prompt first", ErrTargetAtGate, r.Reason, sess.ID)
 		}
 	}
+	if text != "" && !forceAppend {
+		// Never type onto (or submit) a draft someone else left in the input:
+		// Enter would send both as one message. Refuse and show it; never
+		// clear it (#70).
+		if cr, ok := s.Persist.(ports.ComposerReader); ok {
+			if draft, found, derr := cr.ComposerDraft(ctx, t, sess.Persist); derr == nil && found && draft != "" {
+				return ports.SendReceipt{State: ports.SendNotSent, Evidence: "composer_not_empty", Leftover: clip(draft, 2000)},
+					fmt.Errorf("%w; nothing was typed and the draft was left as is. Inspect with `relay session capture %s`; resend with --force-append to append anyway", ErrComposerNotEmpty, sess.ID)
+			}
+		}
+	}
 	if before != nil {
 		if err := before(); err != nil {
 			return notSent, err
@@ -254,8 +283,8 @@ func (s *SessionService) deliverWith(ctx context.Context, t ports.Transport, ses
 // acquireSendLock takes an atomic mkdir lock on the target host. Sends from
 // different processes or machines to the same session otherwise interleave
 // their text and Enters into one turn while each reports success (#66).
-func acquireSendLock(ctx context.Context, t ports.Transport, sessionID string) (func(), error) {
-	d := sendLockDir(sessionID)
+func acquireSendLock(ctx context.Context, t ports.Transport, persistName string) (func(), error) {
+	d := sendLockDir(persistName)
 	token := NewOpID()
 	tries := int(sendLockWait / (200 * time.Millisecond))
 	if tries < 1 {
@@ -288,4 +317,12 @@ echo relay-lock=held
 		defer cancel()
 		_, _, _ = t.Run(rctx, "", fmt.Sprintf(`d=%s; [ "$(cat "$d/owner" 2>/dev/null)" = %s ] && rm -rf "$d"; true`, d, shellquote.Quote(token)))
 	}, nil
+}
+
+func clip(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }

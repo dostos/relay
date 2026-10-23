@@ -175,16 +175,21 @@ func TestVersionJSONReportsBuildIdentity(t *testing.T) {
 func TestCapabilitiesMatchHelp(t *testing.T) {
 	help := captureStdout(t, func() { (&App{}).cmdHelp() })
 	want := map[string]string{
-		"session.submit":           "relay session submit",
-		"session.send.idempotency": "--idempotency-key",
-		"session.exec.detach":      "--detach",
-		"session.op.status":        "relay session op status",
-		"session.op.wait":          "relay session op wait",
-		"session.op.output":        "relay session op output",
-		"cli.capabilities":         "relay capabilities",
-		"session.send.paste":       "Paste TEXT (bracketed)",
-		"session.send.serialized":  "serialized on its host",
-		"session.send.gate_guard":  "approval prompt is refused",
+		"session.submit":              "relay session submit",
+		"session.send.idempotency":    "--idempotency-key",
+		"session.exec.detach":         "--detach",
+		"session.op.status":           "relay session op status",
+		"session.op.wait":             "relay session op wait",
+		"session.op.output":           "relay session op output",
+		"cli.capabilities":            "relay capabilities",
+		"session.send.paste":          "Paste TEXT (bracketed)",
+		"session.send.serialized":     "serialized on its host",
+		"session.send.gate_guard":     "approval prompt is refused",
+		"session.wait.idle":           "relay session wait ID --idle",
+		"session.send.queued":         "queued",
+		"session.send.composer_guard": "--force-append",
+		"session.address":             "HOST/NAME",
+		"session.direct":              "bridge is down",
 	}
 	for _, c := range coord.Capabilities() {
 		if needle, ok := want[c]; ok && !strings.Contains(help, needle) {

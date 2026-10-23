@@ -5,12 +5,12 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/dostos/relay/internal/panetext"
 	"github.com/dostos/relay/internal/ports"
 	"github.com/dostos/relay/internal/shellquote"
 )
@@ -311,9 +311,23 @@ func (p *Persist) Send(ctx context.Context, t ports.Transport, h ports.PersistHa
 			continue
 		}
 		lastScreen = screen
-		if ev := freshTurn(before, screen, marker); ev != "" {
+		ev := freshTurn(before, screen, marker)
+		if ev == "composer_released" && sameTurnStillRunning(before, screen) {
+			// The text left the composer but the turn that was running
+			// before the send is still the one on screen: the agent took it
+			// into its queue (#71).
+			rc.State = ports.SendQueued
+			rc.Evidence = "accepted_behind_busy_turn"
+			return rc, nil
+		}
+		if ev != "" {
 			rc.State = ports.SendSubmitted
 			rc.Evidence = ev
+			return rc, nil
+		}
+		if marker != "" && sameTurnStillRunning(before, screen) && !composerHolds(screen, marker) && queuedEntryShown(screen, marker) {
+			rc.State = ports.SendQueued
+			rc.Evidence = "queued_message_visible"
 			return rc, nil
 		}
 	}
@@ -373,27 +387,53 @@ func freshTurn(before, after, marker string) string {
 	return ""
 }
 
-func workingLines(screen string) []string {
-	var out []string
-	for _, line := range strings.Split(screen, "\n") {
-		if turnStarted(line) {
-			out = append(out, strings.TrimSpace(line))
-		}
+func workingLines(screen string) []string { return panetext.WorkingLines(screen) }
+
+func elapsedSeconds(line string) (int, bool) { return panetext.ElapsedSeconds(line) }
+
+// sameTurnStillRunning reports that before showed a live, timed turn and
+// after still shows that turn's timer at or past its pre-send reading, i.e.
+// no new turn began.
+func sameTurnStillRunning(before, after string) bool {
+	prevMax, ok := maxElapsed(panetext.LiveWorkingLines(before, 10))
+	if !ok {
+		return false
 	}
-	return out
+	cur := panetext.LiveWorkingLines(after, 10)
+	if len(cur) == 0 {
+		return false
+	}
+	curMin, ok := minElapsed(cur)
+	return ok && curMin >= prevMax
 }
 
-var elapsedRE = regexp.MustCompile(`\((?:(\d+)h\s*)?(?:(\d+)m\s*)?(\d+)s\b`)
-
-func elapsedSeconds(line string) (int, bool) {
-	m := elapsedRE.FindStringSubmatch(line)
-	if m == nil {
-		return 0, false
+// queuedEntryShown reports the TUIs' explicit queue rendering: Codex lists
+// pending input as "↳ text" lines; others print a "queued" label next to it.
+func queuedEntryShown(screen, marker string) bool {
+	m := squashSpace(marker)
+	for _, line := range strings.Split(screen, "\n") {
+		t := strings.TrimSpace(line)
+		lower := strings.ToLower(t)
+		if (strings.HasPrefix(t, "↳") || strings.Contains(lower, "queued")) && strings.Contains(squashSpace(t), m) {
+			return true
+		}
 	}
-	h, _ := strconv.Atoi(m[1])
-	mi, _ := strconv.Atoi(m[2])
-	s, _ := strconv.Atoi(m[3])
-	return h*3600 + mi*60 + s, true
+	return false
+}
+
+// ComposerDraft implements ports.ComposerReader. It captures with escape
+// sequences so faint placeholder hints can be told apart from typed text.
+func (p *Persist) ComposerDraft(ctx context.Context, t ports.Transport, h ports.PersistHandle) (string, bool, error) {
+	pane, err := p.resolvePaneID(ctx, t, h)
+	if err != nil {
+		return "", false, err
+	}
+	out, stderr, err := t.Run(ctx, "", fmt.Sprintf("tmux capture-pane -e -t %s -p -S -%d", shellquote.Quote(pane), sendConfirmLines))
+	if err != nil {
+		return "", false, fmt.Errorf("capture composer: %w (%s)", err, strings.TrimSpace(stderr))
+	}
+	draft, found := panetext.ComposerDraft(out)
+	return draft, found, nil
 }
 
 func maxElapsed(lines []string) (int, bool) {
@@ -443,22 +483,7 @@ func depositedWithoutTurn(before, after, marker string) bool {
 	return countMarker(after, marker) > countMarker(before, marker)
 }
 
-func turnStarted(screen string) bool {
-	lower := strings.ToLower(screen)
-	for _, needle := range []string{
-		"esc to interrupt",
-		"• working",
-		"● working",
-		"working (",
-		"working…",
-		"working...",
-	} {
-		if strings.Contains(lower, needle) {
-			return true
-		}
-	}
-	return false
-}
+func turnStarted(screen string) bool { return panetext.IsWorkingLine(screen) }
 
 func hasComposerGlyph(screen string) bool {
 	for _, line := range strings.Split(screen, "\n") {
