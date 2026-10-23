@@ -1,5 +1,24 @@
 # Session send receipts and durable operations
 
+## Addressing sessions (#72)
+
+Every session command (`get`, `readiness`, `capture`, `send`, `submit`,
+`wait`, `exec`, `op …`, `resize`, `attach`, `rename`, `destroy`, …) takes
+one session reference:
+
+| form | meaning |
+|------|---------|
+| `sess-…` | registry id |
+| `HOST/NAME` | tmux session NAME on HOST. A registered session with that host and name is used; otherwise, if tmux on HOST really has NAME, an **ad-hoc target** is used for this one invocation (nothing is written to the registry). |
+| `NAME` | the one registered session with that tmux name; with none, a tmux session of that name on this machine |
+| `tmux:HOST:NAME` | the ad-hoc id printed by an earlier call; same as `HOST/NAME` |
+
+An ambiguous `NAME` fails (exit 1) with `reason: ambiguous_session` and a
+`candidates` list of `HOST/NAME` refs; nothing guesses. An unknown reference
+fails with `reason: session_not_found`. Registry-only commands (`rename`,
+`destroy`, `bridge`, `sensors`) refuse ad-hoc targets with
+`reason: not_registered` and the `relay session adopt` argv.
+
 Two `relay session` surfaces are built for callers that must not guess:
 `session send` (typing into an agent pane) and `session exec --detach`
 (long-running commands that have to survive a dropped SSH connection).
@@ -25,6 +44,14 @@ caller that types into an agent pane goes through it.
    Claude `Do you want to proceed?`, login/trust prompts), nothing is typed:
    `not_sent`, evidence `target_at_gate`, exit 1. Enter on an approval menu
    would select its highlighted "Yes" (#67).
+   Then **refuse when the composer already holds other text** (#70): the
+   pane is captured with styling, faint placeholder hints are dropped, and
+   if the input still holds text this send did not put there the result is
+   `not_sent`, evidence `composer_not_empty`, with the text in
+   `receipt.leftover`, exit 1. Nothing is typed and the draft is never
+   cleared. `--force-append` types anyway (the draft and the message are
+   then submitted together). `session submit` never checks: pressing Enter
+   on what is there is its purpose.
 1. Resolve the pane id and **capture the pane before typing** (the
    baseline). If this fails nothing has been typed: `not_sent`, exit 1.
 2. Deliver the text as **one bracketed paste** (`tmux load-buffer` +
@@ -48,6 +75,13 @@ caller that types into an agent pane goes through it.
 
    A `Working` line that was already in scrollback can never satisfy the
    check by itself (#59).
+
+   If the pre-send screen showed a **live, timed turn** and that same turn
+   is still running (its timer did not restart) while the text left the
+   composer — or the TUI lists it as queued input (`↳ text`) — the receipt
+   is `queued` (evidence `accepted_behind_busy_turn` /
+   `queued_message_visible`), exit 0: the agent will read it when its
+   current turn ends (#71).
 4. Without that evidence the send ends as `deposited` (the text is visibly
    still in the input) or `uncertain` (nothing provable), exits
    **67** (`ExitDeliveryUncertain`), and returns `*DeliveryUncertainError`.
@@ -64,9 +98,18 @@ Receipt (`--json`):
 | state | meaning | caller action |
 |-------|---------|---------------|
 | `submitted` | a turn started after this send | done |
+| `queued` | accepted while the target was mid-turn; it runs after that turn | done (use `session wait --idle` to wait for the reply) |
 | `deposited` | text is in the input, no turn seen | inspect (`session capture`); `session submit` if you decide to |
 | `uncertain` | input attempted, outcome unknown | inspect; never resend blindly |
 | `not_sent` | failed before typing (incl. `send_lock_busy`, `target_at_gate`) | safe to retry; with a key, the same key is reusable |
+
+**API change (#71):** `queued` is a new success state (exit 0, `ok: true`),
+capability `session.send.queued`. Callers that tested `state == "submitted"`
+for success should test `ok` (or `state in {submitted, queued}`). Idempotent
+replays of a `queued` receipt are success too. Lock files moved to
+`sends/tmux=<name>.lock` (keyed by tmux name, so registry and HOST/NAME
+senders serialize together); during a mixed-version rollout an old client
+and a new client do not see each other's lock.
 
 ### Idempotency keys
 
@@ -85,6 +128,45 @@ With `--idempotency-key KEY` the attempt is recorded **on the target host**
   typed); after that a retry may take it over (atomic rename) and send.
 
 Keys are 1–128 chars of `[A-Za-z0-9._:-]`, starting alphanumeric.
+
+## `session wait --idle`: wait for the reply (#69)
+
+```console
+relay --json session wait ID --idle [--timeout 5m] [--settle 3s] [--interval 1s] [--tail N]
+```
+
+Samples the pane (read-only; never types) until the agent has been **idle for
+`--settle`** — no live working indicator — or it stops at a gate, the tmux
+session disappears, or `--timeout` passes. A working line counts as live only
+if nothing but the composer, rules and indented lines (queued input, tips,
+footers) is below it, and a working line whose text has not changed for 20 s
+is treated as stale (a live timer ticks every second).
+
+`session readiness` / `--readiness` now carry `activity`:
+`busy | idle | blocked | unknown` (a bare shell is `idle`).
+
+| outcome | exit | meaning |
+|---------|------|---------|
+| `idle` | 0 | turn finished; `result.tail` holds the last N lines with `--tail N` |
+| `blocked` | 65 | waiting at an approval/login/trust gate only a human answers |
+| `gone` | 66 | the tmux session no longer exists |
+| `timeout` | 124 | still busy; `argv` re-runs the same wait |
+
+Agents with a ~2 minute tool timeout should loop `--timeout 100s`.
+
+## Sending from a detached session (#73)
+
+Inside a relay pane, commands go through the desktop bridge (an ssh reverse
+socket) to the control host. When that socket has no listener — the session
+was never attached, or the control bridge is down — `session send`, `submit`,
+`wait`, `readiness`, `capture` (and `version`/`capabilities`) **run on this
+host instead**, with a one-line notice on stderr. Targets then resolve as
+`HOST/NAME` (or a same-host `NAME`) straight through tmux (this host) or ssh
+(other hosts); the session's own `RELAY_SESSION_HOST` counts as this host.
+`sess-…` ids are not resolvable there (the registry lives on the control
+host) and fail with a hint to use `HOST/NAME`. Every other command fails with
+`reason: bridge_unavailable` and the `relay session bridge` argv; nothing that
+writes the control-host registry runs locally.
 
 ## `session exec --detach`: durable operations
 

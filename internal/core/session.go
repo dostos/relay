@@ -27,6 +27,9 @@ type SessionService struct {
 	Persist      ports.Persistence
 	// Coord is the host-local event service the tmux sensors emit through.
 	Coord ports.Coord
+	// adhoc holds HOST/NAME targets resolved for this process that are not
+	// in the registry (see Resolve). Keyed by synthetic session id.
+	adhoc sync.Map
 }
 
 func newID(prefix string) string {
@@ -342,7 +345,7 @@ func (s *SessionService) transportFor(sess *Session) (ports.Transport, error) {
 }
 
 func (s *SessionService) Get(id string) (*Session, error) {
-	return s.Reg.GetSession(id)
+	return s.lookup(id)
 }
 
 func (s *SessionService) List() ([]*Session, error) {
@@ -397,7 +400,7 @@ func (s *SessionService) Rename(ctx context.Context, id, name string) (*Session,
 }
 
 func (s *SessionService) Capture(ctx context.Context, id string, lines int) (string, error) {
-	sess, err := s.Reg.GetSession(id)
+	sess, err := s.lookup(id)
 	if err != nil {
 		return "", err
 	}
@@ -415,7 +418,7 @@ func (s *SessionService) Capture(ctx context.Context, id string, lines int) (str
 // registry record. An error means unknown, not absent, and callers must treat
 // it that way rather than reading it as "gone".
 func (s *SessionService) Exists(ctx context.Context, id string) (bool, error) {
-	sess, err := s.Reg.GetSession(id)
+	sess, err := s.lookup(id)
 	if err != nil {
 		return false, err
 	}
@@ -427,7 +430,7 @@ func (s *SessionService) Exists(ctx context.Context, id string) (bool, error) {
 }
 
 func (s *SessionService) Exec(ctx context.Context, id, command string) (stdout, stderr string, err error) {
-	sess, err := s.Reg.GetSession(id)
+	sess, err := s.lookup(id)
 	if err != nil {
 		return "", "", err
 	}
@@ -457,7 +460,7 @@ func (s *SessionService) execPlan(sess *Session, command string) (cwd, cmd strin
 }
 
 func (s *SessionService) Resize(ctx context.Context, id string) error {
-	sess, err := s.Reg.GetSession(id)
+	sess, err := s.lookup(id)
 	if err != nil {
 		return err
 	}
@@ -469,7 +472,7 @@ func (s *SessionService) Resize(ctx context.Context, id string) error {
 }
 
 func (s *SessionService) Attach(ctx context.Context, id string) error {
-	sess, err := s.Reg.GetSession(id)
+	sess, err := s.lookup(id)
 	if err != nil {
 		return err
 	}
@@ -482,7 +485,7 @@ func (s *SessionService) Attach(ctx context.Context, id string) error {
 }
 
 func (s *SessionService) AttachCommand(id string) (string, error) {
-	sess, err := s.Reg.GetSession(id)
+	sess, err := s.lookup(id)
 	if err != nil {
 		return "", err
 	}

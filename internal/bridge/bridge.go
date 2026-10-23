@@ -41,6 +41,11 @@ const (
 	requestReadTimeout     = 10 * time.Second
 )
 
+// ErrUnavailable means the bridge socket could not be dialed (no listener:
+// the session is detached or the control bridge is not running). Nothing was
+// sent to the control host.
+var ErrUnavailable = errors.New("desktop relay bridge unavailable")
+
 // Source identifies the relay session that issued an invocation.
 type Source struct {
 	SessionID   string `json:"session_id,omitempty"`
@@ -122,7 +127,7 @@ func (c Client) call(ctx context.Context, req Request) (*Response, error) {
 	d := net.Dialer{Timeout: 2 * time.Second}
 	conn, err := d.DialContext(ctx, "unix", c.SockPath)
 	if err != nil {
-		return nil, fmt.Errorf("desktop relay bridge unavailable at %s: %w", c.SockPath, err)
+		return nil, fmt.Errorf("%w at %s: %v", ErrUnavailable, c.SockPath, err)
 	}
 	defer conn.Close()
 	if deadline, ok := ctx.Deadline(); ok {

@@ -35,8 +35,12 @@ const readinessHostFanout = 2
 // a bare state.
 type ReadinessReport struct {
 	AgentReadiness
+	// Activity is whether the agent is mid-turn: busy | idle | blocked |
+	// unknown (#69). A bare shell (state absent) is idle.
+	Activity string `json:"activity"`
 	Lines     int       `json:"lines"`
 	SampledAt time.Time `json:"sampled_at"`
+	text      string
 }
 
 // SessionReadiness is a session record with its readiness attached, the shape
@@ -56,12 +60,13 @@ func ClassifyText(text string, lines int) ReadinessReport {
 	if lines <= 0 {
 		lines = DefaultReadinessLines
 	}
-	rep := ReadinessReport{Lines: lines, SampledAt: time.Now().UTC()}
+	rep := ReadinessReport{Activity: ActivityUnknown, Lines: lines, SampledAt: time.Now().UTC()}
 	if len(text) == 0 {
 		rep.AgentReadiness = AgentReadiness{State: AgentUnknown, Reason: "no text"}
 		return rep
 	}
 	rep.AgentReadiness = ClassifyAgentPane(text)
+	rep.Activity = ActivityOf(rep.State, text)
 	return rep
 }
 
@@ -69,7 +74,7 @@ func ClassifyText(text string, lines int) ReadinessReport {
 // is bounded by ReadinessTimeout; a transport failure is returned as an error
 // alongside a report whose state is unknown, so a caller can print both.
 func (s *SessionService) Readiness(ctx context.Context, id string, lines int) (*Session, *ReadinessReport, error) {
-	sess, err := s.Reg.GetSession(id)
+	sess, err := s.lookup(id)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -95,7 +100,7 @@ func (s *SessionService) readinessOf(ctx context.Context, sess *Session, lines i
 	defer cancel()
 	t, err := s.transportFor(sess)
 	if err != nil {
-		return ReadinessReport{AgentReadiness: AgentReadiness{State: AgentUnknown, Reason: err.Error()}, Lines: lines, SampledAt: time.Now().UTC()}
+		return ReadinessReport{AgentReadiness: AgentReadiness{State: AgentUnknown, Reason: err.Error()}, Activity: ActivityUnknown, Lines: lines, SampledAt: time.Now().UTC()}
 	}
 	text, err := captureBounded(cctx, func(c context.Context) (string, error) {
 		return s.Persist.Capture(c, t, sess.Persist, lines)
@@ -105,11 +110,13 @@ func (s *SessionService) readinessOf(ctx context.Context, sess *Session, lines i
 			err = cctx.Err()
 		} else if exists, perr := s.Persist.Exists(cctx, t, sess.Persist); perr == nil && !exists {
 			// The capture failed because there is nothing to capture.
-			return ReadinessReport{AgentReadiness: AgentReadiness{State: AgentGone, Reason: "tmux session does not exist"}, Lines: lines, SampledAt: time.Now().UTC()}
+			return ReadinessReport{AgentReadiness: AgentReadiness{State: AgentGone, Reason: "tmux session does not exist"}, Activity: ActivityUnknown, Lines: lines, SampledAt: time.Now().UTC()}
 		}
-		return ReadinessReport{AgentReadiness: AgentReadiness{State: AgentUnknown, Reason: "capture failed: " + err.Error()}, Lines: lines, SampledAt: time.Now().UTC()}
+		return ReadinessReport{AgentReadiness: AgentReadiness{State: AgentUnknown, Reason: "capture failed: " + err.Error()}, Activity: ActivityUnknown, Lines: lines, SampledAt: time.Now().UTC()}
 	}
 	rep := ReadinessReport{AgentReadiness: ClassifyAgentPane(text), Lines: lines, SampledAt: time.Now().UTC()}
+	rep.Activity = ActivityOf(rep.State, text)
+	rep.text = text
 	return rep
 }
 

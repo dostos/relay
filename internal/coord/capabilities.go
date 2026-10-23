@@ -21,22 +21,27 @@ const ReleaseVersion = "0.1.0"
 // Names are stable dotted identifiers; never rename one (automation keys on
 // them), only add.
 var capabilities = []string{
-	"cli.capabilities",         // relay capabilities / relay version --json (#62)
-	"coord.capabilities",       // event service reports these in ping/status (#62)
-	"coord.emit",               // event service ops
-	"coord.ping",               //
-	"coord.status",             //
-	"coord.subscribe",          //
-	"session.exec.detach",      // durable detached operations (#60)
-	"session.op.output",        //
-	"session.op.status",        //
-	"session.op.wait",          //
-	"session.send.gate_guard",  // refuses to type into an approval prompt (#67)
-	"session.send.idempotency", // --idempotency-key replays a receipt (#59)
-	"session.send.paste",       // text arrives as one bracketed paste (#65)
-	"session.send.receipt",     // fresh-turn send receipts (#59)
-	"session.send.serialized",  // per-session host lock between senders (#66)
-	"session.submit",           // relay session submit (#59)
+	"cli.capabilities",            // relay capabilities / relay version --json (#62)
+	"coord.capabilities",          // event service reports these in ping/status (#62)
+	"coord.emit",                  // event service ops
+	"coord.ping",                  //
+	"coord.status",                //
+	"coord.subscribe",             //
+	"session.address",             // HOST/NAME and unique NAME session references (#72)
+	"session.direct",              // messaging runs on the host when the bridge is down (#73)
+	"session.exec.detach",         // durable detached operations (#60)
+	"session.op.output",           //
+	"session.op.status",           //
+	"session.op.wait",             //
+	"session.send.composer_guard", // refuses to type onto an unrelated draft (#70)
+	"session.send.gate_guard",     // refuses to type into an approval prompt (#67)
+	"session.send.idempotency",    // --idempotency-key replays a receipt (#59)
+	"session.send.paste",          // text arrives as one bracketed paste (#65)
+	"session.send.queued",         // "queued" receipt state behind a busy turn (#71)
+	"session.send.receipt",        // fresh-turn send receipts (#59)
+	"session.send.serialized",     // per-session host lock between senders (#66)
+	"session.submit",              // relay session submit (#59)
+	"session.wait.idle",           // relay session wait ID --idle; readiness activity (#69)
 }
 
 // Capabilities returns a sorted copy of the compiled-in capability list.
