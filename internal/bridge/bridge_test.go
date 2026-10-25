@@ -391,3 +391,65 @@ func TestBridgeDefersRootAndBoardToAuthorityBoundary(t *testing.T) {
 		t.Fatal("syntactically valid command must reach policy")
 	}
 }
+
+func TestPruneReceiptsRemovesOnlyExpiredReceiptsAndTemps(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	old := now.Add(-8 * 24 * time.Hour)
+	write := func(name string, mt time.Time) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, mt, mt); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	oldReceipt := write(strings.Repeat("a", 32)+".json", old)
+	freshReceipt := write(strings.Repeat("b", 32)+".json", now.Add(-time.Hour))
+	oldTmp := write(".command-receipt-123.tmp", now.Add(-2*time.Hour))
+	freshTmp := write(".command-receipt-456.tmp", now.Add(-time.Minute))
+	other := write("notes.json", old)
+	n, err := PruneReceipts(dir, DefaultReceiptTTL, now)
+	if err != nil || n != 2 {
+		t.Fatalf("PruneReceipts = %d, %v; want 2, nil", n, err)
+	}
+	for _, p := range []string{oldReceipt, oldTmp} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s should be pruned", p)
+		}
+	}
+	for _, p := range []string{freshReceipt, freshTmp, other} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("%s should be kept: %v", p, err)
+		}
+	}
+	if n, err := PruneReceipts(filepath.Join(dir, "missing"), DefaultReceiptTTL, now); n != 0 || err != nil {
+		t.Fatalf("missing dir: %d, %v", n, err)
+	}
+}
+
+func TestClaimRequestTriggersBackgroundPrune(t *testing.T) {
+	dir := t.TempDir()
+	stale := filepath.Join(dir, strings.Repeat("c", 32)+".json")
+	if err := os.WriteFile(stale, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-30 * 24 * time.Hour)
+	_ = os.Chtimes(stale, old, old)
+	s := &Server{ReceiptDir: dir}
+	if _, _, err := s.claimRequest(Request{RequestID: strings.Repeat("d", 32), Argv: []string{"build"}}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(stale); os.IsNotExist(err) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("stale receipt was not pruned")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

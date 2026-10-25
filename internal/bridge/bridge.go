@@ -165,9 +165,16 @@ type Server struct {
 	Authorize        func(Source) error
 	AuthorizeRequest func(Source, []string) error
 	ReceiptDir       string
-	ln               net.Listener
-	invokeMu         sync.Mutex
-	receiptMu        sync.Mutex
+	// ReceiptTTL is how long command receipts are kept for idempotent
+	// replay; older ones are pruned in the background (#85). Zero means
+	// DefaultReceiptTTL; negative disables pruning.
+	ReceiptTTL time.Duration
+	ln         net.Listener
+	pruneMu    sync.Mutex
+	pruning    bool
+	lastPrune  time.Time
+	invokeMu   sync.Mutex
+	receiptMu  sync.Mutex
 }
 
 func (s *Server) Serve() error {
@@ -392,6 +399,7 @@ func (s *Server) claimRequest(req Request) (*Response, string, error) {
 	if s.ReceiptDir == "" {
 		return nil, "", nil
 	}
+	s.maybePruneReceipts()
 	s.receiptMu.Lock()
 	defer s.receiptMu.Unlock()
 	if err := os.MkdirAll(s.ReceiptDir, 0o700); err != nil {
@@ -472,6 +480,83 @@ func (s *Server) completeRequest(path string, req Request, response Response) er
 		return err
 	}
 	return syncDirectory(s.ReceiptDir)
+}
+
+// DefaultReceiptTTL bounds how long a bridged request can be retried with
+// the same request_id and still get its recorded response. Real retries
+// happen within seconds to minutes.
+const DefaultReceiptTTL = 7 * 24 * time.Hour
+
+const receiptPruneEvery = time.Hour
+
+// maybePruneReceipts starts at most one background prune per hour (#85).
+func (s *Server) maybePruneReceipts() {
+	ttl := s.ReceiptTTL
+	if ttl == 0 {
+		ttl = DefaultReceiptTTL
+	}
+	if ttl < 0 {
+		return
+	}
+	s.pruneMu.Lock()
+	if s.pruning || (!s.lastPrune.IsZero() && time.Since(s.lastPrune) < receiptPruneEvery) {
+		s.pruneMu.Unlock()
+		return
+	}
+	s.pruning = true
+	s.lastPrune = time.Now()
+	s.pruneMu.Unlock()
+	go func() {
+		_, _ = PruneReceipts(s.ReceiptDir, ttl, time.Now())
+		s.pruneMu.Lock()
+		s.pruning = false
+		s.pruneMu.Unlock()
+	}()
+}
+
+// PruneReceipts removes command receipts last modified before now-ttl and
+// stray temp files older than an hour. It returns how many were removed.
+func PruneReceipts(dir string, ttl time.Duration, now time.Time) (int, error) {
+	d, err := os.Open(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	defer d.Close()
+	cutoff := now.Add(-ttl)
+	tmpCutoff := now.Add(-time.Hour)
+	removed := 0
+	for {
+		names, err := d.Readdirnames(1024)
+		for _, name := range names {
+			var limit time.Time
+			switch {
+			case strings.HasPrefix(name, ".command-receipt-") && strings.HasSuffix(name, ".tmp"):
+				limit = tmpCutoff
+			case strings.HasSuffix(name, ".json") && validRequestID(strings.TrimSuffix(name, ".json")):
+				limit = cutoff
+			default:
+				continue
+			}
+			p := filepath.Join(dir, name)
+			info, statErr := os.Lstat(p)
+			if statErr != nil || !info.Mode().IsRegular() || !info.ModTime().Before(limit) {
+				continue
+			}
+			if os.Remove(p) == nil {
+				removed++
+			}
+		}
+		if err == io.EOF || len(names) == 0 {
+			break
+		}
+		if err != nil {
+			return removed, err
+		}
+	}
+	return removed, nil
 }
 
 func syncDirectory(path string) error {
