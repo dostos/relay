@@ -157,6 +157,20 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
       launchctl print "gui/$(id -u)/$SYSTEM_LABEL" >/dev/null 2>&1 || break
       sleep 1
     done
+    # A service process launchd no longer tracks (e.g. left from an earlier
+    # install) survives bootout and holds service.lock, so the new job
+    # crash-loops and the old build keeps serving (#89). Stop it first.
+    ORPHANS="$(pgrep -u "$(id -u)" -f "^$INSTALL_DIR/relay service run" 2>/dev/null || true)"
+    if [[ -n "$ORPHANS" ]]; then
+      echo "relay: stopping leftover home service process(es) not managed by launchd: $(echo $ORPHANS)" >&2
+      kill -TERM $ORPHANS 2>/dev/null || true
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        pgrep -u "$(id -u)" -f "^$INSTALL_DIR/relay service run" >/dev/null 2>&1 || break
+        sleep 1
+      done
+      ORPHANS="$(pgrep -u "$(id -u)" -f "^$INSTALL_DIR/relay service run" 2>/dev/null || true)"
+      [[ -n "$ORPHANS" ]] && kill -KILL $ORPHANS 2>/dev/null || true
+    fi
     BOOTSTRAPPED=0
     for _ in 1 2 3 4 5; do
       if launchctl bootstrap "gui/$(id -u)" "$SYSTEM_PLIST" 2>/dev/null; then BOOTSTRAPPED=1; break; fi
@@ -167,6 +181,15 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
       exit 1
     fi
     launchctl kickstart -k "gui/$(id -u)/$SYSTEM_LABEL"
+    SERVICE_RUNNING=0
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      if launchctl print "gui/$(id -u)/$SYSTEM_LABEL" 2>/dev/null | grep -qE '^[[:space:]]*state = running'; then SERVICE_RUNNING=1; break; fi
+      sleep 1
+    done
+    if (( ! SERVICE_RUNNING )); then
+      echo "relay: WARNING home service $SYSTEM_LABEL is not running after restart; see ~/Library/Logs/relay-system.log" >&2
+      tail -n 3 "$HOME/Library/Logs/relay-system.log" >&2 2>/dev/null || true
+    fi
   fi
   echo "relay service: authoritative home service registered ($SYSTEM_LABEL)"
 fi

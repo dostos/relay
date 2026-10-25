@@ -34,7 +34,7 @@ func TestServiceAndMigrationArtifactsUsePrimaryBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 	installText := string(installer)
-	for _, want := range []string{"RELAY_MIGRATE_SERVICE", "system-owned services preserved", "migration-receipt-", ".relayd.new.", "share/systemd/relay.service", "share/systemd/relay-system.service", "old_installed_build", "command_socket", "process_owners", "proposed_system_unit", "migration-backups", "rollback_backup", "relay.previous"} {
+	for _, want := range []string{"RELAY_MIGRATE_SERVICE", "system-owned services preserved", "migration-receipt-", ".relayd.new.", "share/systemd/relay.service", "share/systemd/relay-system.service", "old_installed_build", "command_socket", "process_owners", "proposed_system_unit", "migration-backups", "rollback_backup", "relay.previous", "relay service run\" 2>/dev/null", "is not running after restart"} {
 		if !strings.Contains(installText, want) {
 			t.Fatalf("installer lacks migration safeguard %q", want)
 		}
