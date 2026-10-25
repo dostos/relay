@@ -241,14 +241,18 @@ const fleetResolveScript = `B="$HOME/.local/bin"; R="$B/relay"; SHIM=""
 if [ -f "$R" ] && [ -x "$B/relay-real" ] && [ "$(head -c 2 "$R" 2>/dev/null)" = "#!" ]; then R="$B/relay-real"; SHIM=1; fi
 `
 
+// fleetMachineScript prints the machine key that identifies which host
+// entries are aliases of one machine (#79, #86).
+const fleetMachineScript = `MID="$(cat /etc/machine-id 2>/dev/null || ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4}')"
+printf 'machine=%s|%s|%s|%s\n' "$MID" "$(hostname 2>/dev/null || uname -n)" "$(id -un 2>/dev/null)" "$HOME"
+`
+
 const fleetProbeScript = fleetResolveScript + `printf 'os=%s\n' "$(uname -s)"
 printf 'arch=%s\n' "$(uname -m)"
 printf 'path=%s\n' "$(command -v relay 2>/dev/null)"
 printf 'target=%s\n' "$R"
 printf 'shim=%s\n' "$SHIM"
-MID="$(cat /etc/machine-id 2>/dev/null || ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4}')"
-printf 'machine=%s|%s|%s|%s\n' "$MID" "$(hostname 2>/dev/null || uname -n)" "$(id -un 2>/dev/null)" "$HOME"
-if [ -x "$R" ]; then
+` + fleetMachineScript + `if [ -x "$R" ]; then
   printf 'build=%s\n' "$(RELAY_BRIDGE_LOCAL_INVOKE=1 "$R" build 2>/dev/null)"
   printf 'version=%s\n' "$(RELAY_BRIDGE_LOCAL_INVOKE=1 "$R" --json version 2>/dev/null | tr -d '\n')"
   printf 'agents=%s\n' "$(RELAY_BRIDGE_LOCAL_INVOKE=1 "$R" --json agents status 2>/dev/null | tr -d '\n')"
@@ -542,10 +546,13 @@ func (a *App) printFleet(verb string, o fleetOpts, results []fleetHost) int {
 
 func (a *App) fleetReport(ctx context.Context, hosts []string, o fleetOpts) int {
 	type hostReport struct {
-		Host   string          `json:"host"`
-		OK     bool            `json:"ok"`
-		Report json.RawMessage `json:"report,omitempty"`
-		Error  string          `json:"error,omitempty"`
+		Host    string          `json:"host"`
+		OK      bool            `json:"ok"`
+		AliasOf string          `json:"alias_of,omitempty"`
+		Report  json.RawMessage `json:"report,omitempty"`
+		Error   string          `json:"error,omitempty"`
+		machine string
+		hub     bool
 	}
 	out := make([]hostReport, len(hosts))
 	sem := make(chan struct{}, o.parallel)
@@ -556,14 +563,15 @@ func (a *App) fleetReport(ctx context.Context, hosts []string, o fleetOpts) int 
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			hr := hostReport{Host: h}
+			hr := hostReport{Host: h, hub: core.IsThisHost(h)}
 			t, err := a.tf(h)
 			if err == nil {
 				rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 				var stdout, stderr string
-				stdout, stderr, err = t.Run(rctx, "", fmt.Sprintf(`RELAY_BRIDGE_LOCAL_INVOKE=1 "$HOME/.local/bin/relay" --json report --since %s --examples 5`, shellquote.Quote(o.since)))
+				stdout, stderr, err = t.Run(rctx, "", fleetMachineScript+fmt.Sprintf(`RELAY_BRIDGE_LOCAL_INVOKE=1 "$HOME/.local/bin/relay" --json report --since %s --examples 5`, shellquote.Quote(o.since)))
 				cancel()
-				raw := strings.TrimSpace(stdout)
+				var raw string
+				hr.machine, raw = splitMachineLine(stdout)
 				if json.Valid([]byte(raw)) && strings.HasPrefix(raw, "{") {
 					hr.OK, hr.Report = true, json.RawMessage(raw)
 					err = nil
@@ -580,10 +588,25 @@ func (a *App) fleetReport(ctx context.Context, hosts []string, o fleetOpts) int 
 		}(i, h)
 	}
 	wg.Wait()
+	// Aliases of one machine read the same usage log; count it once,
+	// preferring the hub entry (#86).
+	keys := make([]string, len(out))
+	hubs := make([]bool, len(out))
+	for i, hr := range out {
+		if hr.OK {
+			keys[i] = hr.machine
+		}
+		hubs[i] = hr.hub
+	}
+	for i, p := range reportPrimaries(keys, hubs) {
+		if p != i {
+			out[i].AliasOf = out[p].Host
+		}
+	}
 	totals := map[string]int{}
 	var findings []string
 	for _, hr := range out {
-		if !hr.OK {
+		if !hr.OK || hr.AliasOf != "" {
 			continue
 		}
 		var r usageReport
@@ -613,10 +636,49 @@ func (a *App) fleetReport(ctx context.Context, hosts []string, o fleetOpts) int 
 	for _, hr := range out {
 		if !hr.OK {
 			fmt.Printf("  %-12s error: %s\n", hr.Host, hr.Error)
+		} else if hr.AliasOf != "" {
+			fmt.Printf("  %-12s alias_of %s (not counted twice)\n", hr.Host, hr.AliasOf)
 		}
 	}
 	for _, f := range findings {
 		fmt.Println("  finding: " + f)
 	}
 	return 0
+}
+
+// splitMachineLine separates the leading "machine=…" line printed by
+// fleetMachineScript from the rest of a host's output.
+func splitMachineLine(stdout string) (machine, rest string) {
+	rest = strings.TrimSpace(stdout)
+	if strings.HasPrefix(rest, "machine=") {
+		line, tail, _ := strings.Cut(rest, "\n")
+		if m := strings.TrimSpace(strings.TrimPrefix(line, "machine=")); strings.Trim(m, "|") != "" {
+			machine = m
+		}
+		rest = strings.TrimSpace(tail)
+	}
+	return machine, rest
+}
+
+// reportPrimaries maps each entry to the entry counted for its machine: the
+// hub entry if one resolves there, else the first listed. Entries without a
+// machine key are their own primary.
+func reportPrimaries(keys []string, hubs []bool) []int {
+	primary := make([]int, len(keys))
+	first := map[string]int{}
+	for i, k := range keys {
+		primary[i] = i
+		if k == "" {
+			continue
+		}
+		if p, ok := first[k]; !ok || (hubs[i] && !hubs[p]) {
+			first[k] = i
+		}
+	}
+	for i, k := range keys {
+		if k != "" {
+			primary[i] = first[k]
+		}
+	}
+	return primary
 }
