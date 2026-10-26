@@ -224,17 +224,17 @@ func (a *AgentSpec) InnerCommand() string {
 func wrapLoginShell(inner string) string {
 	inner = strings.TrimSpace(inner)
 	if inner == "" {
-		return "bash -ilc 'exec bash'"
+		return HostLoginShell("exec bash")
 	}
 	if strings.Contains(inner, "bash -ilc") || strings.Contains(inner, "bash -lc") {
 		return inner
 	}
-	return "bash -ilc " + shellQuote("exec "+inner)
+	return HostLoginShell("exec " + inner)
 }
 
 // loginShellRun wraps a remote one-shot command for probes.
 func loginShellRun(script string) string {
-	return "bash -ilc " + shellQuote(script)
+	return HostLoginShell(script)
 }
 
 func shellJoin(parts []string) string {

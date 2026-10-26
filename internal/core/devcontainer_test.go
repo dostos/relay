@@ -30,7 +30,7 @@ func TestDevcontainerUpCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.HasPrefix(got, "bash -ilc ") {
+	if !IsHostLoginShell(got) {
 		// The devcontainer CLI is only on an interactive shell's PATH.
 		t.Errorf("up must run under an interactive login shell:\n%s", got)
 	}
