@@ -7,7 +7,7 @@ import (
 
 func TestHostCapsCommandUsesLoginShell(t *testing.T) {
 	got := HostCapsCommand()
-	if !strings.HasPrefix(got, "bash -ilc ") {
+	if !IsHostLoginShell(got) {
 		t.Fatalf("caps must use the same login-shell PATH as container up:\n%s", got)
 	}
 	for _, want := range []string{

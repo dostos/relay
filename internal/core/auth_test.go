@@ -26,7 +26,7 @@ func TestWrapLoginShellIdempotent(t *testing.T) {
 	if once != twice {
 		t.Fatalf("double wrap: %q vs %q", once, twice)
 	}
-	if !strings.HasPrefix(once, "bash -ilc ") {
+	if !IsHostLoginShell(once) {
 		t.Fatalf("got %q", once)
 	}
 }

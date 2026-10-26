@@ -244,8 +244,28 @@ func DevcontainerUpCommand(c *ContainerSpec, removeExisting bool) (string, error
 // hamburg — `node -v` is empty under `bash -lc`, v20.19.5 under `bash -ilc`).
 // The wrapped text keeps $HOME and $NAME unexpanded for the inner shell, which
 // is what makes ~-paths and --remote-env passthrough resolve on the host.
+//
+// Fleet hosts often end ~/.bashrc with `exec zsh -l` whenever $- contains i
+// (interactive SSH preference). That replaces bash before -c runs, so the
+// wrapped command never executes and callers see only "Inappropriate ioctl /
+// no job control" on stderr with exit 0 and empty stdout — the failure mode
+// behind "container up … reported no container id" and empty host caps.
+// Exporting ZSH_VERSION satisfies the usual guard (`[[ -z ${ZSH_VERSION-} ]]`)
+// without requiring every host's bashrc to know about relay. RELAY_HOST_SHELL=1
+// is also set so hosts can opt out explicitly (`[[ -n $RELAY_HOST_SHELL ]]`).
 func HostLoginShell(cmd string) string {
-	return "bash -ilc " + shellquote.Quote(cmd)
+	return "env RELAY_HOST_SHELL=1 ZSH_VERSION=relay-host-shell bash -ilc " + shellquote.Quote(cmd)
+}
+
+// hostLoginShellMarker is the substring every HostLoginShell invocation carries.
+// Tests match on this rather than a bare "bash -ilc " prefix so the env guard
+// can evolve without rewriting every assertion.
+const hostLoginShellMarker = "bash -ilc"
+
+// IsHostLoginShell reports whether s was produced by HostLoginShell (or an
+// equivalent wrap that still runs under bash -ilc with the zsh-exec guard).
+func IsHostLoginShell(s string) bool {
+	return strings.Contains(s, hostLoginShellMarker) && strings.Contains(s, "RELAY_HOST_SHELL=1")
 }
 
 // validateEnvName rejects anything that is not a plain environment variable
