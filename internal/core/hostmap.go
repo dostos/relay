@@ -242,6 +242,7 @@ type ImageContainerDecl struct {
 	Network    string
 	Home       string   // VOLUME:/target
 	Toolkit    string   // VOLUME:/target
+	Agents     []string // toolkit.agents recipes (claude, codex, …)
 	Volumes    []string // NAME:/path[:ro]
 	Binds      []string // /abs:/abs[:ro] → expose:
 	Env        []string
@@ -281,7 +282,14 @@ func (d ImageContainerDecl) Spec() (*ContainerSpec, error) {
 		if err != nil {
 			return nil, fmt.Errorf("toolkit: %w", err)
 		}
-		spec.Toolkit = &ToolkitSpec{Volume: vm.Volume, Target: vm.Target}
+		spec.Toolkit = &ToolkitSpec{Volume: vm.Volume, Target: vm.Target, Agents: append([]string(nil), d.Agents...)}
+	} else if len(d.Agents) > 0 {
+		return nil, fmt.Errorf("--agents requires --toolkit")
+	}
+	if spec.Toolkit != nil && len(spec.Toolkit.Agents) > 0 {
+		if _, err := ComposeAgentRecipes(spec.Toolkit.Agents, spec.Toolkit.Target); err != nil {
+			return nil, err
+		}
 	}
 	for _, v := range spec.Volumes {
 		if _, err := ParseVolumeMount(v); err != nil {
@@ -452,4 +460,106 @@ func RemoteDirsCommand(dir string) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("cd %s 2>/dev/null && ls -1ApL 2>/dev/null | grep '/$' | head -500", expr), nil
+}
+
+// AgentVolumesDecl is the host-level toolkit + home default written by
+// `relay host agent-volumes`.
+type AgentVolumesDecl struct {
+	Toolkit string   // VOLUME:/target
+	Home    string   // VOLUME:/target
+	Agents  []string // toolkit.agents recipes
+}
+
+// UpsertAgentVolumes sets or replaces the top-level agent_volumes: block.
+// Comments elsewhere in the file are preserved (yaml.Node edit); the
+// agent_volumes subtree itself is rewritten as a unit.
+func UpsertAgentVolumes(document []byte, decl AgentVolumesDecl) ([]byte, error) {
+	tkMount, err := ParseVolumeMount(decl.Toolkit)
+	if err != nil {
+		return nil, fmt.Errorf("toolkit: %w", err)
+	}
+	homeMount, err := ParseVolumeMount(decl.Home)
+	if err != nil {
+		return nil, fmt.Errorf("home: %w", err)
+	}
+	agents := decl.Agents
+	if len(agents) == 0 {
+		agents = DefaultForgeAgents()
+	}
+	if _, err := ComposeAgentRecipes(agents, tkMount.Target); err != nil {
+		return nil, err
+	}
+
+	var root yaml.Node
+	if err := yaml.Unmarshal(document, &root); err != nil {
+		return nil, fmt.Errorf("parse host profile: %w", err)
+	}
+	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 {
+		return nil, fmt.Errorf("host profile is not a YAML document")
+	}
+	body := root.Content[0]
+	if body.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("host profile is not a mapping")
+	}
+
+	agentsSeq := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+	for _, a := range agents {
+		agentsSeq.Content = append(agentsSeq.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: a})
+	}
+	av := &yaml.Node{
+		Kind: yaml.MappingNode,
+		Tag:  "!!map",
+		Content: []*yaml.Node{
+			{Kind: yaml.ScalarNode, Tag: "!!str", Value: "toolkit"},
+			{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Tag: "!!str", Value: "volume"},
+				{Kind: yaml.ScalarNode, Tag: "!!str", Value: tkMount.Volume},
+				{Kind: yaml.ScalarNode, Tag: "!!str", Value: "target"},
+				{Kind: yaml.ScalarNode, Tag: "!!str", Value: tkMount.Target},
+				{Kind: yaml.ScalarNode, Tag: "!!str", Value: "agents"},
+				agentsSeq,
+			}},
+			{Kind: yaml.ScalarNode, Tag: "!!str", Value: "home"},
+			{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{
+				{Kind: yaml.ScalarNode, Tag: "!!str", Value: "volume"},
+				{Kind: yaml.ScalarNode, Tag: "!!str", Value: homeMount.Volume},
+				{Kind: yaml.ScalarNode, Tag: "!!str", Value: "target"},
+				{Kind: yaml.ScalarNode, Tag: "!!str", Value: homeMount.Target},
+			}},
+		},
+	}
+
+	replaced := false
+	for i := 0; i+1 < len(body.Content); i += 2 {
+		if body.Content[i].Value == "agent_volumes" {
+			body.Content[i+1] = av
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		body.Content = append(body.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: "agent_volumes"}, av)
+	}
+	return encodeDocument(&root)
+}
+
+// SetAgentVolumes writes host-level agent_volumes into the host's profile.
+func (p *ProfileService) SetAgentVolumes(ctx context.Context, t ports.Transport, hostID string, decl AgentVolumesDecl) (*HostProfile, error) {
+	if hostID == "" {
+		return nil, fmt.Errorf("host required")
+	}
+	path := RemoteHostProfilePath()
+	raw, err := t.ReadFile(ctx, path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s on %s: %w", path, hostID, err)
+	}
+	updated, err := UpsertAgentVolumes(raw, decl)
+	if err != nil {
+		return nil, err
+	}
+	if err := t.WriteFile(ctx, path, updated, "644"); err != nil {
+		return nil, fmt.Errorf("write %s on %s: %w", path, hostID, err)
+	}
+	return p.Fetch(ctx, hostID)
 }

@@ -101,6 +101,7 @@ func TestAuthSyncAllowlistExcludesHooksAndPlugins(t *testing.T) {
 		".claude/.credentials.json", ".claude.json",
 		".codex/auth.json", ".codex/config.toml",
 		".ccs", ".cursor/auth.json", ".config/cursor/auth.json",
+		".zshrc", ".gitconfig", ".ssh/id_ed25519", ".config/gh/hosts.yml",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("allowlist missing %q", want)
@@ -127,6 +128,20 @@ func TestAuthSyncFilesForFilter(t *testing.T) {
 	}
 	if len(all) == 0 || all[0].Agent != "cursor" {
 		t.Fatalf("cursor-agent should map to cursor: %+v", all)
+	}
+	for _, group := range []string{"shell", "git", "ssh", "gh", "secrets"} {
+		files, err := AuthSyncFilesFor(group)
+		if err != nil {
+			t.Fatalf("%s: %v", group, err)
+		}
+		if len(files) == 0 {
+			t.Fatalf("%s: empty", group)
+		}
+		for _, f := range files {
+			if f.Agent != group {
+				t.Fatalf("%s filter leaked %q", group, f.Agent)
+			}
+		}
 	}
 }
 
@@ -218,5 +233,28 @@ containers:
 	bare, err := p.ResolveContainer("bare")
 	if err != nil || bare.Toolkit != nil || bare.Home != nil {
 		t.Fatalf("bare opt-out: %+v %v", bare, err)
+	}
+}
+
+func TestApplyAgentVolumesInheritsAgentsOntoExistingToolkit(t *testing.T) {
+	p := &HostProfile{
+		AgentVolumes: &AgentVolumesSpec{
+			Toolkit: &ToolkitSpec{Volume: "relay-toolkit", Target: "/relay/toolkit", Agents: DefaultForgeAgents()},
+			Home:    &HomeSpec{Volume: "relay-home", Target: "/relay/home"},
+		},
+	}
+	// forge-default shape: toolkit/home set, agents empty.
+	c := &ContainerSpec{
+		Name:    "forge-default",
+		Image:   "mcr.microsoft.com/devcontainers/javascript-node:20",
+		Toolkit: &ToolkitSpec{Volume: "relay-toolkit", Target: "/relay/toolkit"},
+		Home:    &HomeSpec{Volume: "relay-home", Target: "/relay/home"},
+	}
+	got := p.ApplyAgentVolumes(c)
+	if got.Toolkit == nil || len(got.Toolkit.Agents) != 4 {
+		t.Fatalf("expected inherited agents, got %+v", got.Toolkit)
+	}
+	if strings.TrimSpace(got.Toolkit.Provision) == "" {
+		t.Fatal("provision should be composed from inherited agents")
 	}
 }
