@@ -58,6 +58,7 @@ type AuthSyncFile struct {
 // them (see docs/devcontainers.md).
 func AuthSyncAllowlist() []AuthSyncFile {
 	return []AuthSyncFile{
+		// Agent CLIs (credentials only — never hooks/plugins/MCP).
 		{Agent: "claude", HostRel: ".claude/.credentials.json", VolumeRel: ".claude/.credentials.json"},
 		{Agent: "claude", HostRel: ".claude.json", VolumeRel: ".claude.json", Optional: true},
 		{Agent: "codex", HostRel: ".codex/auth.json", VolumeRel: ".codex/auth.json"},
@@ -68,7 +69,48 @@ func AuthSyncAllowlist() []AuthSyncFile {
 		{Agent: "cursor", HostRel: ".cursor/auth.json", VolumeRel: ".cursor/auth.json", Optional: true},
 		{Agent: "cursor", HostRel: ".config/cursor/auth.json", VolumeRel: ".config/cursor/auth.json", Optional: true},
 		{Agent: "cursor", HostRel: ".config/cursor/prompts", VolumeRel: ".config/cursor/prompts", DirCopy: true, Optional: true},
+
+		// Shell / dotfiles for a usable interactive session inside the
+		// container. Copied from the *host* home (madrid, hamburg, …), not
+		// the Mac hub — keep host dotfiles in sync with the Mac separately.
+		// oh-my-zsh is optional and large; skip when absent.
+		{Agent: "shell", HostRel: ".zshrc", VolumeRel: ".zshrc", Optional: true},
+		{Agent: "shell", HostRel: ".zprofile", VolumeRel: ".zprofile", Optional: true},
+		{Agent: "shell", HostRel: ".zshenv", VolumeRel: ".zshenv", Optional: true},
+		{Agent: "shell", HostRel: ".oh-my-zsh", VolumeRel: ".oh-my-zsh", DirCopy: true, Optional: true},
+		{Agent: "shell", HostRel: ".zprezto", VolumeRel: ".zprezto", DirCopy: true, Optional: true},
+
+		// Git identity + ignore. The forge-default image already ships `git`;
+		// this only brings config.
+		{Agent: "git", HostRel: ".gitconfig", VolumeRel: ".gitconfig", Optional: true},
+		{Agent: "git", HostRel: ".gitignore_global", VolumeRel: ".gitignore_global", Optional: true},
+		{Agent: "git", HostRel: ".config/git/config", VolumeRel: ".config/git/config", Optional: true},
+		{Agent: "git", HostRel: ".config/git/ignore", VolumeRel: ".config/git/ignore", Optional: true},
+
+		// SSH keys for git remotes. Named keys only — never the whole ~/.ssh
+		// (sockets, known_hosts noise, extra identities).
+		{Agent: "ssh", HostRel: ".ssh/config", VolumeRel: ".ssh/config", Optional: true},
+		{Agent: "ssh", HostRel: ".ssh/id_ed25519", VolumeRel: ".ssh/id_ed25519", Optional: true},
+		{Agent: "ssh", HostRel: ".ssh/id_ed25519.pub", VolumeRel: ".ssh/id_ed25519.pub", Optional: true},
+		{Agent: "ssh", HostRel: ".ssh/id_ed25519_dostos_mesh", VolumeRel: ".ssh/id_ed25519_dostos_mesh", Optional: true},
+		{Agent: "ssh", HostRel: ".ssh/id_ed25519_dostos_mesh.pub", VolumeRel: ".ssh/id_ed25519_dostos_mesh.pub", Optional: true},
+		{Agent: "ssh", HostRel: ".ssh/id_rsa", VolumeRel: ".ssh/id_rsa", Optional: true},
+		{Agent: "ssh", HostRel: ".ssh/id_rsa.pub", VolumeRel: ".ssh/id_rsa.pub", Optional: true},
+
+		// GitHub CLI auth (hosts.yml). No keychain dump.
+		{Agent: "gh", HostRel: ".config/gh/hosts.yml", VolumeRel: ".config/gh/hosts.yml", Optional: true},
+
+		// Optional API keys already kept as files on the host (not keychain).
+		{Agent: "secrets", HostRel: ".config/openrouter/key", VolumeRel: ".config/openrouter/key", Optional: true},
+		{Agent: "secrets", HostRel: ".config/sops/age/keys.txt", VolumeRel: ".config/sops/age/keys.txt", Optional: true},
 	}
+}
+
+// DefaultForgeAgents is the toolkit.agents list forge-default / host
+// agent_volumes should provision so sessions inside the container see the
+// same CLIs the host has (installed into the toolkit volume, libc-matched).
+func DefaultForgeAgents() []string {
+	return []string{"claude", "codex", "ccs", "cursor-agent"}
 }
 
 // BuiltInAgentRecipes are the provision snippets selectable by name under
@@ -129,6 +171,10 @@ func (t *ToolkitSpec) ResolvedProvision() (string, error) {
 
 // ApplyAgentVolumes returns a copy of c with host-level agent_volumes filled
 // in when the spec does not override them and has not opted out.
+//
+// When a container already declares toolkit:/home: volumes (Forge's
+// forge-default does) but left agents/provision empty, the host-level
+// toolkit.agents list is inherited so provision still runs.
 func (p *HostProfile) ApplyAgentVolumes(c *ContainerSpec) *ContainerSpec {
 	if c == nil {
 		return nil
@@ -142,6 +188,16 @@ func (p *HostProfile) ApplyAgentVolumes(c *ContainerSpec) *ContainerSpec {
 	}
 	if out.Toolkit == nil && p.AgentVolumes.Toolkit != nil {
 		tk := *p.AgentVolumes.Toolkit
+		out.Toolkit = &tk
+	} else if out.Toolkit != nil && p.AgentVolumes.Toolkit != nil {
+		tk := *out.Toolkit
+		hostTK := p.AgentVolumes.Toolkit
+		if len(tk.Agents) == 0 && strings.TrimSpace(tk.Provision) == "" && len(hostTK.Agents) > 0 {
+			tk.Agents = append([]string(nil), hostTK.Agents...)
+		}
+		if strings.TrimSpace(tk.Provision) == "" && strings.TrimSpace(hostTK.Provision) != "" {
+			tk.Provision = hostTK.Provision
+		}
 		out.Toolkit = &tk
 	}
 	if out.Home == nil && p.AgentVolumes.Home != nil {
@@ -174,7 +230,8 @@ func AuthSyncFilesFor(agent string) ([]AuthSyncFile, error) {
 	switch agent {
 	case "", "all":
 		return AuthSyncAllowlist(), nil
-	case "claude", "codex", "ccs", "cursor", "cursor-agent":
+	case "claude", "codex", "ccs", "cursor", "cursor-agent",
+		"shell", "git", "ssh", "gh", "secrets":
 		if agent == "cursor-agent" {
 			agent = "cursor"
 		}
@@ -186,7 +243,7 @@ func AuthSyncFilesFor(agent string) ([]AuthSyncFile, error) {
 		}
 		return out, nil
 	default:
-		return nil, fmt.Errorf("unknown --agent %q (want claude|codex|ccs|cursor)", agent)
+		return nil, fmt.Errorf("unknown --agent %q (want claude|codex|ccs|cursor|shell|git|ssh|gh|secrets)", agent)
 	}
 }
 

@@ -460,7 +460,7 @@ Dev containers (declared under containers: in the remote host.yaml):
   relay container up -H HOST --container NAME [--recreate] [--reprovision]
                                       devcontainer up + relay named volumes; provisions the toolkit
   relay container status|down -H HOST --container NAME
-  relay container auth sync -H HOST --container NAME [--agent claude|codex|ccs|cursor] [--dry-run]
+  relay container auth sync -H HOST --container NAME [--agent claude|codex|ccs|cursor|shell|git|ssh|gh|secrets] [--dry-run]
                                       Copy allowlisted agent credentials into the home volume
   relay session create -H HOST --container NAME [--ephemeral] [--workdir /abs]
                                       [--volume V:/p] [--bind /h:/p] [--gpus 0,1] [--network N] [-- ARGV]
@@ -481,7 +481,7 @@ Host profiles (authoritative on each remote ~/.config/relay/host.yaml):
                                       Clone with the HOST's gh; reports if it has a devcontainer
   relay host container -H HOST --name NAME --workspace-folder DIR
                                       Declare a devcontainer so relay container up can launch it
-  relay host container -H HOST --name NAME --image REF [image flags…]
+  relay host container -H HOST --name NAME --image REF [--agents a,b,…] [image flags…]
                                       Declare an image-backed container (mutually exclusive with --workspace-folder)
   relay host example -H HOST          Print starter host.yaml
   relay host bootstrap -H HOST        Install host-local event service (unix socket; one quiet SSH)
@@ -944,6 +944,17 @@ func (a *App) cmdHost(ctx context.Context, args []string) int {
 				decl.Home, err = need("--home")
 			case "--toolkit":
 				decl.Toolkit, err = need("--toolkit")
+			case "--agents":
+				var raw string
+				raw, err = need("--agents")
+				if err == nil {
+					for _, part := range strings.Split(raw, ",") {
+						part = strings.TrimSpace(part)
+						if part != "" {
+							decl.Agents = append(decl.Agents, part)
+						}
+					}
+				}
 			case "--volume":
 				var v string
 				v, err = need("--volume")
@@ -997,7 +1008,61 @@ func (a *App) cmdHost(ctx context.Context, args []string) int {
 			"ok": true, "host_id": host, "name": name,
 			"workspace_folder": folder, "containers": profile.Containers,
 		}))
-	case "clone":
+	case "agent-volumes":
+		// Sets host-level agent_volumes (toolkit + home + agents recipes)
+		// inherited by every container that does not opt out.
+		if host == "" {
+			return a.fail(fmt.Errorf("-H HOST required"))
+		}
+		decl := core.AgentVolumesDecl{}
+		for i := 0; i < len(rest); i++ {
+			need := func(flag string) (string, error) {
+				if i+1 >= len(rest) {
+					return "", fmt.Errorf("%s requires a value", flag)
+				}
+				i++
+				return rest[i], nil
+			}
+			var err error
+			switch rest[i] {
+			case "--toolkit":
+				decl.Toolkit, err = need("--toolkit")
+			case "--home":
+				decl.Home, err = need("--home")
+			case "--agents":
+				var raw string
+				raw, err = need("--agents")
+				if err == nil {
+					for _, part := range strings.Split(raw, ",") {
+						part = strings.TrimSpace(part)
+						if part != "" {
+							decl.Agents = append(decl.Agents, part)
+						}
+					}
+				}
+			default:
+				return a.fail(rejectUnknownFlag(rest[i]))
+			}
+			if err != nil {
+				return a.fail(err)
+			}
+		}
+		if decl.Toolkit == "" || decl.Home == "" {
+			return a.fail(fmt.Errorf("usage: relay host agent-volumes -H HOST --toolkit VOL:/target --home VOL:/target [--agents a,b,…]"))
+		}
+		t, err := a.tf(host)
+		if err != nil {
+			return a.fail(err)
+		}
+		profile, err := a.Profiles.SetAgentVolumes(ctx, t, host, decl)
+		if err != nil {
+			return a.fail(err)
+		}
+		a.JSON = true
+		return a.errOut(a.out(map[string]any{
+			"ok": true, "host_id": host, "agent_volumes": profile.AgentVolumes,
+		}))
+		case "clone":
 		// Clones with the HOST's gh, so the host's credentials apply and no
 		// token from this machine is forwarded to a shared box.
 		if host == "" {
@@ -2415,7 +2480,7 @@ func (a *App) cmdContainer(ctx context.Context, args []string) int {
 }
 
 func (a *App) cmdContainerAuth(ctx context.Context, args []string) int {
-	usage := "usage: relay container auth sync -H HOST --container NAME [--agent claude|codex|ccs|cursor] [--dry-run]"
+	usage := "usage: relay container auth sync -H HOST --container NAME [--agent claude|codex|ccs|cursor|shell|git|ssh|gh|secrets] [--dry-run]"
 	if len(args) == 0 {
 		return a.fail(fmt.Errorf("%s", usage))
 	}

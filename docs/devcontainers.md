@@ -142,7 +142,7 @@ relay container status -H hamburg --container oqb   # per-agent binary + auth
 Only these host paths are copied into the home volume (via a throwaway
 container; each path is mounted individually, never the whole tree):
 
-| Agent | Host path | Notes |
+| Agent / group | Host path | Notes |
 |---|---|---|
 | claude | `~/.claude/.credentials.json` | required when syncing claude |
 | claude | `~/.claude.json` | optional |
@@ -151,11 +151,21 @@ container; each path is mounted individually, never the whole tree):
 | ccs | `~/.ccs/` | optional directory copy of instances |
 | cursor | `~/.cursor/auth.json`, `argv.json`, `cli-config.json` | optional |
 | cursor | `~/.config/cursor/auth.json`, `prompts/` | optional |
+| shell | `~/.zshrc`, `~/.zprofile`, `~/.zshenv` | optional |
+| shell | `~/.oh-my-zsh/`, `~/.zprezto/` | optional directory copy (large) |
+| git | `~/.gitconfig`, `~/.gitignore_global`, `~/.config/git/*` | optional; image already has `git` |
+| ssh | `~/.ssh/config`, `id_ed25519`, `id_ed25519_dostos_mesh`, `id_rsa` (+ `.pub`) | optional; named keys only |
+| gh | `~/.config/gh/hosts.yml` | optional |
+| secrets | `~/.config/openrouter/key`, `~/.config/sops/age/keys.txt` | optional file-based secrets |
+
+Narrow with `--agent shell|git|ssh|gh|secrets|claude|…`. Default (no `--agent`)
+copies every allowlisted path that exists on the host.
 
 **Not copied (security):** host hooks, plugins, MCP config, `settings.json`,
-or any other file under `~/.claude/` besides `.credentials.json`. Binding the
-host's `~/.claude` would drag those into a container whose toolchain cannot run
-them — that is why relay never bind-mounts it.
+or any other file under `~/.claude/` besides `.credentials.json`. The whole
+`~/.ssh` directory is never mounted — only the named key files above. The Mac
+keychain is never read. Binding the host's `~/.claude` would drag hooks into a
+container whose toolchain cannot run them — that is why relay never bind-mounts it.
 
 Interactive login still works when a vendor has no copyable file yet:
 
@@ -166,6 +176,45 @@ relay session send <id> -- "claude /login"
 
 The credential lands in the home volume and every later container mounting it is
 already logged in.
+
+## forge-default (Forge workspace drops)
+
+Forge drops a project onto a host as an **image-backed** container named
+`forge-default` (not a per-repo `.devcontainer`). The image is
+`mcr.microsoft.com/devcontainers/javascript-node:20` by default; the project
+checkout is bind-mounted at `/workspaces/<project>`.
+
+Declare host-level agent volumes once per host so every container (including
+`forge-default`) gets the toolkit + home volumes and the agent install recipes:
+
+```bash
+relay host agent-volumes -H madrid \
+  --toolkit relay-toolkit:/relay/toolkit \
+  --home relay-home:/relay/home \
+  --agents claude,codex,ccs,cursor-agent
+
+# Ensure forge-default is declared (Forge also does this on first drop):
+relay host container -H madrid --name forge-default \
+  --image mcr.microsoft.com/devcontainers/javascript-node:20 \
+  --toolkit relay-toolkit:/relay/toolkit \
+  --home relay-home:/relay/home \
+  --agents claude,codex,ccs,cursor-agent \
+  --default-cwd /workspaces
+```
+
+Bring it up and open a session the way Forge does:
+
+```bash
+relay container up -H madrid --container forge-default
+relay container auth sync -H madrid --container forge-default   # see allowlist below
+relay --json session create -H madrid --container forge-default --ephemeral \
+  --bind ~/dev/dostos-workspace:/workspaces/dostos-workspace \
+  --workdir /workspaces/dostos-workspace --name dostos-workspace -- claude
+```
+
+Auth sync copies from the **target host's** home (madrid, hamburg, …), not
+from the Mac hub. Keep host dotfiles/keys in sync with the Mac yourself
+(dotfiles repo, `gh auth`, etc.). Nothing is read from the Mac keychain.
 
 ## Image-backed containers: one instance per session
 

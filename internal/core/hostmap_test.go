@@ -288,3 +288,44 @@ func TestParseCloneResult(t *testing.T) {
 		t.Error("expected an error when the marker line is absent")
 	}
 }
+
+func TestUpsertAgentVolumes(t *testing.T) {
+	in := []byte("host_id: madrid\ncontainers: []\n")
+	out, err := UpsertAgentVolumes(in, AgentVolumesDecl{
+		Toolkit: "relay-toolkit:/relay/toolkit",
+		Home:    "relay-home:/relay/home",
+		Agents:  []string{"claude", "codex"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := ParseHostProfileYAML(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.AgentVolumes == nil || p.AgentVolumes.Toolkit == nil || p.AgentVolumes.Home == nil {
+		t.Fatalf("missing agent_volumes: %+v", p.AgentVolumes)
+	}
+	if p.AgentVolumes.Toolkit.Volume != "relay-toolkit" || len(p.AgentVolumes.Toolkit.Agents) != 2 {
+		t.Fatalf("toolkit: %+v", p.AgentVolumes.Toolkit)
+	}
+	// Second write replaces agents rather than duplicating the key.
+	out2, err := UpsertAgentVolumes(out, AgentVolumesDecl{
+		Toolkit: "relay-toolkit:/relay/toolkit",
+		Home:    "relay-home:/relay/home",
+		Agents:  DefaultForgeAgents(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(out2), "agent_volumes:") != 1 {
+		t.Fatalf("duplicated agent_volumes:\n%s", out2)
+	}
+	p2, err := ParseHostProfileYAML(out2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p2.AgentVolumes.Toolkit.Agents) != 4 {
+		t.Fatalf("agents not replaced: %+v", p2.AgentVolumes.Toolkit.Agents)
+	}
+}
