@@ -58,10 +58,12 @@ func ContainerExec(runtime string, ref ContainerRef, inner string, tty bool) (st
 		if err != nil {
 			return "", err
 		}
+		// mkdir -p so a declared default_cwd (e.g. /workspaces) does not
+		// fail every exec when the Forge --bind was omitted.
 		if tty {
-			script = fmt.Sprintf("cd %s; exec %s", cd, inner)
+			script = fmt.Sprintf("mkdir -p %s && cd %s; exec %s", cd, cd, inner)
 		} else {
-			script = fmt.Sprintf("cd %s && %s", cd, inner)
+			script = fmt.Sprintf("mkdir -p %s && cd %s && %s", cd, cd, inner)
 		}
 	} else if tty {
 		script = "exec " + inner
