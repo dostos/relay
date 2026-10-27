@@ -410,10 +410,12 @@ func AgentStatusProbeCommand(c *ContainerSpec, ref ContainerRef) (string, error)
 		case "codex":
 			cred = "$HOME/.codex/auth.json"
 		case "ccs":
-			cred = "$HOME/.ccs"
+			cred = "$HOME/.ccs/config.yaml"
 		case "cursor-agent", "cursor":
 			bin = "cursor-agent"
 			cred = "$HOME/.cursor/auth.json"
+		case "gh":
+			cred = "$HOME/.config/gh/hosts.yml"
 		}
 		fmt.Fprintf(&body,
 			`bin=$(command -v %s 2>/dev/null); ver=""; [ -n "$bin" ] && ver=$(%s --version 2>/dev/null | head -n1); auth=no; `,
