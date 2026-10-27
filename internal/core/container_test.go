@@ -13,7 +13,7 @@ func TestContainerExecTTY(t *testing.T) {
 	}
 	for _, want := range []string{
 		"docker exec -it", "-u '1005'", "-e 'HOME=/home/jingyulee'",
-		"'beholder-run'", "bash -ilc", "exec claude",
+		"'beholder-run'", "bash -ilc", "mkdir -p", "exec claude",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q in %q", want, got)
@@ -32,7 +32,7 @@ func TestContainerExecNonTTY(t *testing.T) {
 	if !strings.Contains(got, "bash -lc") || strings.Contains(got, "bash -ilc") {
 		t.Fatalf("non-tty should use login (non-interactive) shell: %q", got)
 	}
-	if !strings.Contains(got, "/w") || !strings.Contains(got, "&& ls -la") {
+	if !strings.Contains(got, "mkdir -p") || !strings.Contains(got, "/w") || !strings.Contains(got, "&& ls -la") {
 		t.Fatalf("cwd/join wrong: %q", got)
 	}
 }

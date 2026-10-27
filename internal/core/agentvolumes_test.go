@@ -6,7 +6,7 @@ import (
 )
 
 func TestComposeAgentRecipesKnownAgents(t *testing.T) {
-	got, err := ComposeAgentRecipes([]string{"claude", "codex", "ccs", "cursor-agent"}, "/relay/toolkit")
+	got, err := ComposeAgentRecipes([]string{"claude", "codex", "ccs", "cursor-agent", "gh"}, "/relay/toolkit")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -14,11 +14,14 @@ func TestComposeAgentRecipesKnownAgents(t *testing.T) {
 		"RELAY_TOOLKIT='/relay/toolkit'",
 		"@anthropic-ai/claude-code",
 		"@openai/codex",
+		"@kaitranntt/ccs",
 		"cursor.com/install",
 		"ln -sfn",
 		"cursor-agent",
 		"# recipe:claude",
 		"# recipe:ccs",
+		"# recipe:gh",
+		"cli/cli/releases",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
@@ -100,7 +103,7 @@ func TestAuthSyncAllowlistExcludesHooksAndPlugins(t *testing.T) {
 	for _, want := range []string{
 		".claude/.credentials.json", ".claude.json",
 		".codex/auth.json", ".codex/config.toml",
-		".ccs", ".cursor/auth.json", ".config/cursor/auth.json",
+		".ccs/config.yaml", ".ccs/instances", ".cursor/auth.json", ".config/cursor/auth.json",
 		".zshrc", ".gitconfig", ".ssh/id_ed25519", ".config/gh/hosts.yml",
 	} {
 		if !strings.Contains(joined, want) {
@@ -154,8 +157,17 @@ func TestAuthSyncCommandNeverBindMountsDotClaude(t *testing.T) {
 	if strings.Contains(cmd, "$HOME/.claude:") || strings.Contains(cmd, "~/.claude:") {
 		t.Fatalf("must not bind-mount the whole ~/.claude tree:\n%s", cmd)
 	}
+	if strings.Contains(cmd, "/auth-src") {
+		t.Fatalf("must not use per-path bind mounts:\n%s", cmd)
+	}
 	if !strings.Contains(cmd, ".claude/.credentials.json") {
 		t.Fatalf("must copy the credentials file:\n%s", cmd)
+	}
+	if !strings.Contains(cmd, "docker cp") {
+		t.Fatalf("must use docker cp into one helper:\n%s", cmd)
+	}
+	if strings.Count(cmd, "docker run") != 1 {
+		t.Fatalf("want exactly one helper docker run, got %d:\n%s", strings.Count(cmd, "docker run"), cmd)
 	}
 	if !strings.Contains(cmd, "bash -ilc") {
 		t.Fatalf("must run under login shell:\n%s", cmd)
@@ -166,6 +178,28 @@ func TestAuthSyncCommandNeverBindMountsDotClaude(t *testing.T) {
 	}
 	if !strings.Contains(dry, "WOULD_COPY") || strings.Contains(dry, "docker run") {
 		t.Fatalf("dry-run must not run containers:\n%s", dry)
+	}
+}
+
+func TestAuthSyncCommandBatchesAllFiles(t *testing.T) {
+	files, err := AuthSyncFilesFor("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd, err := AuthSyncCommand("docker", "relay-home", "/relay/home", "", files, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(cmd, "docker run") != 1 {
+		t.Fatalf("full allowlist must still use one helper run, got %d", strings.Count(cmd, "docker run"))
+	}
+	if !strings.Contains(cmd, ".ccs/instances") {
+		t.Fatalf("ccs instances dir missing:\n%s", cmd)
+	}
+	for _, junk := range []string{".ccs/backups", ".ccs/shared"} {
+		if strings.Contains(cmd, junk) {
+			t.Fatalf("must not sync %s:\n%s", junk, cmd)
+		}
 	}
 }
 
@@ -208,7 +242,7 @@ agent_volumes:
   toolkit:
     volume: relay-toolkit
     target: /relay/toolkit
-    agents: [claude, codex, ccs, cursor-agent]
+    agents: [claude, codex, ccs, cursor-agent, gh]
   home:
     volume: relay-home
     target: /relay/home
@@ -223,7 +257,7 @@ containers:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.AgentVolumes == nil || p.AgentVolumes.Toolkit == nil || len(p.AgentVolumes.Toolkit.Agents) != 4 {
+	if p.AgentVolumes == nil || p.AgentVolumes.Toolkit == nil || len(p.AgentVolumes.Toolkit.Agents) != 5 {
 		t.Fatalf("agent_volumes not parsed: %+v", p.AgentVolumes)
 	}
 	hammer, err := p.ResolveContainer("hammer")
@@ -251,7 +285,7 @@ func TestApplyAgentVolumesInheritsAgentsOntoExistingToolkit(t *testing.T) {
 		Home:    &HomeSpec{Volume: "relay-home", Target: "/relay/home"},
 	}
 	got := p.ApplyAgentVolumes(c)
-	if got.Toolkit == nil || len(got.Toolkit.Agents) != 4 {
+	if got.Toolkit == nil || len(got.Toolkit.Agents) != 5 {
 		t.Fatalf("expected inherited agents, got %+v", got.Toolkit)
 	}
 	if strings.TrimSpace(got.Toolkit.Provision) == "" {

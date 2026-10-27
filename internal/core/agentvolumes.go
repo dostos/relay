@@ -63,7 +63,13 @@ func AuthSyncAllowlist() []AuthSyncFile {
 		{Agent: "claude", HostRel: ".claude.json", VolumeRel: ".claude.json", Optional: true},
 		{Agent: "codex", HostRel: ".codex/auth.json", VolumeRel: ".codex/auth.json"},
 		{Agent: "codex", HostRel: ".codex/config.toml", VolumeRel: ".codex/config.toml", Optional: true},
-		{Agent: "ccs", HostRel: ".ccs", VolumeRel: ".ccs", DirCopy: true, Optional: true},
+		// CCS config + instances only — never ~/.ccs/backups or ~/.ccs/shared
+		// (multi-GB caches on fleet hosts).
+		{Agent: "ccs", HostRel: ".ccs/config.yaml", VolumeRel: ".ccs/config.yaml", Optional: true},
+		{Agent: "ccs", HostRel: ".ccs/.session-secret", VolumeRel: ".ccs/.session-secret", Optional: true},
+		{Agent: "ccs", HostRel: ".ccs/codex-profiles.yaml", VolumeRel: ".ccs/codex-profiles.yaml", Optional: true},
+		{Agent: "ccs", HostRel: ".ccs/codex.settings.json", VolumeRel: ".ccs/codex.settings.json", Optional: true},
+		{Agent: "ccs", HostRel: ".ccs/instances", VolumeRel: ".ccs/instances", DirCopy: true, Optional: true},
 		{Agent: "cursor", HostRel: ".cursor/argv.json", VolumeRel: ".cursor/argv.json", Optional: true},
 		{Agent: "cursor", HostRel: ".cursor/cli-config.json", VolumeRel: ".cursor/cli-config.json", Optional: true},
 		{Agent: "cursor", HostRel: ".cursor/auth.json", VolumeRel: ".cursor/auth.json", Optional: true},
@@ -110,7 +116,7 @@ func AuthSyncAllowlist() []AuthSyncFile {
 // agent_volumes should provision so sessions inside the container see the
 // same CLIs the host has (installed into the toolkit volume, libc-matched).
 func DefaultForgeAgents() []string {
-	return []string{"claude", "codex", "ccs", "cursor-agent"}
+	return []string{"claude", "codex", "ccs", "cursor-agent", "gh"}
 }
 
 // BuiltInAgentRecipes are the provision snippets selectable by name under
@@ -119,10 +125,22 @@ func BuiltInAgentRecipes() map[string]string {
 	return map[string]string{
 		"claude": `npm i -g --prefix "$RELAY_TOOLKIT" @anthropic-ai/claude-code`,
 		"codex":  `npm i -g --prefix "$RELAY_TOOLKIT" @openai/codex`,
-		"ccs":    `npm i -g --prefix "$RELAY_TOOLKIT" @agentclientprotocol/ccs 2>/dev/null || npm i -g --prefix "$RELAY_TOOLKIT" ccs`,
+		// Real package is @kaitranntt/ccs (Claude Codex Switch). The old
+		// @agentclientprotocol/ccs 404s and bare "ccs" is an unrelated stub.
+		"ccs": `npm i -g --prefix "$RELAY_TOOLKIT" @kaitranntt/ccs`,
 		"cursor-agent": `HOME="$RELAY_TOOLKIT" bash -c "curl -fsS https://cursor.com/install | bash"
 mkdir -p "$RELAY_TOOLKIT/bin"
 ln -sfn "$RELAY_TOOLKIT/.local/bin/cursor-agent" "$RELAY_TOOLKIT/bin/cursor-agent"`,
+		"gh": `# GitHub CLI into the toolkit bin (hosts.yml still comes from auth sync).
+arch=$(uname -m); case "$arch" in x86_64|amd64) arch=amd64;; aarch64|arm64) arch=arm64;; *) echo "gh: unsupported arch $arch"; exit 1;; esac
+ver=$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest | sed -n 's/.*"tag_name": "v\([^"]*\)".*/\1/p' | head -1)
+test -n "$ver" || { echo "gh: could not resolve latest version"; exit 1; }
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+curl -fsSL "https://github.com/cli/cli/releases/download/v${ver}/gh_${ver}_linux_${arch}.tar.gz" | tar -xz -C "$tmp"
+mkdir -p "$RELAY_TOOLKIT/bin"
+cp "$tmp/gh_${ver}_linux_${arch}/bin/gh" "$RELAY_TOOLKIT/bin/gh"
+chmod +x "$RELAY_TOOLKIT/bin/gh"`,
 	}
 }
 
@@ -248,8 +266,9 @@ func AuthSyncFilesFor(agent string) ([]AuthSyncFile, error) {
 }
 
 // AuthSyncCommand builds a host-side script that copies allowlisted credential
-// files from the host home into the named home volume via a throwaway
-// container. It never bind-mounts ~/.claude as a whole.
+// files from the host home into the named home volume via one short-lived
+// helper container and `docker cp`. One container for the whole allowlist
+// avoids N× image starts (and never bind-mounts ~/.claude as a whole).
 func AuthSyncCommand(runtime, homeVolume, homeTarget, user string, files []AuthSyncFile, dryRun bool) (string, error) {
 	if homeVolume == "" || homeTarget == "" {
 		return "", fmt.Errorf("home volume and target required")
@@ -263,34 +282,42 @@ func AuthSyncCommand(runtime, homeVolume, homeTarget, user string, files []AuthS
 	fmt.Fprintf(&b, "HV=%s; HT=%s; ", shellquote.Quote(homeVolume), shellquote.Quote(homeTarget))
 	if dryRun {
 		b.WriteString("echo DRY_RUN; ")
+		for _, f := range files {
+			srcQ := shellquote.Quote(f.HostRel)
+			fmt.Fprintf(&b, "if [ -e \"$HOME\"/%s ]; then echo WOULD_COPY %s; else ", srcQ, srcQ)
+			if f.Optional {
+				fmt.Fprintf(&b, "echo SKIP_MISSING %s; ", srcQ)
+			} else {
+				fmt.Fprintf(&b, "echo MISSING %s; exit 1; ", srcQ)
+			}
+			b.WriteString("fi; ")
+		}
+		b.WriteString("echo AUTH_SYNC_OK")
+		return HostLoginShell(b.String()), nil
 	}
+
+	// One helper; docker cp each path. Paths after the colon are allowlist-
+	// constructed absolutes (no host expansion), so they stay unquoted.
+	fmt.Fprintf(&b, `CID=$(%s run -d -v "$HV:$HT" alpine:3.20 sleep 7200); `, runtime)
+	fmt.Fprintf(&b, `cleanup() { %s rm -f "$CID" >/dev/null 2>&1 || true; }; trap cleanup EXIT; `, runtime)
+
 	for _, f := range files {
 		volPath := homeTarget + "/" + f.VolumeRel
 		srcQ := shellquote.Quote(f.HostRel)
-		fmt.Fprintf(&b, "if [ -e \"$HOME\"/%s ]; then ", srcQ)
-		if dryRun {
-			fmt.Fprintf(&b, "echo WOULD_COPY %s; ", srcQ)
-		} else {
-			// One short-lived container per path keeps the allowlist obvious
-			// and avoids mounting any host tree that might contain hooks/plugins.
-			var inner string
-			if f.DirCopy {
-				inner = fmt.Sprintf("mkdir -p %s && rm -rf %s && mkdir -p %s && cp -a /auth-src/. %s/",
-					shellquote.Quote(volPath), shellquote.Quote(volPath),
-					shellquote.Quote(volPath), shellquote.Quote(volPath))
-			} else {
-				parent := homeTarget
-				if i := strings.LastIndex(volPath, "/"); i >= 0 {
-					parent = volPath[:i]
-				}
-				inner = fmt.Sprintf("mkdir -p %s && cp -a /auth-src %s",
-					shellquote.Quote(parent), shellquote.Quote(volPath))
-			}
-			mountSrc := `"$HOME"/` + srcQ
-			fmt.Fprintf(&b,
-				`%s run --rm -v "$HV:$HT" -v %s:/auth-src:ro alpine:3.20 sh -c %s >/dev/null; echo COPIED %s; `,
-				runtime, mountSrc, shellquote.Quote(inner), srcQ)
+		parent := homeTarget
+		if i := strings.LastIndex(volPath, "/"); i >= 0 {
+			parent = volPath[:i]
 		}
+		fmt.Fprintf(&b, "if [ -e \"$HOME\"/%s ]; then ", srcQ)
+		fmt.Fprintf(&b, `%s exec "$CID" mkdir -p %s >/dev/null; `, runtime, shellquote.Quote(parent))
+		if f.DirCopy {
+			fmt.Fprintf(&b, `%s exec "$CID" sh -c %s >/dev/null; `, runtime,
+				shellquote.Quote(fmt.Sprintf("rm -rf %s && mkdir -p %s", shellquote.Quote(volPath), shellquote.Quote(volPath))))
+			fmt.Fprintf(&b, `%s cp "$HOME"/%s/. "$CID":%s/ >/dev/null; `, runtime, srcQ, volPath)
+		} else {
+			fmt.Fprintf(&b, `%s cp "$HOME"/%s "$CID":%s >/dev/null; `, runtime, srcQ, volPath)
+		}
+		fmt.Fprintf(&b, "echo COPIED %s; ", srcQ)
 		fmt.Fprintf(&b, "else ")
 		if f.Optional {
 			fmt.Fprintf(&b, "echo SKIP_MISSING %s; ", srcQ)
@@ -299,18 +326,15 @@ func AuthSyncCommand(runtime, homeVolume, homeTarget, user string, files []AuthS
 		}
 		b.WriteString("fi; ")
 	}
-	if !dryRun && user != "" && user != "root" && user != "0" {
-		// alpine has no fleet users by name; numeric uid can be applied now.
-		// A named user is deferred to ContainerPrepare on the next `up`.
+	if user != "" && user != "root" && user != "0" {
 		var uid int
 		if _, err := fmt.Sscanf(user, "%d", &uid); err == nil {
-			inner := fmt.Sprintf("chown -R %d %s", uid, shellquote.Quote(homeTarget))
-			fmt.Fprintf(&b, `%s run --rm -v "$HV:$HT" alpine:3.20 sh -c %s; `, runtime, shellquote.Quote(inner))
+			fmt.Fprintf(&b, `%s exec "$CID" chown -R %d %s; `, runtime, uid, shellquote.Quote(homeTarget))
 		} else {
 			b.WriteString("echo chown-deferred; ")
 		}
 	}
-	b.WriteString("echo AUTH_SYNC_OK")
+	b.WriteString("cleanup; trap - EXIT; echo AUTH_SYNC_OK")
 	return HostLoginShell(b.String()), nil
 }
 

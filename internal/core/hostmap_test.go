@@ -325,7 +325,7 @@ func TestUpsertAgentVolumes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(p2.AgentVolumes.Toolkit.Agents) != 4 {
+	if len(p2.AgentVolumes.Toolkit.Agents) != 5 {
 		t.Fatalf("agents not replaced: %+v", p2.AgentVolumes.Toolkit.Agents)
 	}
 }

@@ -40,7 +40,7 @@ agent_volumes:
   toolkit:
     volume: relay-toolkit
     target: /relay/toolkit        # bin_dir defaults to <target>/bin
-    agents: [claude, codex, ccs, cursor-agent]   # built-in install recipes
+    agents: [claude, codex, ccs, cursor-agent, gh]   # built-in install recipes
     # provision: |                # optional raw shell escape hatch (wins over agents:)
   home:
     volume: relay-home
@@ -139,8 +139,9 @@ relay container status -H hamburg --container oqb   # per-agent binary + auth
 
 ### Auth-sync allowlist
 
-Only these host paths are copied into the home volume (via a throwaway
-container; each path is mounted individually, never the whole tree):
+Only these host paths are copied into the home volume via **one** short-lived
+helper container and `docker cp` (never N× `docker run`, never a bind of a
+whole credential tree):
 
 | Agent / group | Host path | Notes |
 |---|---|---|
@@ -148,14 +149,14 @@ container; each path is mounted individually, never the whole tree):
 | claude | `~/.claude.json` | optional |
 | codex | `~/.codex/auth.json` | required when syncing codex |
 | codex | `~/.codex/config.toml` | optional |
-| ccs | `~/.ccs/` | optional directory copy of instances |
+| ccs | `~/.ccs/config.yaml`, `.session-secret`, `codex-*.{yaml,json}`, `instances/` | optional; **not** `backups/` or `shared/` (multi-GB) |
 | cursor | `~/.cursor/auth.json`, `argv.json`, `cli-config.json` | optional |
 | cursor | `~/.config/cursor/auth.json`, `prompts/` | optional |
 | shell | `~/.zshrc`, `~/.zprofile`, `~/.zshenv` | optional |
 | shell | `~/.oh-my-zsh/`, `~/.zprezto/` | optional directory copy (large) |
 | git | `~/.gitconfig`, `~/.gitignore_global`, `~/.config/git/*` | optional; image already has `git` |
 | ssh | `~/.ssh/config`, `id_ed25519`, `id_ed25519_dostos_mesh`, `id_rsa` (+ `.pub`) | optional; named keys only |
-| gh | `~/.config/gh/hosts.yml` | optional |
+| gh | `~/.config/gh/hosts.yml` | optional; binary comes from toolkit recipe `gh` |
 | secrets | `~/.config/openrouter/key`, `~/.config/sops/age/keys.txt` | optional file-based secrets |
 
 Narrow with `--agent shell|git|ssh|gh|secrets|claude|…`. Default (no `--agent`)
@@ -163,7 +164,8 @@ copies every allowlisted path that exists on the host.
 
 **Not copied (security):** host hooks, plugins, MCP config, `settings.json`,
 or any other file under `~/.claude/` besides `.credentials.json`. The whole
-`~/.ssh` directory is never mounted — only the named key files above. The Mac
+`~/.ssh` directory is never mounted — only the named key files above. CCS
+`~/.ccs/backups` and `~/.ccs/shared` are skipped (multi-GB caches). The Mac
 keychain is never read. Binding the host's `~/.claude` would drag hooks into a
 container whose toolchain cannot run them — that is why relay never bind-mounts it.
 
@@ -191,14 +193,14 @@ Declare host-level agent volumes once per host so every container (including
 relay host agent-volumes -H madrid \
   --toolkit relay-toolkit:/relay/toolkit \
   --home relay-home:/relay/home \
-  --agents claude,codex,ccs,cursor-agent
+  --agents claude,codex,ccs,cursor-agent,gh
 
 # Ensure forge-default is declared (Forge also does this on first drop):
 relay host container -H madrid --name forge-default \
   --image mcr.microsoft.com/devcontainers/javascript-node:20 \
   --toolkit relay-toolkit:/relay/toolkit \
   --home relay-home:/relay/home \
-  --agents claude,codex,ccs,cursor-agent \
+  --agents claude,codex,ccs,cursor-agent,gh \
   --default-cwd /workspaces
 ```
 
@@ -321,8 +323,18 @@ the home volume:
 |---|---|---|
 | `claude` | npm `@anthropic-ai/claude-code` with `--prefix` | 2.1.197 |
 | `codex` | npm `@openai/codex` with `--prefix` | 0.153.4 |
-| `ccs` | npm `ccs` (or `@agentclientprotocol/ccs`) with `--prefix` | — |
+| `ccs` | npm `@kaitranntt/ccs` with `--prefix` | 8.x |
 | `cursor-agent` | native installer, **hardcoded to `$HOME/.local`** | 2026.09.02 |
+| `gh` | official GitHub CLI linux tarball into `$RELAY_TOOLKIT/bin` | latest |
+
+### relay inside the container (gap)
+
+The `relay` CLI is **not** installed into the toolkit today. Sessions inside
+`forge-default` talk to other sessions through the **hub** (`relay session
+send` from the Mac / host pane), not by invoking `relay` from inside the
+container. Putting a hub binary on PATH would still need a reachability story
+(SSH to other fleet hosts, or a relayd endpoint the container can see); that
+is left as a follow-up rather than a half-wired mount.
 
 `cursor-agent` is the one that needs care: its installer takes no install-dir
 override, so the recipe runs it with `HOME` pointed at the toolkit volume and
